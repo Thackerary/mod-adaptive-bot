@@ -1,0 +1,1258 @@
+/*
+ * Copyright (C) 2016+ AzerothCore <www.azerothcore.org>, released under GNU AGPL v3 license
+ */
+
+#pragma once
+
+#include "ScriptedCreature.h"
+#include "ScriptMgr.h"
+#include "Creature.h"
+#include "Unit.h"
+#include "Player.h"
+#include "Group.h"
+#include "Item.h"
+#include "SpellInfo.h"
+#include "SpellMgr.h"
+#include "ObjectAccessor.h"
+#include "GossipDef.h"
+#include "Log.h"
+#include <cmath>
+#include <algorithm>
+#include <vector>
+#include <unordered_map>
+#include <mutex>
+
+class AdaptiveBotAI : public ScriptedAI
+{
+public:
+    explicit AdaptiveBotAI(Creature* creature) : ScriptedAI(creature) {}
+    
+    virtual ~AdaptiveBotAI()
+    {
+        UnregisterFromMaster();
+    }
+
+    ObjectGuid masterGuid;
+    uint32 followCheckTimer{ 0 };
+    uint32 gcdTimer{ 0 };
+    uint32 levelSyncTimer{ 0 };
+    uint32 energyRegenTimer{ 0 };
+    uint32 manaRegenTimer{ 0 };
+    bool wasInCombat{ false };
+
+    // 缓存指挥官平均装等 (实现战斗算伤绝对 O(1))
+    float cachedMasterItemLevel{ 200.0f };
+
+    // 调试日志总开关 (可在 Gossip 对话菜单中实时切换)
+    bool isDebugLogging{ true };
+
+    // 连击点状态机 (依附目标纯函数架构)
+    uint8 comboPoints{ 0 };
+    ObjectGuid comboTargetGuid;
+
+    // =========================================================================
+    // 角色定位契约
+    // =========================================================================
+    virtual bool IsTankBot() const { return false; }
+    virtual bool IsHealerBot() const { return false; }
+    virtual bool IsRangedBot() const { return false; }
+    virtual bool IsRangedPhysicalBot() const { return false; } // 猎人专修契约 (与法系远程解耦)
+
+    // =========================================================================
+    // 工业级数值平衡乘数契约 (绝对 O(1) 吞吐)
+    // =========================================================================
+    virtual float GetDamageDealtMultiplier() const
+    {
+        if (IsTankBot())
+            return 0.75f;
+
+        uint8 const lvl = me->GetLevel();
+
+        // 1~79 级自强过渡：弥补法系无装备法强 (物理远程由 AP 支撑，不走法伤放大通道)
+        if (lvl < 80)
+        {
+            if (IsRangedBot() && !IsRangedPhysicalBot())
+                return 1.0f + (lvl / 80.0f) * 0.40f;
+            return 1.0f;
+        }
+
+        // 80 级团本专修：法系输出根据指挥官装等（200~284）跨越狂暴秒伤及格线
+        if (IsRangedBot() && !IsRangedPhysicalBot())
+        {
+            float const tierDelta = std::clamp(cachedMasterItemLevel - 200.0f, 0.0f, 84.0f);
+            return 2.0f + (tierDelta / 84.0f) * 1.30f; // 200装等=2.0x, 284装等=3.3x
+        }
+
+        return 1.0f;
+    }
+
+    virtual float GetDamageTakenMultiplier() const
+    {
+        // 坦克随从常驻模拟 50% 装备减伤，普通 DPS/治疗常驻 15% 减伤
+        return IsTankBot() ? 0.50f : 0.85f;
+    }
+
+    virtual float GetHealingReceivedMultiplier() const
+    {
+        // 坦克随从受疗放大，弥补大型副本高血量池下的治疗缺口
+        return IsTankBot() ? 1.30f : 1.0f;
+    }
+
+    // =========================================================================
+    // 同指挥官随从集群总线
+    // =========================================================================
+    static inline std::mutex s_botRegistryMutex;
+    static inline std::unordered_map<ObjectGuid, std::vector<AdaptiveBotAI*>> s_masterBotRegistry;
+
+    void RegisterToMaster(ObjectGuid const& guid)
+    {
+        std::lock_guard<std::mutex> lock(s_botRegistryMutex);
+        auto& list = s_masterBotRegistry[guid];
+        if (std::find(list.begin(), list.end(), this) == list.end())
+            list.push_back(this);
+    }
+
+    void UnregisterFromMaster()
+    {
+        if (!masterGuid.IsEmpty())
+        {
+            std::lock_guard<std::mutex> lock(s_botRegistryMutex);
+            auto it = s_masterBotRegistry.find(masterGuid);
+            if (it != s_masterBotRegistry.end())
+            {
+                auto& list = it->second;
+                list.erase(std::remove(list.begin(), list.end(), this), list.end());
+                if (list.empty())
+                    s_masterBotRegistry.erase(it);
+            }
+        }
+    }
+
+    Unit* GetGroupTank()
+    {
+        Player* master = GetMaster();
+        if (!master)
+            return nullptr;
+
+        {
+            std::lock_guard<std::mutex> lock(s_botRegistryMutex);
+            auto it = s_masterBotRegistry.find(master->GetGUID());
+            if (it != s_masterBotRegistry.end())
+            {
+                for (AdaptiveBotAI* allyBot : it->second)
+                {
+                    if (allyBot && allyBot->me && allyBot->me->IsInWorld() && allyBot->me->IsAlive() && allyBot->me->GetMap() == me->GetMap() && allyBot->IsTankBot())
+                        return allyBot->me;
+                }
+            }
+        }
+
+        bool const isMasterTank = master->HasAura(71)     // 战士: 防御姿态
+                               || master->HasAura(5487)   // 德鲁伊: 熊形态
+                               || master->HasAura(9634)   // 德鲁伊: 巨熊形态
+                               || master->HasAura(25780)  // 圣骑士: 正义之怒
+                               || master->HasAura(48263); // 死亡骑士: 冰霜灵气
+
+        return isMasterTank ? master : nullptr;
+    }
+
+    void Reset() override
+    {
+        ScriptedAI::Reset();
+        followCheckTimer = 0;
+        gcdTimer = 0;
+        levelSyncTimer = 0;
+        energyRegenTimer = 0;
+        manaRegenTimer = 0;
+        wasInCombat = false;
+        ResetComboPoints();
+        me->SetNpcFlag(UNIT_NPC_FLAG_GOSSIP);
+
+        SyncLevelWithMaster();
+        ApplyAdaptiveBalanceStats();
+
+        if (Player* master = GetMaster())
+        {
+            me->SetFaction(master->GetFaction());
+            me->SetPhaseMask(master->GetPhaseMask(), true);
+        }
+    }
+
+    void EnterCombat(Unit* who) override
+    {
+        me->GetMotionMaster()->Clear();
+        wasInCombat = true;
+
+        if (isDebugLogging)
+            LOG_INFO("scripts", "[Bot: {}] 进入战斗！首要目标: [{}]", me->GetName(), who ? who->GetName() : "未知");
+    }
+
+    void EnterEvadeMode(EvadeReason /*why*/) override
+    {
+        me->CombatStop(true);
+
+        if (isDebugLogging)
+            LOG_INFO("scripts", "[Bot: {}] 脱离战斗，进入规避/待命状态。", me->GetName());
+
+        if (Player* master = GetMaster())
+        {
+            me->GetMotionMaster()->Clear();
+            if (master->IsAlive())
+            {
+                if (me->GetMap() == master->GetMap())
+                    me->GetMotionMaster()->MoveFollow(master, 3.0f, me->GetAngle(master));
+                else
+                    me->GetMotionMaster()->MoveIdle();
+            }
+            else
+            {
+                me->GetMotionMaster()->MoveIdle();
+            }
+        }
+        else
+        {
+            ScriptedAI::EnterEvadeMode();
+        }
+    }
+
+    void SetMaster(Player* player)
+    {
+        if (player)
+        {
+            if (masterGuid != player->GetGUID())
+            {
+                UnregisterFromMaster();
+                masterGuid = player->GetGUID();
+                RegisterToMaster(masterGuid);
+            }
+            me->SetFaction(player->GetFaction());
+            me->SetPhaseMask(player->GetPhaseMask(), true);
+            SyncLevelWithMaster();
+            ApplyAdaptiveBalanceStats();
+
+            if (isDebugLogging)
+                LOG_INFO("scripts", "[Bot: {}] 成功绑定指挥官 [{}]。", me->GetName(), player->GetName());
+        }
+    }
+
+    Player* GetMaster() const
+    {
+        return ObjectAccessor::GetPlayer(*me, masterGuid);
+    }
+
+    void AttackStart(Unit* victim) override
+    {
+        if (!victim)
+            return;
+
+        if (IsRangedBot())
+        {
+            if (me->Attack(victim, false))
+                me->GetMotionMaster()->Clear();
+        }
+        else
+        {
+            me->Attack(victim, true);
+        }
+    }
+
+    // =========================================================================
+    // 最终伤害与受疗管线拦截
+    // =========================================================================
+    void DamageDealt(Unit* doneTo, uint32& damage, DamageEffectType damagetype) override
+    {
+        damage = static_cast<uint32>(damage * GetDamageDealtMultiplier());
+        ScriptedAI::DamageDealt(doneTo, damage, damagetype);
+    }
+
+    void DamageTaken(Unit* attacker, uint32& damage, DamageEffectType damagetype, SpellSchoolMask damageSchoolMask) override
+    {
+        damage = static_cast<uint32>(damage * GetDamageTakenMultiplier());
+        ScriptedAI::DamageTaken(attacker, damage, damagetype, damageSchoolMask);
+    }
+
+    void HealReceived(Unit* done_by, uint32& addhealth) override
+    {
+        addhealth = static_cast<uint32>(addhealth * GetHealingReceivedMultiplier());
+        ScriptedAI::HealReceived(done_by, addhealth);
+    }
+
+    void SpellHit(Unit* caster, SpellInfo const* spell) override
+    {
+        ScriptedAI::SpellHit(caster, spell);
+        OnSpellHitTaken(caster, spell);
+    }
+
+    void JustDied(Unit* killer) override
+    {
+        ScriptedAI::JustDied(killer);
+        if (isDebugLogging)
+            LOG_INFO("scripts", "[Bot: {}] 阵亡！致命伤害来源: [{}]", me->GetName(), killer ? killer->GetName() : "未知/环境伤害");
+
+        OnBotDied(killer);
+    }
+
+    void KilledUnit(Unit* victim) override
+    {
+        ScriptedAI::KilledUnit(victim);
+        if (isDebugLogging)
+            LOG_INFO("scripts", "[Bot: {}] 击杀目标: [{}]", me->GetName(), victim ? victim->GetName() : "未知");
+
+        OnKilledUnit(victim);
+    }
+
+    void JustEngagedWith(Unit* who) override
+    {
+        ScriptedAI::JustEngagedWith(who);
+        OnEngaged(who);
+    }
+
+    virtual void OnSpellHitTaken(Unit* /*caster*/, SpellInfo const* /*spell*/) {}
+    virtual void OnBotDied(Unit* /*killer*/) {}
+    virtual void OnKilledUnit(Unit* /*victim*/) {}
+    virtual void OnEngaged(Unit* /*who*/) {}
+
+    virtual void OnCombatEnded(bool victory)
+    {
+        if (isDebugLogging)
+            LOG_INFO("scripts", "[Bot: {}] 战斗结算完成: {}", me->GetName(), victory ? "击杀胜利" : "团灭重置");
+    }
+
+    // =========================================================================
+    // 装备装等异步缓存计算器 (仅在脱战同步时调用)
+    // =========================================================================
+    static float CalculateMasterAverageItemLevel(Player* player)
+    {
+        if (!player)
+            return 200.0f;
+
+        uint32 totalIlvl = 0;
+        uint32 validCount = 0;
+
+        for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
+        {
+            if (slot == EQUIPMENT_SLOT_TABARD || slot == EQUIPMENT_SLOT_BODY)
+                continue;
+
+            if (Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+            {
+                if (ItemTemplate const* proto = item->GetTemplate())
+                {
+                    totalIlvl += proto->ItemLevel;
+                    ++validCount;
+                }
+            }
+        }
+
+        return (validCount > 0) ? (static_cast<float>(totalIlvl) / validCount) : 200.0f;
+    }
+
+    // =========================================================================
+    // 工业级全专精双轨制属性自适应引擎 (攻/防/疗/血量全面闭环)
+    // =========================================================================
+    void ApplyAdaptiveBalanceStats()
+    {
+        uint8 const level = me->GetLevel();
+
+        // ---------------------------------------------------------------------
+        // 轨道 A: 1 ~ 79 级（自强练级与普通地下城平滑过渡）
+        // ---------------------------------------------------------------------
+        if (level < 80)
+        {
+            uint32 const baseArmor = level * (IsTankBot() ? 120 : 40);
+            me->SetArmor(baseArmor);
+
+            // 1~79 级治疗专精：平滑注入系统治疗增效光环，弥补零装备法强
+            if (IsHealerBot())
+            {
+                int32 const healPercent = static_cast<int32>((level / 80.0f) * 60.0f);
+                if (healPercent > 0)
+                {
+                    me->RemoveAurasDueToSpell(23569);
+                    me->CastCustomSpell(me, 23569, &healPercent, nullptr, nullptr, true);
+                }
+            }
+            else
+            {
+                me->RemoveAurasDueToSpell(23569);
+            }
+            return;
+        }
+
+        // ---------------------------------------------------------------------
+        // 轨道 B: 80 级团本与英雄本专修（锚定指挥官装等）
+        // ---------------------------------------------------------------------
+        float const tierDelta = std::clamp(cachedMasterItemLevel - 200.0f, 0.0f, 84.0f);
+
+        // 1. 坦克生存有效生命 (EHP) 与护甲免伤线 (65% ~ 75% 免伤)
+        if (IsTankBot())
+        {
+            uint32 const targetMaxHealth = static_cast<uint32>(34000 + tierDelta * 220.0f);
+            if (me->GetMaxHealth() != targetMaxHealth)
+            {
+                float const hpPct = me->GetHealthPct();
+                me->SetMaxHealth(targetMaxHealth);
+                me->SetHealth(std::max<uint32>(1, static_cast<uint32>(targetMaxHealth * (hpPct / 100.0f))));
+            }
+
+            uint32 const raidArmor = static_cast<uint32>(26000 + tierDelta * 160.0f);
+            me->SetArmor(raidArmor);
+            me->RemoveAurasDueToSpell(23569);
+        }
+        else
+        {
+            // 2. 非坦随从注入匹配装等的标准血量 (18k~25k)，防止吃团本 AoE 暴毙
+            uint32 const targetMaxHealth = static_cast<uint32>(18000 + tierDelta * 80.0f);
+            if (me->GetMaxHealth() != targetMaxHealth)
+            {
+                float const hpPct = me->GetHealthPct();
+                me->SetMaxHealth(targetMaxHealth);
+                me->SetHealth(std::max<uint32>(1, static_cast<uint32>(targetMaxHealth * (hpPct / 100.0f))));
+            }
+
+            // 3. 治疗专精：注入系统治疗增效光环 (80%~180% 提升)，彻底激活团补吞吐
+            if (IsHealerBot())
+            {
+                int32 const healPercent = static_cast<int32>(80 + (tierDelta / 84.0f) * 100);
+                me->RemoveAurasDueToSpell(23569);
+                me->CastCustomSpell(me, 23569, &healPercent, nullptr, nullptr, true);
+            }
+            else
+            {
+                me->RemoveAurasDueToSpell(23569);
+
+                // 4. 物理输出 (近战 DPS + 猎人)：同步注入近战与远程攻击强度
+                float const raidAP = 3200.0f + tierDelta * 48.0f;
+                me->SetModifierValue(UNIT_MOD_ATTACK_POWER, BASE_VALUE, raidAP);
+                me->SetModifierValue(UNIT_MOD_ATTACK_POWER_RANGED, BASE_VALUE, raidAP);
+                me->UpdateAttackPowerAndDamage();
+            }
+        }
+    }
+
+    // =========================================================================
+    // 基础属性与等级同步引擎
+    // =========================================================================
+    void SyncLevelWithMaster()
+    {
+        Player* master = GetMaster();
+        if (!master)
+            return;
+
+        cachedMasterItemLevel = CalculateMasterAverageItemLevel(master);
+
+        uint8 const masterLevel = master->GetLevel();
+        bool const levelChanged = (me->GetLevel() != masterLevel);
+
+        if (levelChanged)
+        {
+            me->SetLevel(masterLevel);
+            me->UpdateLevelDependentStats();
+            me->SetHealth(me->GetMaxHealth());
+
+            if (me->GetPowerType() == POWER_MANA)
+            {
+                me->SetPower(POWER_MANA, me->GetMaxPower(POWER_MANA));
+            }
+            else if (me->GetPowerType() == POWER_ENERGY)
+            {
+                if (me->GetMaxPower(POWER_ENERGY) == 0)
+                    me->SetMaxPower(POWER_ENERGY, 100);
+                me->SetPower(POWER_ENERGY, me->GetMaxPower(POWER_ENERGY));
+            }
+
+            if (isDebugLogging)
+                LOG_INFO("scripts", "[Bot: {}] 等级已同步至 [{}] 级。", me->GetName(), masterLevel);
+        }
+
+        ApplyAdaptiveBalanceStats();
+
+        if (levelChanged)
+            OnLevelSynced(me->GetLevel());
+    }
+
+    virtual void OnLevelSynced(uint8 /*level*/) {}
+
+    // =========================================================================
+    // 核心开怪进战状态机驱动 (彻底消除远程开怪挂机发呆)
+    // =========================================================================
+    bool TryEngageCombat()
+    {
+        if (me->IsInCombat())
+            return true;
+
+        Unit* target = SelectAssistTarget();
+        if (target && target->IsAlive())
+        {
+            AttackStart(target);
+            me->SetInCombatWith(target);
+            target->SetInCombatWith(me);
+            return true;
+        }
+        return false;
+    }
+
+    // =========================================================================
+    // 跨目标紧急仇恨监控
+    // =========================================================================
+    Unit* GetUrgentThreatTarget(float maxRange = 30.0f)
+    {
+        Player* master = GetMaster();
+        if (!master)
+            return nullptr;
+
+        Unit* groupTank = GetGroupTank();
+
+        auto CheckUnitAttackers = [&](Unit* friendlyUnit) -> Unit*
+        {
+            if (!friendlyUnit || !friendlyUnit->IsAlive() || !friendlyUnit->IsInWorld())
+                return nullptr;
+
+            if (friendlyUnit->GetMap() != me->GetMap() || !friendlyUnit->IsFriendlyTo(me))
+                return nullptr;
+
+            if (groupTank && friendlyUnit == groupTank)
+                return nullptr;
+
+            for (Unit* attacker : friendlyUnit->getAttackers())
+            {
+                if (attacker && attacker->IsAlive() && attacker->IsInWorld() && attacker->GetMap() == me->GetMap())
+                {
+                    if (attacker != me && (!groupTank || attacker->GetVictim() != groupTank))
+                    {
+                        if (me->IsWithinDist(attacker, maxRange) && me->IsWithinLOSInMap(attacker))
+                            return attacker;
+                    }
+                }
+            }
+            return nullptr;
+        };
+
+        if (Unit* target = CheckUnitAttackers(master))
+            return target;
+        if (Unit* target = CheckUnitAttackers(master->GetPet()))
+            return target;
+
+        if (Group* group = master->GetGroup())
+        {
+            for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+            {
+                if (Player* member = itr->GetSource())
+                {
+                    if (member != master && member->GetMap() == me->GetMap() && me->IsWithinDist(member, maxRange))
+                    {
+                        if (Unit* target = CheckUnitAttackers(member))
+                            return target;
+                        if (Unit* target = CheckUnitAttackers(member->GetPet()))
+                            return target;
+                    }
+                }
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(s_botRegistryMutex);
+            auto it = s_masterBotRegistry.find(master->GetGUID());
+            if (it != s_masterBotRegistry.end())
+            {
+                for (AdaptiveBotAI* allyBot : it->second)
+                {
+                    if (allyBot && allyBot->me && allyBot->me != me)
+                    {
+                        if (Unit* target = CheckUnitAttackers(allyBot->me))
+                            return target;
+                    }
+                }
+            }
+        }
+
+        return nullptr;
+    }
+
+    // =========================================================================
+    // 治疗专精友方血网雷达
+    // =========================================================================
+    Unit* SelectLowestHealthAlly(float maxRange = 40.0f, uint8 healthThreshold = 100)
+    {
+        Player* master = GetMaster();
+        if (!master)
+            return nullptr;
+
+        Unit* lowestTarget = nullptr;
+        float lowestHp = static_cast<float>(healthThreshold);
+
+        auto CheckUnit = [&](Unit* unit)
+        {
+            if (!unit || !unit->IsAlive() || !unit->IsInWorld())
+                return;
+
+            if (unit->GetMap() != me->GetMap())
+                return;
+
+            if (!unit->IsFriendlyTo(me))
+                return;
+            if (unit->GetTypeId() == TYPEID_UNIT && unit->ToCreature()->IsTotem())
+                return;
+
+            if (me->IsWithinDist(unit, maxRange) && me->IsWithinLOSInMap(unit))
+            {
+                float const hp = unit->GetHealthPct();
+                if (hp < lowestHp)
+                {
+                    lowestHp = hp;
+                    lowestTarget = unit;
+                }
+            }
+        };
+
+        CheckUnit(me);
+        CheckUnit(master);
+        CheckUnit(master->GetPet());
+
+        if (Group* group = master->GetGroup())
+        {
+            for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+            {
+                if (Player* member = itr->GetSource())
+                {
+                    CheckUnit(member);
+                    CheckUnit(member->GetPet());
+                }
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(s_botRegistryMutex);
+            auto it = s_masterBotRegistry.find(master->GetGUID());
+            if (it != s_masterBotRegistry.end())
+            {
+                for (AdaptiveBotAI* allyBot : it->second)
+                {
+                    if (allyBot && allyBot->me && allyBot->me != me)
+                        CheckUnit(allyBot->me);
+                }
+            }
+        }
+
+        return lowestTarget;
+    }
+
+    // =========================================================================
+    // 索敌仲裁器 (含防引怪灭团守卫)
+    // =========================================================================
+    virtual Unit* SelectAssistTarget()
+    {
+        if (Unit* urgentTarget = GetUrgentThreatTarget())
+        {
+            if (me->IsValidAttackTarget(urgentTarget))
+            {
+                if (isDebugLogging && me->GetVictim() != urgentTarget)
+                    LOG_INFO("scripts", "[Bot: {}] 仇恨雷达触发紧急换防/拆火 -> [{}]", me->GetName(), urgentTarget->GetName());
+                return urgentTarget;
+            }
+        }
+
+        Player* master = GetMaster();
+
+        if (master)
+        {
+            if (Unit* masterTarget = master->GetSelectedUnit())
+            {
+                if (masterTarget->IsAlive() && masterTarget != me && masterTarget->GetMap() == me->GetMap() && me->IsValidAttackTarget(masterTarget))
+                {
+                    bool const isEngaged = masterTarget->IsInCombat() || master->GetVictim() == masterTarget;
+                    if (isEngaged)
+                        return masterTarget;
+                }
+            }
+        }
+
+        if (Unit* tank = GetGroupTank())
+        {
+            if (tank != me)
+            {
+                if (Unit* tankVictim = tank->GetVictim())
+                {
+                    if (tankVictim->IsAlive() && tankVictim->GetMap() == me->GetMap() && me->IsValidAttackTarget(tankVictim))
+                        return tankVictim;
+                }
+            }
+        }
+
+        if (Unit* myAttacker = me->getAttackerForOneAttack())
+        {
+            if (myAttacker->IsAlive() && myAttacker->GetMap() == me->GetMap() && me->IsValidAttackTarget(myAttacker))
+                return myAttacker;
+        }
+
+        if (Unit* threatVictim = me->SelectVictim())
+        {
+            if (threatVictim->IsAlive() && threatVictim->GetMap() == me->GetMap() && me->IsValidAttackTarget(threatVictim))
+                return threatVictim;
+        }
+
+        if (isDebugLogging && me->IsInCombat())
+            LOG_INFO("scripts", "[Bot: {}] 索敌失败：当前小队与自身仇恨列表中均无合法可攻击目标。", me->GetName());
+
+        return me->GetVictim();
+    }
+
+    // =========================================================================
+    // 近战平砍与追击守护 (支持动态切目标与消除跟随锁死)
+    // =========================================================================
+    void ManageMeleeCombat(Unit* victim)
+    {
+        if (!victim || !victim->IsAlive() || victim->GetMap() != me->GetMap())
+            return;
+
+        if (me->HasUnitState(UNIT_STATE_CASTING | UNIT_STATE_CHANNELING))
+            return;
+
+        if (me->GetVictim() != victim)
+        {
+            me->Attack(victim, true);
+            if (!me->HasUnitState(UNIT_STATE_CHARGING))
+                me->GetMotionMaster()->MoveChase(victim);
+            return;
+        }
+
+        if (!me->HasUnitState(UNIT_STATE_MELEE_ATTACKING))
+            me->Attack(victim, true);
+
+        if (!me->HasUnitState(UNIT_STATE_CHARGING))
+        {
+            MovementGeneratorType const moveType = me->GetMotionMaster()->GetCurrentMovementGeneratorType();
+            if (moveType != CHASE_MOTION_TYPE && moveType != POINT_MOTION_TYPE)
+            {
+                me->GetMotionMaster()->MoveChase(victim);
+            }
+        }
+    }
+
+    // =========================================================================
+    // 远程物理平射与放风筝雷达
+    // =========================================================================
+    void ManageRangedPhysicalCombat(Unit* victim, float minDist = 5.0f, float maxDist = 30.0f)
+    {
+        if (!victim || !victim->IsAlive() || victim->GetMap() != me->GetMap())
+            return;
+
+        if (me->HasUnitState(UNIT_STATE_CASTING | UNIT_STATE_CHANNELING))
+            return;
+
+        bool const targetChanged = (me->GetVictim() != victim);
+        me->SetFacingToObject(victim);
+        float const dist = me->GetDistance(victim);
+
+        if (dist < minDist)
+        {
+            if (targetChanged || !me->HasUnitState(UNIT_STATE_MELEE_ATTACKING))
+                me->Attack(victim, true);
+
+            if (targetChanged || me->GetMotionMaster()->GetCurrentMovementGeneratorType() == IDLE_MOTION_TYPE)
+                me->GetMotionMaster()->MoveChase(victim);
+            return;
+        }
+
+        if (targetChanged || me->HasUnitState(UNIT_STATE_MELEE_ATTACKING))
+            me->Attack(victim, false);
+
+        if (dist >= minDist && dist <= maxDist)
+        {
+            if (me->GetMotionMaster()->GetCurrentMovementGeneratorType() == CHASE_MOTION_TYPE)
+                me->GetMotionMaster()->Clear();
+            if (me->isMoving())
+                me->StopMoving();
+            return;
+        }
+
+        if (dist > maxDist)
+        {
+            MovementGeneratorType const moveType = me->GetMotionMaster()->GetCurrentMovementGeneratorType();
+            if (targetChanged || (moveType != CHASE_MOTION_TYPE && moveType != POINT_MOTION_TYPE))
+            {
+                me->GetMotionMaster()->MoveChase(victim, maxDist - 2.0f);
+            }
+        }
+    }
+
+    // =========================================================================
+    // 远程法系站桩与射程/视线守护
+    // =========================================================================
+    void ManageCasterCombat(Unit* victim, float maxRange = 30.0f)
+    {
+        if (!victim || !victim->IsAlive() || victim->GetMap() != me->GetMap())
+            return;
+
+        if (me->HasUnitState(UNIT_STATE_CASTING | UNIT_STATE_CHANNELING))
+            return;
+
+        bool const targetChanged = (me->GetVictim() != victim);
+        if (targetChanged)
+            me->Attack(victim, false);
+
+        bool const outOfRange = !me->IsWithinCombatRange(victim, maxRange);
+        bool const outOfLos   = !me->IsWithinLOSInMap(victim);
+
+        if (outOfRange || outOfLos)
+        {
+            MovementGeneratorType const moveType = me->GetMotionMaster()->GetCurrentMovementGeneratorType();
+            if (targetChanged || (moveType != CHASE_MOTION_TYPE && moveType != POINT_MOTION_TYPE))
+            {
+                me->GetMotionMaster()->MoveChase(victim, std::max(5.0f, maxRange - 5.0f));
+            }
+        }
+        else
+        {
+            if (me->GetMotionMaster()->GetCurrentMovementGeneratorType() == CHASE_MOTION_TYPE)
+            {
+                me->GetMotionMaster()->Clear();
+                me->StopMoving();
+            }
+            me->SetFacingToObject(victim);
+        }
+    }
+
+    // 连击点状态机
+    uint8 GetComboPoints(Unit* target) const
+    {
+        if (!target || target->GetGUID() != comboTargetGuid)
+            return 0;
+        return comboPoints;
+    }
+
+    void AddComboPoints(Unit* target, uint8 count = 1)
+    {
+        if (!target)
+            return;
+
+        if (target->GetGUID() != comboTargetGuid)
+        {
+            comboTargetGuid = target->GetGUID();
+            comboPoints = 0;
+        }
+        comboPoints = std::min<uint8>(5, comboPoints + count);
+    }
+
+    void SpendComboPoints()
+    {
+        comboPoints = 0;
+    }
+
+    void ResetComboPoints()
+    {
+        comboPoints = 0;
+        comboTargetGuid.Clear();
+    }
+
+    bool IsBreakableCC(Unit* target) const
+    {
+        if (!target)
+            return false;
+
+        return target->HasAuraType(SPELL_AURA_MOD_CONFUSE) ||
+               target->HasAuraType(SPELL_AURA_TRANSFORM) ||
+               target->HasAuraType(SPELL_AURA_MOD_FEAR);
+    }
+
+    // =========================================================================
+    // 姿态/形态豁免 Hook
+    // =========================================================================
+    virtual bool CheckShapeshiftExemption(SpellInfo const* spellInfo) const
+    {
+        if (me->HasAura(57499) && (spellInfo->SpellFamilyFlags[0] & 0x5 || spellInfo->SpellFamilyFlags[1] & 0x40))
+            return true;
+
+        if (me->HasAura(51713) && (spellInfo->SpellFamilyFlags[0] & 0x2080000))
+            return true;
+
+        if (me->HasAura(16886) || me->HasAura(16188))
+        {
+            if (spellInfo->IsPositive())
+                return true;
+        }
+
+        return false;
+    }
+
+    virtual bool CheckSpecialPowerRequirements(SpellInfo const* /*spellInfo*/) const { return true; }
+    virtual uint8 GetTalentSpellMinLevel(uint32 /*spellId*/) const { return 0; }
+
+    // =========================================================================
+    // 全战术机制降阶与 Rank 1 保底引擎
+    // =========================================================================
+    uint32 GetAppropriateRank(uint32 maxRankSpellId, bool allowRankOneFallback = true) const
+    {
+        SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(maxRankSpellId);
+        if (!spellInfo)
+            return 0;
+
+        uint8 const botLevel = me->GetLevel();
+        uint8 const talentMinLevel = GetTalentSpellMinLevel(maxRankSpellId);
+
+        if (!allowRankOneFallback && talentMinLevel > 0 && botLevel < talentMinLevel)
+            return 0;
+
+        uint32 lastValidRankId = spellInfo->Id;
+
+        while (spellInfo && spellInfo->GetSpellLevel() > botLevel)
+        {
+            lastValidRankId = spellInfo->Id;
+            uint32 const prevRankId = spellInfo->GetPrevRankSpellId();
+            if (!prevRankId)
+                return allowRankOneFallback ? lastValidRankId : 0;
+
+            spellInfo = sSpellMgr->GetSpellInfo(prevRankId);
+        }
+
+        return spellInfo ? spellInfo->Id : (allowRankOneFallback ? lastValidRankId : 0);
+    }
+
+    // =========================================================================
+    // 通用施法条件仲裁 (含 verbose 诊断日志)
+    // =========================================================================
+    bool CanCast(Unit* target, uint32 spellId, bool checkGcd = true, bool verbose = false) const
+    {
+        auto LogBlock = [this, verbose, spellId](char const* reason) -> bool
+        {
+            if (verbose && isDebugLogging)
+                LOG_INFO("scripts", "[Bot: {}] CanCast 阻断 [SpellID: {}] 原因: {}", me->GetName(), spellId, reason);
+            return false;
+        };
+
+        if (!target || !target->IsInWorld() || target->GetMap() != me->GetMap() || spellId == 0)
+            return LogBlock("目标空/不在世界/跨地图/法术ID为0");
+
+        if (me->HasUnitState(UNIT_STATE_STUNNED | UNIT_STATE_CONFUSED | UNIT_STATE_FLEEING | UNIT_STATE_CASTING | UNIT_STATE_CHANNELING))
+            return LogBlock("自身受控或正在施法/引导");
+
+        SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spellId);
+        if (!spellInfo || spellInfo->IsPassive())
+            return LogBlock("法术元数据无效或为被动技能");
+
+        if (me->IsInCombat() && spellInfo->HasAttribute(SPELL_ATTR0_NOT_IN_COMBAT) && !CheckShapeshiftExemption(spellInfo))
+            return LogBlock("战斗中禁止释放脱战法术");
+
+        if (me->HasUnitState(UNIT_STATE_ROOT) && (spellInfo->HasEffect(SPELL_EFFECT_CHARGE) || spellInfo->HasEffect(SPELL_EFFECT_CHARGE_DEST)))
+            return LogBlock("定身状态无法突进/冲锋");
+
+        if (spellInfo->IsNextMeleeSwingSpell() && me->GetCurrentSpell(CURRENT_MELEE_SPELL))
+            return LogBlock("平砍强化技能已在排队中");
+
+        if (!CheckShapeshiftExemption(spellInfo))
+        {
+            if (spellInfo->CheckShapeshift(me->GetShapeshiftForm()) != SPELL_CAST_OK)
+                return LogBlock("姿态/形态不匹配");
+        }
+
+        bool const isOffGcd = (spellInfo->StartRecoveryCategory == 0 && spellInfo->StartRecoveryTime == 0) || spellInfo->IsNextMeleeSwingSpell();
+        if (checkGcd && !isOffGcd && gcdTimer > 0)
+            return LogBlock("公共冷却 (GCD) 未就绪");
+
+        if (me->HasSpellCooldown(spellId))
+            return LogBlock("技能冷却中 (CD)");
+
+        bool const isResurrect = spellInfo->HasEffect(SPELL_EFFECT_RESURRECT) || spellInfo->HasEffect(SPELL_EFFECT_RESURRECT_NEW);
+        if (!isResurrect && !target->IsAlive())
+            return LogBlock("非复活技能禁止对阵亡单位施放");
+        if (isResurrect && target->IsAlive())
+            return LogBlock("复活技能只能对阵亡单位施放");
+
+        if (!CheckSpecialPowerRequirements(spellInfo))
+            return LogBlock("未通过专精特殊资源校验 (如符文尚未冷却)");
+
+        int32 cost = spellInfo->CalcPowerCost(me, spellInfo->GetSchoolMask());
+        if (cost > 0)
+        {
+            if (spellInfo->PowerType == POWER_RAGE || spellInfo->PowerType == POWER_RUNIC_POWER)
+                cost *= 10;
+
+            if (me->GetPower(spellInfo->PowerType) < static_cast<uint32>(cost))
+                return LogBlock("当前能量/怒气/法力值不足");
+        }
+
+        if (target != me)
+        {
+            bool const isFriendlySpell = target->IsFriendlyTo(me) || spellInfo->IsPositive();
+
+            if (spellInfo->IsMeleeRange())
+            {
+                if (!me->IsWithinMeleeRange(target))
+                    return LogBlock("超出近战攻击距离");
+            }
+            else
+            {
+                float const minRange = spellInfo->GetMinRange(isFriendlySpell);
+                float const maxRange = spellInfo->GetMaxRange(isFriendlySpell);
+
+                if (minRange > 0.0f && me->IsWithinDist(target, minRange))
+                    return LogBlock("小于最小射程盲区");
+
+                if (maxRange > 0.0f)
+                {
+                    if (isFriendlySpell)
+                    {
+                        if (!me->IsWithinDist(target, maxRange))
+                            return LogBlock("超出友方几何最大射程");
+                    }
+                    else
+                    {
+                        if (!me->IsWithinCombatRange(target, maxRange))
+                            return LogBlock("超出敌方战斗包围盒最大射程");
+                    }
+                }
+                else if (!me->IsWithinMeleeRange(target))
+                {
+                    return LogBlock("默认射程超出近战范围");
+                }
+            }
+
+            if (!me->IsWithinLOSInMap(target))
+                return LogBlock("目标不在视线内 (LoS 阻挡)");
+        }
+
+        return true;
+    }
+
+    // =========================================================================
+    // 通用施法执行引擎 (读条防掐断强化)
+    // =========================================================================
+    bool ExecuteSpell(Unit* target, uint32 spellId, bool applyGcd = true, Unit* facingTarget = nullptr)
+    {
+        if (!target || !target->IsInWorld() || target->GetMap() != me->GetMap())
+            return false;
+
+        SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spellId);
+        if (!spellInfo)
+            return false;
+
+        if (facingTarget && facingTarget->IsInWorld() && facingTarget->GetMap() == me->GetMap())
+            me->SetFacingToObject(facingTarget);
+        else if (target != me && !spellInfo->IsPositive())
+            me->SetFacingToObject(target);
+
+        int32 castTime = int32(spellInfo->CalcCastTime());
+        me->ModSpellCastTime(spellInfo, castTime);
+        bool const isInstant = (castTime <= 0 && !spellInfo->IsChanneled());
+
+        if (!isInstant)
+        {
+            if (me->GetMotionMaster()->GetCurrentMovementGeneratorType() == CHASE_MOTION_TYPE)
+                me->GetMotionMaster()->Clear();
+            if (me->isMoving())
+                me->StopMoving();
+        }
+
+        SpellCastResult const result = me->CastSpell(target, spellId, false);
+        if (result == SPELL_CAST_OK)
+        {
+            if (isDebugLogging)
+                LOG_INFO("scripts", "[Bot: {}] 施法成功: [SpellID: {}] -> 目标: [{}]", me->GetName(), spellId, target->GetName());
+
+            bool const isOffGcd = (spellInfo->StartRecoveryCategory == 0 && spellInfo->StartRecoveryTime == 0) || spellInfo->IsNextMeleeSwingSpell();
+            if (applyGcd && !isOffGcd)
+            {
+                bool const isShortGcd = (me->GetPowerType() == POWER_ENERGY || me->GetPowerType() == POWER_RUNIC_POWER);
+                gcdTimer = isShortGcd ? 1000 : 1500;
+            }
+            return true;
+        }
+        else
+        {
+            if (isDebugLogging)
+                LOG_INFO("scripts", "[Bot: {}] 施法被底层拒绝: [SpellID: {}] -> 目标: [{}] | 引擎错误码: {}", me->GetName(), spellId, target->GetName(), uint32(result));
+            return false;
+        }
+    }
+
+    // =========================================================================
+    // 通用脱战跟随维护
+    // =========================================================================
+    void UpdateFollowMaster(uint32 diff)
+    {
+        if (me->IsInCombat())
+            return;
+
+        if (followCheckTimer > diff)
+        {
+            followCheckTimer -= diff;
+            return;
+        }
+        followCheckTimer = 1000;
+
+        Player* master = GetMaster();
+        if (!master || !master->IsAlive())
+            return;
+
+        if (me->GetMap() != master->GetMap())
+            return;
+
+        if (me->GetPhaseMask() != master->GetPhaseMask())
+            me->SetPhaseMask(master->GetPhaseMask(), true);
+
+        float const dist = me->GetDistance(master);
+
+        if (dist > 45.0f)
+        {
+            if (isDebugLogging)
+                LOG_INFO("scripts", "[Bot: {}] 跟随超距卡死 (>45码)，执行防卡死瞬移对齐。", me->GetName());
+
+            float const x = master->GetPositionX() - 2.0f * std::cos(master->GetOrientation());
+            float const y = master->GetPositionY() - 2.0f * std::sin(master->GetOrientation());
+            float const z = master->GetPositionZ();
+            me->NearTeleportTo(x, y, z, master->GetOrientation());
+            me->GetMotionMaster()->Clear();
+            return;
+        }
+
+        if (dist > 6.0f && me->GetMotionMaster()->GetCurrentMovementGeneratorType() != FOLLOW_MOTION_TYPE)
+        {
+            me->GetMotionMaster()->MoveFollow(master, 3.0f, me->GetAngle(master));
+        }
+    }
+
+    void UpdateTimers(uint32 diff)
+    {
+        if (gcdTimer > diff)
+            gcdTimer -= diff;
+        else
+            gcdTimer = 0;
+
+        if (me->GetPowerType() == POWER_ENERGY)
+        {
+            energyRegenTimer += diff;
+            if (energyRegenTimer >= 100)
+            {
+                uint32 const addVal = energyRegenTimer / 100;
+                energyRegenTimer %= 100;
+                if (me->GetPower(POWER_ENERGY) < me->GetMaxPower(POWER_ENERGY))
+                    me->ModifyPower(POWER_ENERGY, addVal);
+            }
+        }
+
+        if (me->GetPowerType() == POWER_MANA && me->IsInCombat())
+        {
+            manaRegenTimer += diff;
+            if (manaRegenTimer >= 2000)
+            {
+                manaRegenTimer %= 2000;
+                uint32 const addMana = me->GetMaxPower(POWER_MANA) * 2 / 100;
+                if (me->GetPower(POWER_MANA) < me->GetMaxPower(POWER_MANA))
+                    me->ModifyPower(POWER_MANA, addMana);
+            }
+        }
+
+        if (wasInCombat && !me->IsInCombat())
+        {
+            wasInCombat = false;
+            OnCombatEnded(me->IsAlive());
+        }
+        else if (!wasInCombat && me->IsInCombat())
+        {
+            wasInCombat = true;
+        }
+
+        if (!me->IsInCombat())
+        {
+            if (levelSyncTimer <= diff)
+            {
+                levelSyncTimer = 2000;
+                SyncLevelWithMaster();
+            }
+            else
+            {
+                levelSyncTimer -= diff;
+            }
+        }
+    }
+};
+
+template <typename T_AI>
+class AdaptiveBotScript : public CreatureScript
+{
+public:
+    explicit AdaptiveBotScript(char const* name) : CreatureScript(name) { }
+
+    CreatureAI* GetAI(Creature* creature) const override
+    {
+        return new T_AI(creature);
+    }
+
+    bool OnGossipHello(Player* player, Creature* creature) override
+    {
+        if (!creature->IsAlive())
+            return false;
+
+        auto* botAI = dynamic_cast<AdaptiveBotAI*>(creature->AI());
+        if (!botAI)
+            return false;
+
+        Player* master = botAI->GetMaster();
+
+        if (!master)
+        {
+            AddGossipItemFor(player, GOSSIP_ICON_CHAT, "跟随我，协助我作战！", GOSSIP_SENDER_MAIN, 1);
+        }
+        else if (master == player)
+        {
+            AddGossipItemFor(player, GOSSIP_ICON_CHAT, "解散并原地待命。", GOSSIP_SENDER_MAIN, 2);
+            AddGossipItemFor(player, GOSSIP_ICON_DOT, botAI->isDebugLogging ? "【调试】关闭调试日志" : "【调试】开启调试日志", GOSSIP_SENDER_MAIN, 3);
+        }
+        else
+        {
+            player->GetSession()->SendNotification("该随从正在协助其他指挥官。");
+            return true;
+        }
+
+        SendGossipMenuFor(player, DEFAULT_GOSSIP_MESSAGE, creature->GetGUID());
+        return true;
+    }
+
+    bool OnGossipSelect(Player* player, Creature* creature, uint32 /*sender*/, uint32 action) override
+    {
+        ClearGossipMenuFor(player);
+
+        auto* botAI = dynamic_cast<AdaptiveBotAI*>(creature->AI());
+        if (!botAI)
+        {
+            CloseGossipMenuFor(player);
+            return true;
+        }
+
+        if (action == 1)
+        {
+            if (!botAI->GetMaster())
+            {
+                botAI->SetMaster(player);
+                creature->Say("遵命，我将协助您作战。", LANG_UNIVERSAL);
+            }
+            CloseGossipMenuFor(player);
+        }
+        else if (action == 2)
+        {
+            if (botAI->GetMaster() == player)
+            {
+                botAI->UnregisterFromMaster();
+                botAI->masterGuid.Clear();
+                creature->CombatStop(true);
+                creature->GetMotionMaster()->MoveIdle();
+                creature->RestoreFaction();
+                creature->Say("我在此待命。", LANG_UNIVERSAL);
+
+                // 恢复为数据库 creature_template 中定义的初始最低等级并补满血量
+                creature->SetLevel(creature->GetCreatureTemplate()->minlevel);
+                creature->UpdateLevelDependentStats();
+                creature->SetHealth(creature->GetMaxHealth());
+            }
+            CloseGossipMenuFor(player);
+        }
+        else if (action == 3)
+        {
+            botAI->isDebugLogging = !botAI->isDebugLogging;
+            creature->Whisper(botAI->isDebugLogging ? "调试日志已【开启】。" : "调试日志已【关闭】。", LANG_UNIVERSAL, player);
+            CloseGossipMenuFor(player);
+        }
+
+        return true;
+    }
+};
