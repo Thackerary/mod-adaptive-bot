@@ -922,7 +922,7 @@ public:
         if (!spellInfo || spellInfo->IsPassive())
             return LogBlock("法术元数据无效或为被动技能");
 
-        if (me->IsInCombat() && spellInfo->HasAttribute(SPELL_ATTR1_NOT_IN_COMBAT_ONLY_PEACEFUL) && !CheckShapeshiftExemption(spellInfo))
+        if (me->IsInCombat() && spellInfo->HasAttribute(SPELL_ATTR1_CANT_BE_USED_IN_COMBAT) && !CheckShapeshiftExemption(spellInfo))
             return LogBlock("战斗中禁止释放脱战法术");
 
         if (me->HasUnitState(UNIT_STATE_ROOT) && (spellInfo->HasEffect(SPELL_EFFECT_CHARGE) || spellInfo->HasEffect(SPELL_EFFECT_CHARGE_DEST)))
