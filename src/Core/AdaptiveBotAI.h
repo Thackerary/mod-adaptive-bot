@@ -17,6 +17,7 @@
 #include "ObjectAccessor.h"
 #include "GossipDef.h"
 #include "ScriptedGossip.h"
+#include "Chat.h"
 #include "Log.h"
 #include <cmath>
 #include <algorithm>
@@ -1189,7 +1190,7 @@ public:
         }
         else
         {
-            player->GetSession()->SendNotification("该随从正在协助其他指挥官。");
+            ChatHandler(player->GetSession()).SendNotification("该随从正在协助其他指挥官。");
             return true;
         }
 
