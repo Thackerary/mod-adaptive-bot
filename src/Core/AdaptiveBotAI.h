@@ -7,6 +7,7 @@
 #include "ScriptedCreature.h"
 #include "ScriptMgr.h"
 #include "Creature.h"
+#include "Pet.h"
 #include "Unit.h"
 #include "Player.h"
 #include "Group.h"
@@ -179,15 +180,6 @@ public:
         }
     }
 
-    void EnterCombat(Unit* who) override
-    {
-        me->GetMotionMaster()->Clear();
-        wasInCombat = true;
-
-        if (isDebugLogging)
-            LOG_INFO("scripts", "[Bot: {}] 进入战斗！首要目标: [{}]", me->GetName(), who ? who->GetName() : "未知");
-    }
-
     void EnterEvadeMode(EvadeReason /*why*/) override
     {
         me->CombatStop(true);
@@ -260,10 +252,10 @@ public:
     // =========================================================================
     // 最终伤害与受疗管线拦截
     // =========================================================================
-    void DamageDealt(Unit* doneTo, uint32& damage, DamageEffectType damagetype) override
+    void DamageDealt(Unit* doneTo, uint32& damage, DamageEffectType damagetype, SpellSchoolMask damageSchoolMask) override
     {
         damage = static_cast<uint32>(damage * GetDamageDealtMultiplier());
-        ScriptedAI::DamageDealt(doneTo, damage, damagetype);
+        ScriptedAI::DamageDealt(doneTo, damage, damagetype, damageSchoolMask);
     }
 
     void DamageTaken(Unit* attacker, uint32& damage, DamageEffectType damagetype, SpellSchoolMask damageSchoolMask) override
@@ -448,14 +440,14 @@ public:
         if (levelChanged)
         {
             me->SetLevel(masterLevel);
-            me->UpdateLevelDependentStats();
+            me->UpdateLevelDependantStats();
             me->SetHealth(me->GetMaxHealth());
 
-            if (me->GetPowerType() == POWER_MANA)
+            if (me->getPowerType() == POWER_MANA)
             {
                 me->SetPower(POWER_MANA, me->GetMaxPower(POWER_MANA));
             }
-            else if (me->GetPowerType() == POWER_ENERGY)
+            else if (me->getPowerType() == POWER_ENERGY)
             {
                 if (me->GetMaxPower(POWER_ENERGY) == 0)
                     me->SetMaxPower(POWER_ENERGY, 100);
@@ -706,7 +698,7 @@ public:
         if (!victim || !victim->IsAlive() || victim->GetMap() != me->GetMap())
             return;
 
-        if (me->HasUnitState(UNIT_STATE_CASTING | UNIT_STATE_CHANNELING))
+        if (me->HasUnitState(UNIT_STATE_CASTING))
             return;
 
         if (me->GetVictim() != victim)
@@ -738,7 +730,7 @@ public:
         if (!victim || !victim->IsAlive() || victim->GetMap() != me->GetMap())
             return;
 
-        if (me->HasUnitState(UNIT_STATE_CASTING | UNIT_STATE_CHANNELING))
+        if (me->HasUnitState(UNIT_STATE_CASTING))
             return;
 
         bool const targetChanged = (me->GetVictim() != victim);
@@ -785,7 +777,7 @@ public:
         if (!victim || !victim->IsAlive() || victim->GetMap() != me->GetMap())
             return;
 
-        if (me->HasUnitState(UNIT_STATE_CASTING | UNIT_STATE_CHANNELING))
+        if (me->HasUnitState(UNIT_STATE_CASTING))
             return;
 
         bool const targetChanged = (me->GetVictim() != victim);
@@ -896,14 +888,14 @@ public:
 
         uint32 lastValidRankId = spellInfo->Id;
 
-        while (spellInfo && spellInfo->GetSpellLevel() > botLevel)
+        while (spellInfo && spellInfo->SpellLevel > botLevel)
         {
             lastValidRankId = spellInfo->Id;
-            uint32 const prevRankId = spellInfo->GetPrevRankSpellId();
-            if (!prevRankId)
+            SpellInfo const* prevRankSpell = spellInfo->GetPrevRankSpell();
+            if (!prevRankSpell)
                 return allowRankOneFallback ? lastValidRankId : 0;
 
-            spellInfo = sSpellMgr->GetSpellInfo(prevRankId);
+            spellInfo = prevRankSpell;
         }
 
         return spellInfo ? spellInfo->Id : (allowRankOneFallback ? lastValidRankId : 0);
@@ -924,20 +916,20 @@ public:
         if (!target || !target->IsInWorld() || target->GetMap() != me->GetMap() || spellId == 0)
             return LogBlock("目标空/不在世界/跨地图/法术ID为0");
 
-        if (me->HasUnitState(UNIT_STATE_STUNNED | UNIT_STATE_CONFUSED | UNIT_STATE_FLEEING | UNIT_STATE_CASTING | UNIT_STATE_CHANNELING))
+        if (me->HasUnitState(UNIT_STATE_STUNNED | UNIT_STATE_CONFUSED | UNIT_STATE_FLEEING | UNIT_STATE_CASTING))
             return LogBlock("自身受控或正在施法/引导");
 
         SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spellId);
         if (!spellInfo || spellInfo->IsPassive())
             return LogBlock("法术元数据无效或为被动技能");
 
-        if (me->IsInCombat() && spellInfo->HasAttribute(SPELL_ATTR0_NOT_IN_COMBAT) && !CheckShapeshiftExemption(spellInfo))
+        if (me->IsInCombat() && spellInfo->HasAttribute(SPELL_ATTR0_CANT_USED_IN_COMBAT) && !CheckShapeshiftExemption(spellInfo))
             return LogBlock("战斗中禁止释放脱战法术");
 
         if (me->HasUnitState(UNIT_STATE_ROOT) && (spellInfo->HasEffect(SPELL_EFFECT_CHARGE) || spellInfo->HasEffect(SPELL_EFFECT_CHARGE_DEST)))
             return LogBlock("定身状态无法突进/冲锋");
 
-        if (spellInfo->IsNextMeleeSwingSpell() && me->GetCurrentSpell(CURRENT_MELEE_SPELL))
+        if (spellInfo->HasAttribute(SPELL_ATTR0_ON_NEXT_SWING) && me->GetCurrentSpell(CURRENT_MELEE_SPELL))
             return LogBlock("平砍强化技能已在排队中");
 
         if (!CheckShapeshiftExemption(spellInfo))
@@ -946,7 +938,7 @@ public:
                 return LogBlock("姿态/形态不匹配");
         }
 
-        bool const isOffGcd = (spellInfo->StartRecoveryCategory == 0 && spellInfo->StartRecoveryTime == 0) || spellInfo->IsNextMeleeSwingSpell();
+        bool const isOffGcd = (spellInfo->StartRecoveryCategory == 0 && spellInfo->StartRecoveryTime == 0) || spellInfo->HasAttribute(SPELL_ATTR0_ON_NEXT_SWING);
         if (checkGcd && !isOffGcd && gcdTimer > 0)
             return LogBlock("公共冷却 (GCD) 未就绪");
 
@@ -968,7 +960,7 @@ public:
             if (spellInfo->PowerType == POWER_RAGE || spellInfo->PowerType == POWER_RUNIC_POWER)
                 cost *= 10;
 
-            if (me->GetPower(spellInfo->PowerType) < static_cast<uint32>(cost))
+            if (me->GetPower(static_cast<Powers>(spellInfo->PowerType)) < static_cast<uint32>(cost))
                 return LogBlock("当前能量/怒气/法力值不足");
         }
 
@@ -976,7 +968,7 @@ public:
         {
             bool const isFriendlySpell = target->IsFriendlyTo(me) || spellInfo->IsPositive();
 
-            if (spellInfo->IsMeleeRange())
+            if (spellInfo->GetMaxRange(false) <= 5.0f)
             {
                 if (!me->IsWithinMeleeRange(target))
                     return LogBlock("超出近战攻击距离");
@@ -1050,10 +1042,10 @@ public:
             if (isDebugLogging)
                 LOG_INFO("scripts", "[Bot: {}] 施法成功: [SpellID: {}] -> 目标: [{}]", me->GetName(), spellId, target->GetName());
 
-            bool const isOffGcd = (spellInfo->StartRecoveryCategory == 0 && spellInfo->StartRecoveryTime == 0) || spellInfo->IsNextMeleeSwingSpell();
+            bool const isOffGcd = (spellInfo->StartRecoveryCategory == 0 && spellInfo->StartRecoveryTime == 0) || spellInfo->HasAttribute(SPELL_ATTR0_ON_NEXT_SWING);
             if (applyGcd && !isOffGcd)
             {
-                bool const isShortGcd = (me->GetPowerType() == POWER_ENERGY || me->GetPowerType() == POWER_RUNIC_POWER);
+                bool const isShortGcd = (me->getPowerType() == POWER_ENERGY || me->getPowerType() == POWER_RUNIC_POWER);
                 gcdTimer = isShortGcd ? 1000 : 1500;
             }
             return true;
@@ -1119,7 +1111,7 @@ public:
         else
             gcdTimer = 0;
 
-        if (me->GetPowerType() == POWER_ENERGY)
+        if (me->getPowerType() == POWER_ENERGY)
         {
             energyRegenTimer += diff;
             if (energyRegenTimer >= 100)
@@ -1131,7 +1123,7 @@ public:
             }
         }
 
-        if (me->GetPowerType() == POWER_MANA && me->IsInCombat())
+        if (me->getPowerType() == POWER_MANA && me->IsInCombat())
         {
             manaRegenTimer += diff;
             if (manaRegenTimer >= 2000)
@@ -1242,7 +1234,7 @@ public:
 
                 // 恢复为数据库 creature_template 中定义的初始最低等级并补满血量
                 creature->SetLevel(creature->GetCreatureTemplate()->minlevel);
-                creature->UpdateLevelDependentStats();
+                creature->UpdateLevelDependantStats();
                 creature->SetHealth(creature->GetMaxHealth());
             }
             CloseGossipMenuFor(player);
