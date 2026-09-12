@@ -224,25 +224,6 @@ public:
                 return;
         }
 
-        // ---------------------------------------------------------------------
-        // P6: 填充循环 (奉献 / 正义之锤 兜底，严格近战范围内施放)
-        // ---------------------------------------------------------------------
-        if (inMelee)
-        {
-            uint32 const fillerConsecration = GetAppropriateRank(ProtectionPaladinSpells::CONSECRATION);
-            if (fillerConsecration && CanCast(me, fillerConsecration, true))
-            {
-                if (ExecuteSpell(me, fillerConsecration, true, victim))
-                    return;
-            }
-
-            uint32 const fillerHammer = GetAppropriateRank(ProtectionPaladinSpells::HAMMER_OF_THE_RIGHTEOUS);
-            if (fillerHammer && me->GetLevel() >= 60 && CanCast(victim, fillerHammer, true))
-            {
-                if (ExecuteSpell(victim, fillerHammer, true))
-                    return;
-            }
-        }
     }
 
 private:
@@ -472,9 +453,15 @@ private:
 
     uint32 GetPreferredSealSpell() const
     {
-        // 复仇圣印需 64 级解锁，低级段（含 < 24 级）回退至正义圣印兜底
+        // 复仇 / 腐化圣印需 64 级解锁，低级段（含 < 24 级）回退至正义圣印兜底
         if (me->GetLevel() >= 64)
+        {
+            // 阵营圣印分流：血精灵（部落）使用腐化圣印，其余阵营使用复仇圣印
+            if (me->getRace() == RACE_BLOODELF)
+                return ProtectionPaladinSpells::SEAL_OF_CORRUPTION;
+
             return ProtectionPaladinSpells::SEAL_OF_VENGEANCE;
+        }
 
         return ProtectionPaladinSpells::SEAL_OF_RIGHTEOUSNESS;
     }
