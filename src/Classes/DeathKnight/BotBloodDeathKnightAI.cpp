@@ -129,8 +129,9 @@ public:
         if (TryDeathGrip(victim, true))
             return;
 
-        // 寒冬号角：战斗中符能不足时重吹回能 (不占用 GCD)
-        MaintainHornOfWinter();
+        // 寒冬号角：2 分钟增益到期时补吹，放行 GCD 并退出当前帧
+        if (MaintainHornOfWinter())
+            return;
 
         // 符能保底：低于阈值时平滑补充，模拟平砍与受击获取符能 (不占用 GCD)
         SupplementRunicPower();
@@ -326,8 +327,8 @@ private:
         if (TryDeathGrip(urgentTarget))
             return true;
 
-        if (me->IsWithinMeleeRange(urgentTarget) &&
-            CanCast(urgentTarget, BloodDeathKnightSpells::DARK_COMMAND, true))
+        // 黑暗命令为 30 码远程强嘲；死亡之握冷却中时仍可隔距离直接拉回失控怪
+        if (CanCast(urgentTarget, BloodDeathKnightSpells::DARK_COMMAND, true))
         {
             if (ExecuteSpell(urgentTarget, BloodDeathKnightSpells::DARK_COMMAND, true))
                 return true;
