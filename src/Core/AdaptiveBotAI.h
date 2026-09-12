@@ -440,7 +440,6 @@ public:
         if (levelChanged)
         {
             me->SetLevel(masterLevel);
-            me->UpdateLevelDependantStats();
             me->SetHealth(me->GetMaxHealth());
 
             if (me->getPowerType() == POWER_MANA)
@@ -923,7 +922,7 @@ public:
         if (!spellInfo || spellInfo->IsPassive())
             return LogBlock("法术元数据无效或为被动技能");
 
-        if (me->IsInCombat() && spellInfo->HasAttribute(SPELL_ATTR0_CANT_USED_IN_COMBAT) && !CheckShapeshiftExemption(spellInfo))
+        if (me->IsInCombat() && spellInfo->HasAttribute(SPELL_ATTR1_NOT_IN_COMBAT_ONLY_PEACEFUL) && !CheckShapeshiftExemption(spellInfo))
             return LogBlock("战斗中禁止释放脱战法术");
 
         if (me->HasUnitState(UNIT_STATE_ROOT) && (spellInfo->HasEffect(SPELL_EFFECT_CHARGE) || spellInfo->HasEffect(SPELL_EFFECT_CHARGE_DEST)))
@@ -1234,7 +1233,6 @@ public:
 
                 // 恢复为数据库 creature_template 中定义的初始最低等级并补满血量
                 creature->SetLevel(creature->GetCreatureTemplate()->minlevel);
-                creature->UpdateLevelDependantStats();
                 creature->SetHealth(creature->GetMaxHealth());
             }
             CloseGossipMenuFor(player);
