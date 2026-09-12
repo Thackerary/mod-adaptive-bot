@@ -110,13 +110,22 @@ public:
         // Action Priority List (APL) 核心决策循环
         // =====================================================================
 
-        // P0: 姿态与开怪 (冰霜灵气 / 冰冷触摸 14 倍仇恨开怪)
-        // 注：死亡之握严格保留为 P2 的战略救急手段，开怪仇恨一律交给冰冷触摸。
+        // P0: 姿态与开怪 (冰霜灵气 / 冰冷触摸 14 倍仇恨开怪 / 法系怪战术死握)
         if (MaintainFrostPresence())
             return;
 
         if (TryOpenWithIcyTouch(victim))
             return;
+
+        // 战术聚怪：远程法系读条怪强行拉入近战位
+        if (TryDeathGrip(victim, true))
+            return;
+
+        // 寒冬号角：战斗中符能不足时重吹回能 (不占用 GCD)
+        MaintainHornOfWinter();
+
+        // 符能保底：低于阈值时平滑补充，模拟平砍与受击获取符能 (不占用 GCD)
+        SupplementRunicPower();
 
         // P1: 生存与减伤链 (绿罩 / 冰封之韧 / 吸血鬼之血 / 符文分流)
         if (MaintainDefensiveCooldowns(victim))
@@ -146,6 +155,11 @@ private:
     // 符能保底阈值：绿罩 / 冰封之韧 / 符文打击 均需 20 点符能
     static constexpr uint32 MIN_RUNIC_POWER_RESERVE = 30;
 
+    // 符能战时续航参数
+    static constexpr uint32 HORN_OF_WINTER_RP_THRESHOLD = 40; // 低于该值重吹号角回能
+    static constexpr uint32 RUNIC_POWER_LOW_THRESHOLD   = 20; // 低于该值触发被动补能
+    static constexpr uint32 RUNIC_POWER_REFILL_AMOUNT   = 10; // 单次被动补能量
+
     uint32 presenceCheckTimer{ 0 };
 
     // =========================================================================
@@ -164,13 +178,33 @@ private:
 
     bool MaintainHornOfWinter()
     {
-        if (me->HasAura(BloodDeathKnightSpells::HORN_OF_WINTER))
+        // 战斗中符能不足时，即使已有号角 Aura 也允许重吹以回复符能，
+        // 保障绿罩 / 冰封之韧 / 符文打击的续航不被 0 符能卡死。
+        bool const needRunicPower = me->IsInCombat() &&
+                                    me->GetPower(POWER_RUNIC_POWER) < HORN_OF_WINTER_RP_THRESHOLD;
+
+        if (!needRunicPower && me->HasAura(BloodDeathKnightSpells::HORN_OF_WINTER))
             return false;
 
         if (!CanCast(me, BloodDeathKnightSpells::HORN_OF_WINTER, true))
             return false;
 
         return ExecuteSpell(me, BloodDeathKnightSpells::HORN_OF_WINTER, true);
+    }
+
+    // =========================================================================
+    // 符能被动补给：低于阈值时平滑注入，模拟平砍与受击获取符能
+    // =========================================================================
+    void SupplementRunicPower()
+    {
+        if (me->GetPower(POWER_RUNIC_POWER) >= RUNIC_POWER_LOW_THRESHOLD)
+            return;
+
+        uint32 const current = me->GetPower(POWER_RUNIC_POWER);
+        uint32 const max = me->GetMaxPower(POWER_RUNIC_POWER);
+        uint32 const refilled = std::min(max, current + RUNIC_POWER_REFILL_AMOUNT);
+
+        me->SetPower(POWER_RUNIC_POWER, refilled);
     }
 
     // =========================================================================
@@ -200,7 +234,7 @@ private:
     // =========================================================================
     // 死亡之握：8 ~ 30 码区间将目标拉回近战位 (严格作为战略救急手段)
     // =========================================================================
-    bool TryDeathGrip(Unit* target)
+    bool TryDeathGrip(Unit* target, bool requireCaster = false)
     {
         if (!target || target == me)
             return false;
@@ -208,6 +242,16 @@ private:
         float const dist = me->GetDistance(target);
         if (dist < 8.0f || dist > 30.0f)
             return false;
+
+        // 战术模式：仅对远程法系读条怪 (或拥有法力池) 主动拉怪，避免对普通近战怪乱交战略技能；
+        // 救急模式 (requireCaster = false) 不做限制，用于拉回失控目标。
+        if (requireCaster)
+        {
+            bool const isCaster = target->IsNonMeleeSpellCast(false) ||
+                                  (target->GetMaxPower(POWER_MANA) > 0);
+            if (!isCaster)
+                return false;
+        }
 
         if (!CanCast(target, BloodDeathKnightSpells::DEATH_GRIP, true))
             return false;
@@ -330,9 +374,9 @@ private:
         if (!victim)
             return false;
 
-        // 冰冷触摸：无冰霜疫病时补挂；仇恨不稳时利用其 14 倍仇恨倍率持续压制第一仇恨
-        bool const threatUnstable = (victim->GetVictim() != me);
-        if (!victim->HasAura(BloodDeathKnightSpells::AURA_FROST_FEVER) || threatUnstable)
+        // 步骤一：冰冷触摸——仅在目标缺少冰霜疫病时补挂，
+        // 严格顺序执行，避免无限冰触卡死暗影打击与传染。
+        if (!victim->HasAura(BloodDeathKnightSpells::AURA_FROST_FEVER))
         {
             uint32 const icyTouch = GetAppropriateRank(BloodDeathKnightSpells::ICY_TOUCH);
             if (icyTouch && CanCast(victim, icyTouch, true))
@@ -342,7 +386,7 @@ private:
             }
         }
 
-        // 暗影疫病：近战位补挂
+        // 步骤二：暗影打击——近战位补挂暗影疫病
         if (me->IsWithinMeleeRange(victim) &&
             !victim->HasAura(BloodDeathKnightSpells::AURA_BLOOD_PLAGUE))
         {
@@ -354,7 +398,7 @@ private:
             }
         }
 
-        // 传染：多目标且主目标双病齐备时向周围扩散
+        // 步骤三：传染——多目标且主目标双病齐备时向周围扩散
         if (CountNearbyEnemies(10.0f) >= 2 &&
             victim->HasAura(BloodDeathKnightSpells::AURA_FROST_FEVER) &&
             victim->HasAura(BloodDeathKnightSpells::AURA_BLOOD_PLAGUE))
@@ -413,8 +457,10 @@ private:
             }
         }
 
-        // 灵界打击：兜底填充
-        if (inMelee)
+        // 灵界打击：兜底填充 (同样要求双病齐备，避免无疾病空放)
+        if (inMelee &&
+            victim->HasAura(BloodDeathKnightSpells::AURA_FROST_FEVER) &&
+            victim->HasAura(BloodDeathKnightSpells::AURA_BLOOD_PLAGUE))
         {
             uint32 const deathStrike = GetAppropriateRank(BloodDeathKnightSpells::DEATH_STRIKE);
             if (deathStrike && CanCast(victim, deathStrike, true))
