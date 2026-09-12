@@ -23,7 +23,7 @@ namespace BearDruidSpells
     // =========================================================================
     // 2. 仇恨、打击与聚怪 (Threat, Strikes & Gathering)
     // =========================================================================
-    constexpr uint32 FAERIE_FIRE_FERAL               = 16857; // 精灵之火 (野性, Rank 5, 30 码破甲开怪)
+    constexpr uint32 FAERIE_FIRE_FERAL               = 27011; // 精灵之火 (野性, Rank 5 顶阶, 30 码破甲开怪)
     constexpr uint8  FAERIE_FIRE_MIN_LEVEL           = 18;
     constexpr uint32 FERAL_CHARGE_BEAR               = 16979; // 野性冲锋 - 巨熊 (8~25 码突进定身/断法)
     constexpr uint8  FERAL_CHARGE_MIN_LEVEL          = 25;

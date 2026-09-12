@@ -88,8 +88,10 @@ public:
 
         // =====================================================================
         // P0: 形态维护 (脱战与战斗均常驻熊 / 巨熊形态)
+        // 变身占用 GCD，成功施放后本帧让出，避免后续技能被 GCD 阻断
         // =====================================================================
-        MaintainBearForm();
+        if (MaintainBearForm())
+            return;
 
         // =====================================================================
         // 1. 脱战业务维护
@@ -102,7 +104,6 @@ public:
             UpdateFollowMaster(diff);
 
             MaintainResourcePools();
-            MaintainGiftOfTheWild();
             return;
         }
 
@@ -117,6 +118,11 @@ public:
         // 3. 近战平砍与追击状态机接管
         // =====================================================================
         ManageMeleeCombat(victim);
+
+        // ---------------------------------------------------------------------
+        // P0: 战时怒气保底 (随从生物默认不触发玩家受击回怒通道)
+        // ---------------------------------------------------------------------
+        SupplementRage();
 
         // ---------------------------------------------------------------------
         // P0: 远距突进、远程开怪与怒气补充
@@ -213,21 +219,14 @@ private:
     }
 
     // =========================================================================
-    // 常驻增益维护 (野性赐福)
+    // 战时怒气保底 (随从生物默认不触发玩家受击回怒通道，杜绝 0 怒气瘫痪)
     // =========================================================================
-    bool MaintainGiftOfTheWild()
+    void SupplementRage()
     {
-        uint32 const giftSpell = GetAppropriateRank(BearDruidSpells::GIFT_OF_THE_WILD);
-        if (!giftSpell)
-            return false;
+        if (me->GetPower(POWER_RAGE) >= 25)
+            return;
 
-        if (me->HasAura(giftSpell))
-            return false;
-
-        if (!CanCast(me, giftSpell, true))
-            return false;
-
-        return ExecuteSpell(me, giftSpell, true);
+        me->ModifyPower(POWER_RAGE, 15);
     }
 
     // =========================================================================
@@ -425,11 +424,13 @@ private:
         bool const needsGroupThreat = (nearbyEnemies >= 2);
 
         uint32 const swipe = GetUsableBearSpell(BearDruidSpells::SWIPE_BEAR, BearDruidSpells::SWIPE_MIN_LEVEL);
+        bool const inMelee = me->IsWithinMeleeRange(victim);
 
         // 多目标：横扫优先铺垫群体仇恨
-        if (needsGroupThreat && swipe && CanCast(victim, swipe, true))
+        // 横扫为自身圆心正面锥形 AoE (DBC 范围为 Self only)，必须以自身为施法目标
+        if (needsGroupThreat && inMelee && swipe && CanCast(me, swipe, true))
         {
-            if (ExecuteSpell(victim, swipe, true))
+            if (ExecuteSpell(me, swipe, true, victim))
                 return;
         }
 
@@ -441,31 +442,36 @@ private:
                 return;
         }
 
-        // 流血 DoT 叠层：割伤 (目标层数 < 5)
+        // 流血 DoT：割伤 (未满 5 层继续叠层；已满 5 层且即将断档时刷新持续时间)
         uint32 const lacerate = GetUsableBearSpell(BearDruidSpells::LACERATE, BearDruidSpells::LACERATE_MIN_LEVEL);
-        if (lacerate && GetLacerateStackCount(victim, lacerate) < 5 && CanCast(victim, lacerate, true))
+        if (lacerate && NeedsLacerateRefresh(victim, lacerate) && CanCast(victim, lacerate, true))
         {
             if (ExecuteSpell(victim, lacerate, true))
                 return;
         }
 
-        // 填充技能：横扫 - 熊
-        if (swipe && CanCast(victim, swipe, true))
+        // 填充技能：横扫 - 熊 (同样以自身为圆心施放)
+        if (inMelee && swipe && CanCast(me, swipe, true))
         {
-            if (ExecuteSpell(victim, swipe, true))
+            if (ExecuteSpell(me, swipe, true, victim))
                 return;
         }
     }
 
-    uint8 GetLacerateStackCount(Unit* victim, uint32 lacerateSpell) const
+    // 割伤刷新判定：未满 5 层需继续叠层；满 5 层后剩余时间 <= 4500ms 必须刷新，杜绝断档掉层
+    bool NeedsLacerateRefresh(Unit* victim, uint32 lacerateSpell) const
     {
         if (!victim || !lacerateSpell)
-            return 0;
+            return false;
 
-        if (Aura* lacerateAura = victim->GetAura(lacerateSpell))
-            return lacerateAura->GetStackAmount();
+        Aura* lacerateAura = victim->GetAura(lacerateSpell);
+        if (!lacerateAura)
+            return true;
 
-        return 0;
+        if (lacerateAura->GetStackAmount() < 5)
+            return true;
+
+        return lacerateAura->GetDuration() <= 4500;
     }
 
     // =========================================================================
@@ -612,6 +618,25 @@ private:
         SyncPassive(BearDruidSpells::PASSIVE_TALENT_MIN_LEVEL, BearDruidSpells::NATURAL_REACTION);
         SyncPassive(BearDruidSpells::PASSIVE_TALENT_MIN_LEVEL, BearDruidSpells::THICK_HIDE);
         SyncPassive(BearDruidSpells::PASSIVE_TALENT_MIN_LEVEL, BearDruidSpells::PROTECTOR_OF_THE_PACK);
+
+        // 野性赐福：熊 / 巨熊形态下无法施放自然系法术，直接以光环形式为自身与指挥官挂载
+        if (level >= BearDruidSpells::PASSIVE_TALENT_MIN_LEVEL)
+        {
+            uint32 const giftSpell = BearDruidSpells::GIFT_OF_THE_WILD;
+
+            if (!me->HasAura(giftSpell))
+                me->AddAura(giftSpell, me);
+
+            if (Player* master = GetMaster())
+            {
+                if (!master->HasAura(giftSpell))
+                    me->AddAura(giftSpell, master);
+            }
+        }
+        else
+        {
+            me->RemoveAurasDueToSpell(BearDruidSpells::GIFT_OF_THE_WILD);
+        }
     }
 };
 
