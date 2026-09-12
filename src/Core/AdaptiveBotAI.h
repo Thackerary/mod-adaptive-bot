@@ -15,6 +15,7 @@
 #include "SpellMgr.h"
 #include "ObjectAccessor.h"
 #include "GossipDef.h"
+#include "ScriptedGossip.h"
 #include "Log.h"
 #include <cmath>
 #include <algorithm>
@@ -423,8 +424,8 @@ public:
 
                 // 4. 物理输出 (近战 DPS + 猎人)：同步注入近战与远程攻击强度
                 float const raidAP = 3200.0f + tierDelta * 48.0f;
-                me->SetModifierValue(UNIT_MOD_ATTACK_POWER, BASE_VALUE, raidAP);
-                me->SetModifierValue(UNIT_MOD_ATTACK_POWER_RANGED, BASE_VALUE, raidAP);
+                me->SetStatFlatModifier(UNIT_MOD_ATTACK_POWER, BASE_VALUE, raidAP);
+                me->SetStatFlatModifier(UNIT_MOD_ATTACK_POWER_RANGED, BASE_VALUE, raidAP);
                 me->UpdateAttackPowerAndDamage();
             }
         }
@@ -679,7 +680,7 @@ public:
             }
         }
 
-        if (Unit* myAttacker = me->getAttackerForOneAttack())
+        if (Unit* myAttacker = me->getAttackerForHelper())
         {
             if (myAttacker->IsAlive() && myAttacker->GetMap() == me->GetMap() && me->IsValidAttackTarget(myAttacker))
                 return myAttacker;
