@@ -42,9 +42,10 @@ public:
     void Reset() override
     {
         // 符文能量通道必须先于基类重置完成配置，保证 SyncLevelWithMaster 走符文能量分支
+        // 初始符能保底 30 点，确保接怪瞬间遭遇法系尖刺即可开启反魔法护盾
         me->setPowerType(POWER_RUNIC_POWER);
         me->SetMaxPower(POWER_RUNIC_POWER, 100);
-        me->SetPower(POWER_RUNIC_POWER, 0);
+        me->SetPower(POWER_RUNIC_POWER, MIN_RUNIC_POWER_RESERVE);
 
         AdaptiveBotAI::Reset();
 
@@ -55,6 +56,14 @@ public:
     void OnLevelSynced(uint8 /*level*/) override
     {
         ApplyPassiveTalents();
+    }
+
+    void OnEngaged(Unit* /*who*/) override
+    {
+        // 进战符能保底：绿罩 / 冰封之韧 / 符文打击 各需 20 点符能，
+        // 避免随从因 0 符能导致救命技能全部卡死。
+        if (me->GetPower(POWER_RUNIC_POWER) < MIN_RUNIC_POWER_RESERVE)
+            me->SetPower(POWER_RUNIC_POWER, MIN_RUNIC_POWER_RESERVE);
     }
 
     void UpdateAI(uint32 diff) override
@@ -101,11 +110,12 @@ public:
         // Action Priority List (APL) 核心决策循环
         // =====================================================================
 
-        // P0: 姿态与开怪 (冰霜灵气 / 死亡之握)
+        // P0: 姿态与开怪 (冰霜灵气 / 冰冷触摸 14 倍仇恨开怪)
+        // 注：死亡之握严格保留为 P2 的战略救急手段，开怪仇恨一律交给冰冷触摸。
         if (MaintainFrostPresence())
             return;
 
-        if (TryDeathGrip(victim))
+        if (TryOpenWithIcyTouch(victim))
             return;
 
         // P1: 生存与减伤链 (绿罩 / 冰封之韧 / 吸血鬼之血 / 符文分流)
@@ -120,8 +130,8 @@ public:
         if (MaintainDeathStrike(victim))
             return;
 
-        if (TryRuneStrike(victim))
-            return;
+        // 符文打击为「下一次平砍强化」，不占用 GCD：无论是否施放成功均继续流向后续 GCD 技能
+        TryRuneStrike(victim);
 
         // P4: 疾病链与群拉 (冰冷触摸 / 暗影打击 / 传染)
         if (MaintainDiseases(victim))
@@ -133,6 +143,9 @@ public:
     }
 
 private:
+    // 符能保底阈值：绿罩 / 冰封之韧 / 符文打击 均需 20 点符能
+    static constexpr uint32 MIN_RUNIC_POWER_RESERVE = 30;
+
     uint32 presenceCheckTimer{ 0 };
 
     // =========================================================================
@@ -161,7 +174,31 @@ private:
     }
 
     // =========================================================================
-    // 死亡之握：8 ~ 30 码区间将目标拉回近战位
+    // 开怪 / 远距仇恨压制：冰冷触摸 (14 倍仇恨倍率)
+    // 当目标尚未锁定自身 (仇恨不稳) 时，即使已有冰霜疫病也持续压制第一仇恨。
+    // =========================================================================
+    bool TryOpenWithIcyTouch(Unit* victim)
+    {
+        if (!victim || victim == me)
+            return false;
+
+        float const dist = me->GetDistance(victim);
+        if (dist < 8.0f || dist > 30.0f)
+            return false;
+
+        bool const threatUnstable = (victim->GetVictim() != me);
+        if (!threatUnstable && victim->HasAura(BloodDeathKnightSpells::AURA_FROST_FEVER))
+            return false;
+
+        uint32 const icyTouch = GetAppropriateRank(BloodDeathKnightSpells::ICY_TOUCH);
+        if (!icyTouch || !CanCast(victim, icyTouch, true))
+            return false;
+
+        return ExecuteSpell(victim, icyTouch, true);
+    }
+
+    // =========================================================================
+    // 死亡之握：8 ~ 30 码区间将目标拉回近战位 (严格作为战略救急手段)
     // =========================================================================
     bool TryDeathGrip(Unit* target)
     {
@@ -185,12 +222,10 @@ private:
     {
         float const hpPct = me->GetHealthPct();
 
-        // 反魔法护盾 (绿罩)：目标正在施法，或自身血量 < 75% 面对法系目标
+        // 反魔法护盾 (绿罩)：仅当目标正在施放非近战法术 (明确的法术尖刺前摇) 时开启
         bool const targetCasting = victim->IsNonMeleeSpellCast(false);
-        bool const casterTarget = (victim->GetMaxPower(POWER_MANA) > 0);
-        bool const lowHpVsCaster = (hpPct < 75.0f && casterTarget);
 
-        if ((targetCasting || lowHpVsCaster) &&
+        if (targetCasting &&
             !me->HasAura(BloodDeathKnightSpells::ANTI_MAGIC_SHELL) &&
             CanCast(me, BloodDeathKnightSpells::ANTI_MAGIC_SHELL, true))
         {
@@ -251,6 +286,8 @@ private:
 
     // =========================================================================
     // 核心自疗：近战位且自身血量 < 85% 时以灵界打击汲取生命
+    // 3.3.5a 机制约束：目标必须同时携带冰霜疫病与暗影疫病，灵界打击才产生有效自愈；
+    // 双病未挂齐时直接返回 false，让路给 MaintainDiseases 补齐疾病链。
     // =========================================================================
     bool MaintainDeathStrike(Unit* victim)
     {
@@ -258,6 +295,10 @@ private:
             return false;
 
         if (!me->IsWithinMeleeRange(victim))
+            return false;
+
+        if (!victim->HasAura(BloodDeathKnightSpells::AURA_FROST_FEVER) ||
+            !victim->HasAura(BloodDeathKnightSpells::AURA_BLOOD_PLAGUE))
             return false;
 
         uint32 const deathStrike = GetAppropriateRank(BloodDeathKnightSpells::DEATH_STRIKE);
@@ -289,8 +330,9 @@ private:
         if (!victim)
             return false;
 
-        // 冰霜疫病：远程即可补挂
-        if (!victim->HasAura(BloodDeathKnightSpells::AURA_FROST_FEVER))
+        // 冰冷触摸：无冰霜疫病时补挂；仇恨不稳时利用其 14 倍仇恨倍率持续压制第一仇恨
+        bool const threatUnstable = (victim->GetVictim() != me);
+        if (!victim->HasAura(BloodDeathKnightSpells::AURA_FROST_FEVER) || threatUnstable)
         {
             uint32 const icyTouch = GetAppropriateRank(BloodDeathKnightSpells::ICY_TOUCH);
             if (icyTouch && CanCast(victim, icyTouch, true))
