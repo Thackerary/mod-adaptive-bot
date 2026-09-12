@@ -50,11 +50,13 @@ public:
         AdaptiveBotAI::Reset();
 
         presenceCheckTimer = 0;
+        pestilenceTimer = 0;
         ApplyPassiveTalents();
     }
 
-    void OnLevelSynced(uint8 /*level*/) override
+    void OnLevelSynced(uint8 level) override
     {
+        AdaptiveBotAI::OnLevelSynced(level);
         ApplyPassiveTalents();
     }
 
@@ -75,6 +77,12 @@ public:
             presenceCheckTimer = 3000;
         else
             presenceCheckTimer -= diff;
+
+        // 传染本地限流计时器维护
+        if (pestilenceTimer > diff)
+            pestilenceTimer -= diff;
+        else
+            pestilenceTimer = 0;
 
         // =====================================================================
         // 1. 脱战业务维护
@@ -156,11 +164,14 @@ private:
     static constexpr uint32 MIN_RUNIC_POWER_RESERVE = 30;
 
     // 符能战时续航参数
-    static constexpr uint32 HORN_OF_WINTER_RP_THRESHOLD = 40; // 低于该值重吹号角回能
     static constexpr uint32 RUNIC_POWER_LOW_THRESHOLD   = 20; // 低于该值触发被动补能
     static constexpr uint32 RUNIC_POWER_REFILL_AMOUNT   = 10; // 单次被动补能量
 
+    // 传染本地限流：3.3.5a 传染无技能 CD，需自行约束刷新节奏
+    static constexpr uint32 PESTILENCE_COOLDOWN_MS      = 10000;
+
     uint32 presenceCheckTimer{ 0 };
+    uint32 pestilenceTimer{ 0 };
 
     // =========================================================================
     // 常驻姿态与增益维护器
@@ -178,12 +189,9 @@ private:
 
     bool MaintainHornOfWinter()
     {
-        // 战斗中符能不足时，即使已有号角 Aura 也允许重吹以回复符能，
-        // 保障绿罩 / 冰封之韧 / 符文打击的续航不被 0 符能卡死。
-        bool const needRunicPower = me->IsInCombat() &&
-                                    me->GetPower(POWER_RUNIC_POWER) < HORN_OF_WINTER_RP_THRESHOLD;
-
-        if (!needRunicPower && me->HasAura(BloodDeathKnightSpells::HORN_OF_WINTER))
+        // 寒冬号角在 3.3.5a 占用 1.0 秒 GCD，战时不再反复吹动；
+        // 符能续航统一交由 SupplementRunicPower() 保底机制处理。
+        if (me->HasAura(BloodDeathKnightSpells::HORN_OF_WINTER))
             return false;
 
         if (!CanCast(me, BloodDeathKnightSpells::HORN_OF_WINTER, true))
@@ -399,14 +407,20 @@ private:
         }
 
         // 步骤三：传染——多目标且主目标双病齐备时向周围扩散
-        if (CountNearbyEnemies(10.0f) >= 2 &&
+        // 3.3.5a 传染无技能 CD，必须由本地计时器限流，
+        // 否则会独占每个 GCD 无脑连发，卡死 P5 的枯萎凋零与血液沸腾。
+        if (pestilenceTimer == 0 &&
+            CountNearbyEnemies(10.0f) >= 2 &&
             victim->HasAura(BloodDeathKnightSpells::AURA_FROST_FEVER) &&
             victim->HasAura(BloodDeathKnightSpells::AURA_BLOOD_PLAGUE))
         {
             if (CanCast(victim, BloodDeathKnightSpells::PESTILENCE, true))
             {
                 if (ExecuteSpell(victim, BloodDeathKnightSpells::PESTILENCE, true))
+                {
+                    pestilenceTimer = PESTILENCE_COOLDOWN_MS;
                     return true;
+                }
             }
         }
 
