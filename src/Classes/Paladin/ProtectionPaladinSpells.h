@@ -20,6 +20,7 @@ namespace ProtectionPaladinSpells
     // =========================================================================
     constexpr uint32 SEAL_OF_VENGEANCE              = 31801; // 复仇圣印 (联盟向)
     constexpr uint32 SEAL_OF_CORRUPTION             = 53736; // 腐化圣印 (部落向)
+    constexpr uint32 SEAL_OF_RIGHTEOUSNESS          = 21084; // 正义圣印 (低级兜底)
 
     // =========================================================================
     // 3. 核心仇恨打击 (Core Threat Abilities)
@@ -43,6 +44,8 @@ namespace ProtectionPaladinSpells
     constexpr uint32 DIVINE_PROTECTION              = 498;   // 圣佑术 (50% 减伤)
     constexpr uint32 DIVINE_SHIELD                  = 642;   // 圣盾术 (绝对免疫)
     constexpr uint32 FORBEARANCE                    = 25771; // 自律 (封印圣佑/圣盾)
+    constexpr uint32 DIVINE_PLEA                    = 54428; // 神圣祈求 (法力恢复)
+    constexpr uint8  DIVINE_PLEA_MIN_LEVEL          = 71;    // 神圣祈求天赋解锁等级
 
     // =========================================================================
     // 6. 防护天赋被动光环补偿 (弥补 NPC 缺天赋树缺陷)
@@ -51,4 +54,5 @@ namespace ProtectionPaladinSpells
     constexpr uint32 AURA_TOUGHNESS                 = 20143; // 坚韧 (护甲提升)
     constexpr uint32 AURA_ANTICIPATION              = 20102; // 预知 (闪避提升)
     constexpr uint32 AURA_REDOUBT                   = 20127; // 盾牌壁垒 (格挡提升)
+    constexpr uint32 ARDENT_DEFENDER                = 31852; // 炽热防御者 (被动免死/春哥)
 }

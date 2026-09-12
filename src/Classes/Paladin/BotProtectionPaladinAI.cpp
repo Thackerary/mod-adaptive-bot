@@ -9,6 +9,8 @@
 #include "SpellAuras.h"
 #include "Pet.h"
 #include "Chat.h"
+#include <algorithm>
+#include <vector>
 
 class BotProtectionPaladinAI : public AdaptiveBotAI
 {
@@ -34,6 +36,8 @@ public:
                 return 70;
             case ProtectionPaladinSpells::SHIELD_OF_RIGHTEOUSNESS:
                 return 75;
+            case ProtectionPaladinSpells::DIVINE_PLEA:
+                return 71;
             default:
                 return 0;
         }
@@ -76,6 +80,7 @@ public:
                 MaintainRighteousFury();
                 MaintainSeal();
                 MaintainBlessing();
+                MaintainDivinePlea(50.0f);
             }
             return;
         }
@@ -105,6 +110,10 @@ public:
         if (MaintainSeal())
             return;
 
+        // 战斗中法力吃紧时开启神圣祈求 (常驻回蓝闭环)
+        if (MaintainDivinePlea(80.0f))
+            return;
+
         // ---------------------------------------------------------------------
         // P1: 生存与减伤链
         // ---------------------------------------------------------------------
@@ -124,8 +133,10 @@ public:
             }
         }
 
-        // 团队平均血量 < 60%：神圣牺牲 (团队转伤减伤)
+        // 团队平均血量 < 60%，且自身生命 > 50%：神圣牺牲 (团队转伤减伤)
+        // 血量守卫：自身血量过低时开启大牺牲会被转伤直接打死
         if (me->GetLevel() >= 70 &&
+            me->GetHealthPct() > 50.0f &&
             !me->HasAura(ProtectionPaladinSpells::DIVINE_SACRIFICE) &&
             ComputeGroupAverageHealthPct() < 60.0f)
         {
@@ -173,29 +184,28 @@ public:
         }
 
         // ---------------------------------------------------------------------
-        // P4: 群体仇恨建立 (奉献 + 正义之锤)
+        // P4: 核心仇恨循环 (奉献 + 正义之锤)
+        //     969 标准循环组成部分：单体目标下同样施放，绝不因单目标而闲置；
+        //     多目标时提升优先级抢先铺开群体仇恨。
         // ---------------------------------------------------------------------
         uint32 const nearbyEnemies = CountNearbyEnemies(10.0f);
-        bool const hasSolidThreat = (victim->GetVictim() == me);
-        bool const needsAoEThreat = (nearbyEnemies >= 2) || !hasSolidThreat;
+        bool const needsAoEThreat = (nearbyEnemies >= 2);
+        bool const inMelee = me->IsWithinMeleeRange(victim);
 
-        if (needsAoEThreat)
+        // 1. 奉献铺地 (以身为中心的 AoE 仇恨核心)
+        uint32 const consecration = GetAppropriateRank(ProtectionPaladinSpells::CONSECRATION);
+        if (consecration && (needsAoEThreat || inMelee) && CanCast(me, consecration, true))
         {
-            // 1. 奉献铺地 (以身为中心的 AoE 仇恨核心)
-            uint32 const consecration = GetAppropriateRank(ProtectionPaladinSpells::CONSECRATION);
-            if (consecration && CanCast(me, consecration, true))
-            {
-                if (ExecuteSpell(me, consecration, true, victim))
-                    return;
-            }
+            if (ExecuteSpell(me, consecration, true, victim))
+                return;
+        }
 
-            // 2. 正义之锤 (群体打击)
-            uint32 const hammer = GetAppropriateRank(ProtectionPaladinSpells::HAMMER_OF_THE_RIGHTEOUS);
-            if (hammer && me->GetLevel() >= 60 && me->IsWithinDist(victim, 8.0f) && CanCast(victim, hammer, true))
-            {
-                if (ExecuteSpell(victim, hammer, true))
-                    return;
-            }
+        // 2. 正义之锤 (群体打击 / 单体核心仇恨填充)
+        uint32 const hammer = GetAppropriateRank(ProtectionPaladinSpells::HAMMER_OF_THE_RIGHTEOUS);
+        if (hammer && me->GetLevel() >= 60 && (needsAoEThreat || inMelee) && CanCast(victim, hammer, true))
+        {
+            if (ExecuteSpell(victim, hammer, true))
+                return;
         }
 
         // ---------------------------------------------------------------------
@@ -215,20 +225,23 @@ public:
         }
 
         // ---------------------------------------------------------------------
-        // P6: 填充循环 (奉献 / 正义之锤 兜底)
+        // P6: 填充循环 (奉献 / 正义之锤 兜底，严格近战范围内施放)
         // ---------------------------------------------------------------------
-        uint32 const fillerConsecration = GetAppropriateRank(ProtectionPaladinSpells::CONSECRATION);
-        if (fillerConsecration && CanCast(me, fillerConsecration, true))
+        if (inMelee)
         {
-            if (ExecuteSpell(me, fillerConsecration, true, victim))
-                return;
-        }
+            uint32 const fillerConsecration = GetAppropriateRank(ProtectionPaladinSpells::CONSECRATION);
+            if (fillerConsecration && CanCast(me, fillerConsecration, true))
+            {
+                if (ExecuteSpell(me, fillerConsecration, true, victim))
+                    return;
+            }
 
-        uint32 const fillerHammer = GetAppropriateRank(ProtectionPaladinSpells::HAMMER_OF_THE_RIGHTEOUS);
-        if (fillerHammer && me->GetLevel() >= 60 && me->IsWithinDist(victim, 8.0f) && CanCast(victim, fillerHammer, true))
-        {
-            if (ExecuteSpell(victim, fillerHammer, true))
-                return;
+            uint32 const fillerHammer = GetAppropriateRank(ProtectionPaladinSpells::HAMMER_OF_THE_RIGHTEOUS);
+            if (fillerHammer && me->GetLevel() >= 60 && CanCast(victim, fillerHammer, true))
+            {
+                if (ExecuteSpell(victim, fillerHammer, true))
+                    return;
+            }
         }
     }
 
@@ -290,19 +303,84 @@ private:
 
     // =========================================================================
     // 周围可攻击敌人计数器 (用于群体仇恨判定)
+    // 跨来源去重采样：自身 + 主人/队友 + 随从集群的战斗攻击者，
+    // 确保能识别正在攻击队友、而非仅攻击自身的怪物。
     // =========================================================================
     uint32 CountNearbyEnemies(float range)
     {
-        uint32 count = 0;
-        for (Unit* attacker : me->getAttackers())
+        std::vector<Unit*> enemies;
+
+        auto Consider = [&](Unit* candidate)
         {
-            if (attacker && attacker->IsAlive() && attacker->GetMap() == me->GetMap() &&
-                me->IsWithinDist(attacker, range) && me->IsValidAttackTarget(attacker))
+            if (!candidate || !candidate->IsAlive() || !candidate->IsInWorld())
+                return;
+            if (candidate == me || candidate->GetMap() != me->GetMap())
+                return;
+            if (!me->IsWithinDist(candidate, range) || !me->IsValidAttackTarget(candidate))
+                return;
+            if (std::find(enemies.begin(), enemies.end(), candidate) != enemies.end())
+                return;
+
+            enemies.push_back(candidate);
+        };
+
+        // 1. 自身战斗攻击者
+        for (Unit* attacker : me->getAttackers())
+            Consider(attacker);
+
+        Player* master = GetMaster();
+
+        if (master)
+        {
+            // 2. 指挥官与指挥官的宠物
+            for (Unit* attacker : master->getAttackers())
+                Consider(attacker);
+
+            if (Unit* masterPet = master->GetPet())
             {
-                ++count;
+                for (Unit* attacker : masterPet->getAttackers())
+                    Consider(attacker);
+            }
+
+            // 3. 小队成员的战斗攻击者
+            if (Group* group = master->GetGroup())
+            {
+                for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+                {
+                    Player* member = itr->GetSource();
+                    if (!member || member == master)
+                        continue;
+
+                    for (Unit* attacker : member->getAttackers())
+                        Consider(attacker);
+
+                    if (Unit* memberPet = member->GetPet())
+                    {
+                        for (Unit* attacker : memberPet->getAttackers())
+                            Consider(attacker);
+                    }
+                }
+            }
+
+            // 4. 同指挥官随从集群
+            {
+                std::lock_guard<std::mutex> lock(s_botRegistryMutex);
+                auto it = s_masterBotRegistry.find(master->GetGUID());
+                if (it != s_masterBotRegistry.end())
+                {
+                    for (AdaptiveBotAI* allyBot : it->second)
+                    {
+                        if (allyBot && allyBot->me && allyBot->me != me)
+                        {
+                            for (Unit* attacker : allyBot->me->getAttackers())
+                                Consider(attacker);
+                        }
+                    }
+                }
             }
         }
-        return count;
+
+        return static_cast<uint32>(enemies.size());
     }
 
     // =========================================================================
@@ -392,23 +470,36 @@ private:
         return ExecuteSpell(me, ProtectionPaladinSpells::RIGHTEOUS_FURY, true);
     }
 
+    uint32 GetPreferredSealSpell() const
+    {
+        // 复仇圣印需 64 级解锁，低级段（含 < 24 级）回退至正义圣印兜底
+        if (me->GetLevel() >= 64)
+            return ProtectionPaladinSpells::SEAL_OF_VENGEANCE;
+
+        return ProtectionPaladinSpells::SEAL_OF_RIGHTEOUSNESS;
+    }
+
     bool MaintainSeal()
     {
         if (me->HasAura(ProtectionPaladinSpells::SEAL_OF_VENGEANCE) ||
-            me->HasAura(ProtectionPaladinSpells::SEAL_OF_CORRUPTION))
+            me->HasAura(ProtectionPaladinSpells::SEAL_OF_CORRUPTION) ||
+            me->HasAura(ProtectionPaladinSpells::SEAL_OF_RIGHTEOUSNESS))
         {
             return false;
         }
 
-        if (CanCast(me, ProtectionPaladinSpells::SEAL_OF_VENGEANCE, true))
+        uint32 const preferredSeal = GetPreferredSealSpell();
+        if (CanCast(me, preferredSeal, true))
         {
-            if (ExecuteSpell(me, ProtectionPaladinSpells::SEAL_OF_VENGEANCE, true))
+            if (ExecuteSpell(me, preferredSeal, true))
                 return true;
         }
 
-        if (CanCast(me, ProtectionPaladinSpells::SEAL_OF_CORRUPTION, true))
+        // 高级圣印未解锁或施放失败时，回退至正义圣印
+        if (preferredSeal != ProtectionPaladinSpells::SEAL_OF_RIGHTEOUSNESS &&
+            CanCast(me, ProtectionPaladinSpells::SEAL_OF_RIGHTEOUSNESS, true))
         {
-            if (ExecuteSpell(me, ProtectionPaladinSpells::SEAL_OF_CORRUPTION, true))
+            if (ExecuteSpell(me, ProtectionPaladinSpells::SEAL_OF_RIGHTEOUSNESS, true))
                 return true;
         }
 
@@ -452,6 +543,29 @@ private:
     }
 
     // =========================================================================
+    // 神圣祈求维护器 (法力恢复闭环)
+    // =========================================================================
+    bool MaintainDivinePlea(float manaPctThreshold)
+    {
+        if (me->getPowerType() != POWER_MANA)
+            return false;
+
+        if (me->GetLevel() < ProtectionPaladinSpells::DIVINE_PLEA_MIN_LEVEL)
+            return false;
+
+        if (me->HasAura(ProtectionPaladinSpells::DIVINE_PLEA))
+            return false;
+
+        if (me->GetPowerPct(POWER_MANA) >= manaPctThreshold)
+            return false;
+
+        if (!CanCast(me, ProtectionPaladinSpells::DIVINE_PLEA, true))
+            return false;
+
+        return ExecuteSpell(me, ProtectionPaladinSpells::DIVINE_PLEA, true);
+    }
+
+    // =========================================================================
     // 防护天赋被动光环补偿 (弥补 NPC 缺天赋树缺陷)
     // =========================================================================
     void ApplyPassiveTalents()
@@ -475,6 +589,7 @@ private:
         SyncPassive(10, ProtectionPaladinSpells::AURA_TOUGHNESS);
         SyncPassive(10, ProtectionPaladinSpells::AURA_ANTICIPATION);
         SyncPassive(10, ProtectionPaladinSpells::AURA_REDOUBT);
+        SyncPassive(50, ProtectionPaladinSpells::ARDENT_DEFENDER); // 50 级解锁被动免死 (春哥)
     }
 };
 
