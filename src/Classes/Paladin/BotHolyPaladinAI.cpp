@@ -59,7 +59,6 @@ public:
         switch (spellId)
         {
             case HolyPaladinSpells::DIVINE_FAVOR:        return 20; // 神恩术
-            case HolyPaladinSpells::DIVINE_SHIELD:       return 34; // 圣盾术 Rank 2
             case HolyPaladinSpells::HOLY_SHOCK:          return 40; // 神圣震击
             case HolyPaladinSpells::DIVINE_ILLUMINATION: return 50; // 神启
             case HolyPaladinSpells::BEACON_OF_LIGHT:     return 60; // 圣光道标
@@ -725,8 +724,11 @@ private:
 
         float const avgHp = groupSnapshot.averageHpPct;
 
-        // 全队血线 < 60%：治疗压力过大，禁止开启降低 50% 治疗量的神圣祈求
-        if (avgHp < 60.0f)
+        // 前置门禁：只要全队平均血线 < 60% 或任一成员血线 < 70%，即判定治疗压力过大，
+        // 严禁启动任何神圣祈求或对冲流程。
+        // 必须把单体门禁与均值门禁合并前移：否则会在单体大出血时先空交复仇之怒大招，
+        // 随后才被单体门禁拦下，白白浪费 3 分钟 CD 的爆发底牌。
+        if (avgHp < 60.0f || groupSnapshot.lowestHpPct < 70.0f)
             return false;
 
         // 60% ~ 80%：必须先以复仇之怒 (+20% 治疗) 对冲神圣祈求的 50% 治疗惩罚
@@ -744,11 +746,6 @@ private:
                 return false; // 等待翅膀生效后再开祈求
             }
         }
-
-        // 单体门禁：仅平均血线达标是不够的，主坦等任一队员低于 70% 时
-        // 禁止开启降低 50% 治疗量的神圣祈求，杜绝单体大出血期间的治疗空窗灭团
-        if (groupSnapshot.lowestHpPct < 70.0f)
-            return false;
 
         uint32 const divinePlea = GetAppropriateRank(HolyPaladinSpells::DIVINE_PLEA, true);
         if (divinePlea && !me->HasAura(divinePlea))
@@ -902,7 +899,9 @@ private:
         if (!anchor || !anchor->IsAlive())
             anchor = GetMaster();
 
-        if (!anchor || !anchor->IsInWorld() || anchor->GetMap() != me->GetMap())
+        // 存活校验必不可少：坦克与指挥官同时阵亡时，锚点会退化为尸体，
+        // 缺此校验会导致随从盲目跟随尸体移动，放弃原地自保与救援
+        if (!anchor || !anchor->IsAlive() || !anchor->IsInWorld() || anchor->GetMap() != me->GetMap())
             return;
 
         bool const underMeleePressure = IsUnderPhysicalMelee(me);
