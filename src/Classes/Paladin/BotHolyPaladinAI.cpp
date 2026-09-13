@@ -410,22 +410,24 @@ private:
     // =========================================================================
     bool MaintainAura()
     {
-        if (me->HasAura(HolyPaladinSpells::CONCENTRATION_AURA) ||
-            me->HasAura(HolyPaladinSpells::DEVOTION_AURA))
+        uint32 const concentration = GetAppropriateRank(HolyPaladinSpells::CONCENTRATION_AURA, false);
+
+        // 专注光环是治疗主光环：已学会时无条件维持自身那一份，
+        // 绝不因防骑队友的虔诚光环覆盖而误判为「已有光环」而放弃施放
+        if (concentration)
         {
-            return false;
+            if (me->HasAura(concentration))
+                return false;
+
+            return CanCast(me, concentration, true) && ExecuteSpell(me, concentration, true);
         }
 
-        uint32 const concentration = GetAppropriateRank(HolyPaladinSpells::CONCENTRATION_AURA, false);
-        if (concentration && CanCast(me, concentration, true) && ExecuteSpell(me, concentration, true))
-            return true;
-
-        // 专注光环不可用时以虔诚光环兜底
+        // 低等级过渡期回退虔诚光环：仅校验自身施加的那一份，避免干扰团队他人的光环配置
         uint32 const devotion = GetAppropriateRank(HolyPaladinSpells::DEVOTION_AURA, false);
-        if (devotion && CanCast(me, devotion, true) && ExecuteSpell(me, devotion, true))
-            return true;
+        if (!devotion || me->GetAura(devotion, me->GetGUID()))
+            return false;
 
-        return false;
+        return CanCast(me, devotion, true) && ExecuteSpell(me, devotion, true);
     }
 
     bool MaintainSealOfWisdom()
@@ -525,8 +527,13 @@ private:
     // =========================================================================
     bool MaintainJudgementsOfThePure(Unit* victim)
     {
-        if (me->HasAura(HolyPaladinSpells::JUDGEMENTS_OF_THE_PURE))
-            return false;
+        // 仅以「急速 Buff 本体」作为判定依据；剩余 > 3 秒不重复审判，
+        // 缺失或即将断档时立即补打，彻底解除对被动光环自检导致的死锁
+        if (Aura* hasteAura = me->GetAura(HolyPaladinSpells::BUFF_JUDGEMENTS_OF_THE_PURE))
+        {
+            if (hasteAura->GetDuration() > 3000)
+                return false;
+        }
 
         uint32 const judgement = GetAppropriateRank(HolyPaladinSpells::JUDGEMENT_OF_LIGHT, false);
         if (!judgement)
@@ -549,7 +556,19 @@ private:
         if (me->getPowerType() != POWER_MANA || !me->IsInCombat())
             return false;
 
-        if (me->GetPowerPct(POWER_MANA) >= 40.0f)
+        float const manaPct = me->GetPowerPct(POWER_MANA);
+
+        // 神启：耗蓝减半，法力 < 50% 即卡 CD 开启 (无血线门槛)，
+        // 提前覆盖后续高压刷血窗口，提升整场续航总效率
+        uint32 const divineIllumination = GetAppropriateRank(HolyPaladinSpells::DIVINE_ILLUMINATION, false);
+        if (divineIllumination && manaPct < 50.0f && !me->HasAura(divineIllumination))
+        {
+            if (CanCast(me, divineIllumination, true) && ExecuteSpell(me, divineIllumination, true))
+                return true;
+        }
+
+        // 神圣祈求会降低 50% 治疗量，仅在法力 < 40% 时才进入其仲裁流程
+        if (manaPct >= 40.0f)
             return false;
 
         float const avgHp = groupSnapshot.averageHpPct;
@@ -557,14 +576,6 @@ private:
         // 全队血线 < 60%：治疗压力过大，禁止开启降低 50% 治疗量的神圣祈求
         if (avgHp < 60.0f)
             return false;
-
-        // 神启：耗蓝减半，血线安全时优先开启，提升后续大加的续航效率
-        uint32 const divineIllumination = GetAppropriateRank(HolyPaladinSpells::DIVINE_ILLUMINATION, false);
-        if (divineIllumination && avgHp >= 70.0f && !me->HasAura(divineIllumination))
-        {
-            if (CanCast(me, divineIllumination, true) && ExecuteSpell(me, divineIllumination, true))
-                return true;
-        }
 
         // 60% ~ 80%：必须先以复仇之怒 (+20% 治疗) 对冲神圣祈求的 50% 治疗惩罚
         if (avgHp < 80.0f)
@@ -712,7 +723,10 @@ private:
         {
             // 被贴脸时禁止原地后撤：后撤会被持续追打并拉开与坦克的距离，
             // 必须立刻贴到坦克身侧，借坦克的 AoE 仇恨把小怪拉走。
-            me->GetMotionMaster()->MoveFollow(anchor, 2.0f, 0.0f);
+            // 加双闸门 (距离 > 3 码 且 未处于跟随态) 防止每帧重建移动生成器造成路径抖动。
+            if (me->GetDistance(anchor) > 3.0f && moveType != FOLLOW_MOTION_TYPE)
+                me->GetMotionMaster()->MoveFollow(anchor, 2.0f, 0.0f);
+
             return;
         }
 
@@ -745,10 +759,10 @@ private:
         SyncPassive(50, HolyPaladinSpells::HOLY_GUIDANCE);       // 神圣指引：智力转化法强
         SyncPassive(50, HolyPaladinSpells::INFUSION_OF_LIGHT);   // 圣光灌注：圣光闪现/神圣震击强化
 
-        // 纯洁审判 (JUDGEMENTS_OF_THE_PURE) 是仅存在于天赋树中的被动触发器。
-        // Creature 没有天赋树，必须注入该被动本体，否则施放审判后永远无法获得急速 Buff；
-        // 急速 Buff 本身仍由 MaintainJudgementsOfThePure() 通过审判动态刷新。
-        SyncPassive(50, HolyPaladinSpells::JUDGEMENTS_OF_THE_PURE);
+        // 纯洁审判天赋被动：Creature 没有天赋树，必须注入被动触发器 (54155)，
+        // 否则施放审判后引擎不会派生急速 Buff (53657)；
+        // 急速 Buff 本体仍由 MaintainJudgementsOfThePure() 依剩余时间动态刷新。
+        SyncPassive(50, HolyPaladinSpells::TALENT_JUDGEMENTS_OF_THE_PURE);
     }
 };
 

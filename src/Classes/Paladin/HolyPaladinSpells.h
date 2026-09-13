@@ -46,6 +46,10 @@ namespace HolyPaladinSpells
     constexpr uint32 IMPROVED_JUDGEMENTS    = 25956; // 强化审判 Rank 2 (审判射程 +20 码)
     constexpr uint32 ILLUMINATION           = 20272; // 启发 Rank 5 (暴击治疗回蓝)
     constexpr uint32 HOLY_GUIDANCE          = 31841; // 神圣指引 Rank 5 (智力转化法强)
-    constexpr uint32 JUDGEMENTS_OF_THE_PURE = 53673; // 纯洁审判 Rank 5 (审判后 15% 急速)
     constexpr uint32 INFUSION_OF_LIGHT      = 53576; // 圣光灌注 Rank 2
+
+    // 纯洁审判必须严格分离「天赋被动触发器」与「急速 Buff 本体」：
+    // NPC 没有天赋树，需注入被动 (54155)，审判命中后才会由引擎派生急速 Buff (53657)。
+    constexpr uint32 TALENT_JUDGEMENTS_OF_THE_PURE = 54155; // 纯洁审判 Rank 5 (天赋被动触发器)
+    constexpr uint32 BUFF_JUDGEMENTS_OF_THE_PURE   = 53657; // 纯洁审判急速 Buff (15% 急速，1 分钟)
 }
