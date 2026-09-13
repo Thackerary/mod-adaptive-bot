@@ -1,9 +1,8 @@
 !.gitignore
 
-#
-#Generic
-#
-
+# ==========================================
+# 1. 通用临时与系统文件
+# ==========================================
 .directory
 .mailmap
 *.orig
@@ -20,30 +19,81 @@ CMakeLists.txt.user
 *.BACKUP.*
 *.BASE.*
 *.LOCAL.*
-
-#
-# IDE & other softwares
-#
-/.settings/
-/.externalToolBuilders/*
-# exclude in all levels
-nbproject/
-.sync.ffs_db
-*.kate-swp
-
-#
-# Eclipse
-#
-*.pydevproject
-.metadata
-.gradle
 tmp/
 *.tmp
 *.swp
 *~.nib
 local.properties
+.sync.ffs_db
+*.kate-swp
+
+# ==========================================
+# 2. Aider 缓存
+# ==========================================
+.aider*
+
+# ==========================================
+# 3. CMake & 构建产物 (杜绝扫描卡顿)
+# ==========================================
+build/
+bin/
+self_server/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+CMakeScripts/
+Makefile
+cmake_install.cmake
+install_manifest.txt
+*.dir/
+
+# ==========================================
+# 4. 编译产物与中间文件
+# ==========================================
+*.obj
+*.o
+*.lib
+*.a
+*.dll
+*.so
+*.dylib
+*.exe
+*.exp
+*.pdb
+*.ilk
+*.idb
+*.tlog
+*.pch
+*.res
+
+# ==========================================
+# 5. IDE 配置 (VS / VS Code / CLion / Eclipse)
+# ==========================================
+.vs/
+*.suo
+*.user
+*.userosv
+*.sln.docstates
+.vscode/
+.idea/
 .settings/
+/.externalToolBuilders/*
+nbproject/
+*.pydevproject
+.metadata
+.gradle
 .loadpath
 .project
 .cproject
-.aider*
+
+# ==========================================
+# 6. 服务端运行日志与提取数据
+# ==========================================
+*.log
+logs/
+server.log
+DBErrors.log
+dbc/
+maps/
+vmaps/
+mmaps/
