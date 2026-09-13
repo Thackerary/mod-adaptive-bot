@@ -59,7 +59,17 @@ namespace DisciplinePriestSpells
     constexpr uint32 IMPROVED_POWER_WORD_FORTITUDE = 14749; // 强化真言术：韧
     constexpr uint32 IMPROVED_INNER_FIRE           = 14747; // 强化心灵之火
     constexpr uint32 MEDITATION                    = 14777; // 冥想 (施法中保持 30% 法力回复)
-    constexpr uint32 SPIRITUAL_GUIDANCE            = 15031; // 精神指引 (精神转化法强)
+
+    // -------------------------------------------------------------------------
+    // 5.1 戒律核心天赋 (WotLK 3.3.5a 被动光环等价注入)
+    // 灵性指引 (SPIRITUAL_GUIDANCE) 属神圣系天赋，戒律专精不注入，已移除。
+    // 下列天赋缺失将直接导致盾量、回蓝与治疗增效全面亏模，团本高压必崩。
+    // -------------------------------------------------------------------------
+    constexpr uint32 SOUL_WARDING  = 63574; // 灵魂护体 (40 级)：真言术：盾 CD -4 秒(归零)，蓝耗 -30%
+    constexpr uint32 RAPTURE       = 47537; // 狂喜 (40 级)：盾吸收或被驱散时按比例返还法力
+    constexpr uint32 DIVINE_AEGIS  = 47515; // 神圣庇护 (50 级)：暴击治疗转化为 30% 吸收盾
+    constexpr uint32 GRACE         = 47517; // 恩赐 (50 级)：提升目标受到的治疗效果
+    constexpr uint32 BORROWED_TIME = 52798; // 争分夺秒 (60 级)：套盾后下个法术急速 +25%
 
     // =========================================================================
     // 6. 核心雕文 (Major Glyphs)

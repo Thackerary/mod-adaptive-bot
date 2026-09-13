@@ -56,6 +56,8 @@ public:
 
     // =========================================================================
     // 天赋依赖技能的最低等级契约
+    // 注：暗影魔 (34433) 为 66 级基础技能而非天赋，不得登记于此，
+    //     其等级门槛由 GetAppropriateRank 依据 DBC SpellLevel 自动降阶处理。
     // =========================================================================
     uint8 GetTalentSpellMinLevel(uint32 spellId) const override
     {
@@ -64,7 +66,6 @@ public:
             case DisciplinePriestSpells::INNER_FOCUS:      return 20; // 心灵专注
             case DisciplinePriestSpells::POWER_INFUSION:   return 40; // 能量注入
             case DisciplinePriestSpells::PAIN_SUPPRESSION: return 50; // 痛苦压制
-            case DisciplinePriestSpells::SHADOWFIEND:      return 50; // 暗影魔
             case DisciplinePriestSpells::PENANCE:          return 60; // 苦修 (戒律顶层天赋)
             default:                                       return 0;
         }
@@ -112,9 +113,10 @@ public:
         RefreshGroupSnapshot();
 
         // 全局读条/通道守卫：快速治疗 (读条) 与苦修 (通道) 期间引擎均会置位
-        // UNIT_STATE_CASTING，此处冻结一切决策，杜绝被自身跟随移动指令
-        // (UpdateFollowMaster / MoveFollow) 掐断读条与通道。
-        if (me->HasUnitState(UNIT_STATE_CASTING))
+        // UNIT_STATE_CASTING，但引导类法术在部分状态下并不置位该标记，
+        // 因此追加 CURRENT_CHANNELED_SPELL 显式判定形成双保险，
+        // 杜绝苦修引导被自身跟随移动指令 (UpdateFollowMaster / MoveFollow) 掐断。
+        if (me->HasUnitState(UNIT_STATE_CASTING) || me->GetCurrentSpell(CURRENT_CHANNELED_SPELL))
             return;
 
         // =====================================================================
@@ -428,10 +430,8 @@ private:
         if (TryPanicShield())
             return true;
 
-        // 全队整体崩坏：单点阶梯治疗来不及逐个覆盖，切换群体急救底牌
-        if (TryGroupEmergencyHeal())
-            return true;
-
+        // P0 只保留瞬发底牌：治疗祷言为 3 秒读条，在单体濒死期占用通道等同于
+        // 放弃急救，已下沉至 P3 群体抬血分支，在无濒死危险时才择机施放。
         return false;
     }
 
@@ -512,6 +512,24 @@ private:
         return ExecuteSpell(target, shield, true);
     }
 
+    // 阶梯治疗专用补盾：目标无盾且未处于灵魂虚弱时瞬发止血，
+    // 并借争分夺秒 (BORROWED_TIME) 为后续苦修/快速治疗挂上 25% 急速，
+    // 是戒律单体连招的起手式，与全团预铺盾 (TryPreShield) 门禁完全解耦。
+    bool TryLadderShield(Unit* target)
+    {
+        uint32 const shield = GetAppropriateRank(DisciplinePriestSpells::POWER_WORD_SHIELD, false);
+        if (!shield || !target || target->ToPet())
+            return false;
+
+        if (target->HasAura(shield) || target->HasAura(DisciplinePriestSpells::WEAKENED_SOUL))
+            return false;
+
+        if (!CanCast(target, shield, true))
+            return false;
+
+        return ExecuteSpell(target, shield, true);
+    }
+
     // =========================================================================
     // P0-3: 全队崩溃保护 (群体急救底牌)
     // -------------------------------------------------------------------------
@@ -521,6 +539,12 @@ private:
     // =========================================================================
     bool TryGroupEmergencyHeal()
     {
+        // 安全门禁：全队最低血线 >= 50% 才允许停步读条。
+        // 治疗祷言读条 3 秒，若仍有单体在濒死线挣扎，这 3 秒足以让目标暴毙，
+        // 此时施法权必须无条件让渡给 P0 瞬发急救与 P3 单体阶梯治疗。
+        if (groupSnapshot.lowestHpPct < 50.0f)
+            return false;
+
         // 触发门禁：全队平均血线跌入 70% 以下，且至少 3 名非宠物成员低于 80%
         if (groupSnapshot.allies.size() < 3 || groupSnapshot.averageHpPct >= 70.0f)
             return false;
@@ -567,10 +591,18 @@ private:
         if (!shield)
             return false;
 
-        // 战时血线门禁：全队跌入 55% 以下重伤线时，施法权必须全部让给 P3 阶梯治疗
-        // 与痛苦压制。盾虽是瞬发，但单次吸收量低于一次快速治疗，绝不能在重伤期抢占救命 GCD。
+        // 法力门禁：战时 < 50%、脱战 < 60% 时禁止全团无差别预铺。
+        // 盾的覆盖收益必须让位于续航安全，抽干法力会让后续高压窗口无蓝可用。
+        float const manaPct = me->GetPowerPct(POWER_MANA);
+        if (me->IsInCombat() ? (manaPct < 50.0f) : (manaPct < 60.0f))
+            return false;
+
+        // 战时血线门禁上提至 80%：只要全队出现任何需要正经治疗的目标，
+        // 施法权必须无条件让渡给 P3 阶梯治疗与 P0 急救。否则会出现
+        // 「主坦 55% 残血且挂着灵魂虚弱，牧师却连续给满血队友套盾」的治疗倒挂，
+        // 最终演变为倒坦事故。
         // (濒死个体会由 TryPanicShield 单独开辟绿色通道，不受此门禁限制)
-        if (me->IsInCombat() && groupSnapshot.lowestHpPct < 55.0f)
+        if (me->IsInCombat() && groupSnapshot.lowestHpPct < 80.0f)
             return false;
 
         std::vector<Unit*> candidates;
@@ -694,8 +726,10 @@ private:
             return false;
 
         // 暗影魔：法力枯竭时的主力回蓝手段。
+        // 该技能为 66 级基础技能而非天赋，GetAppropriateRank 第二参数必须传 false，
+        // 否则会被误判为天赋技能而绕开等级降阶逻辑。
         // 召唤物需要敌对目标承载，无有效敌人时必须跳过，避免无目标空放
-        uint32 const shadowfiend = GetAppropriateRank(DisciplinePriestSpells::SHADOWFIEND, true);
+        uint32 const shadowfiend = GetAppropriateRank(DisciplinePriestSpells::SHADOWFIEND, false);
         if (!shadowfiend || !victim || !victim->IsAlive() || victim->GetMap() != me->GetMap() || victim->IsFriendlyTo(me))
             return false;
 
@@ -747,29 +781,6 @@ private:
         return ExecuteSpell(target, flashHeal, true);
     }
 
-    bool MaintainRenew()
-    {
-        uint32 const renew = GetAppropriateRank(DisciplinePriestSpells::RENEW, false);
-        if (!renew)
-            return false;
-
-        // 瞬发 HoT 只铺给中危目标，满血铺 HoT 属纯浪费
-        if (groupSnapshot.lowestHpPct >= 90.0f)
-            return false;
-
-        Unit* target = groupSnapshot.lowestHpAlly;
-        if (!IsValidHealTarget(target) || target->ToPet())
-            return false;
-
-        if (target->HasAura(renew))
-            return false;
-
-        if (!CanCast(target, renew, true))
-            return false;
-
-        return ExecuteSpell(target, renew, true);
-    }
-
     bool TryPrayerOfMending()
     {
         uint32 const prayerOfMending = GetAppropriateRank(DisciplinePriestSpells::PRAYER_OF_MENDING, false);
@@ -805,12 +816,20 @@ private:
         float const hpPct = groupSnapshot.lowestHpPct;
 
         // ---------------------------------------------------------------------
-        // 高危重伤 (< 60%)：苦修 (通道，单体 HPS 最高) 优先，
-        // 冷却/等级未达时回退快速治疗读条救场
-        // 此阶段严禁先铺恢复：1 个 GCD 的 HoT 不足以阻止目标在伤害尖峰下暴毙
+        // 群体抬血通道：仅在无单体濒死危险时启用 (内部含 < 50% 安全门禁)。
+        // 恢复已被移除：戒律天赋不强化 HoT，铺恢复属纯粹抢占救命 GCD。
+        // ---------------------------------------------------------------------
+        if (TryGroupEmergencyHeal())
+            return true;
+
+        // ---------------------------------------------------------------------
+        // 高危重伤 (< 60%)：戒律瞬发三连起手
+        // 补盾 (瞬发止血 + 争分夺秒 25% 急速) -> 苦修 (首跳瞬抬，单体 HPS 峰值)
+        // -> 快速治疗读条兜底。
         // ---------------------------------------------------------------------
         if (hpPct < 60.0f)
         {
+            if (TryLadderShield(target)) return true;
             if (TryPenance(target)) return true;
             if (TryFlashHeal(target)) return true;
 
@@ -818,11 +837,11 @@ private:
         }
 
         // ---------------------------------------------------------------------
-        // 中度掉血 (< 80%)：恢复瞬发铺 HoT -> 愈合祷言挂坦 -> 苦修 -> 快速治疗
+        // 中度掉血 (< 80%)：补盾连招 -> 愈合祷言挂主坦弹跳 -> 苦修 -> 快速治疗
         // ---------------------------------------------------------------------
         if (hpPct < 80.0f)
         {
-            if (MaintainRenew()) return true;
+            if (TryLadderShield(target)) return true;
             if (TryPrayerOfMending()) return true;
             if (TryPenance(target)) return true;
             if (TryFlashHeal(target)) return true;
@@ -831,9 +850,10 @@ private:
         }
 
         // ---------------------------------------------------------------------
-        // 平稳掉血 (80% ~ 95%)：恢复效率铺 HoT，缺失时快速治疗平稳填充
+        // 平稳掉血 (80% ~ 95%)：苦修效率填充，冷却时快速治疗平稳收尾
+        // 此区间不补盾：预铺盾已由 P1 TryPreShield (80% 血线门禁) 统一调度
         // ---------------------------------------------------------------------
-        if (MaintainRenew()) return true;
+        if (TryPenance(target)) return true;
         if (TryFlashHeal(target)) return true;
 
         return false;
@@ -883,10 +903,16 @@ private:
                         anchor = ally;
                 }
 
-                if (debuffedCount >= 2 && anchor && CanCast(anchor, massDispel, true) &&
-                    ExecuteSpell(anchor, massDispel, true))
+                // 群体驱散为读条法术：必须先刹停，否则移动中施法会被引擎
+                // 以 SPELL_FAILED_MOVING 直接拒绝，白烧一轮 GCD。
+                // 刹停时机严格下沉至 CanCast 通过之后，避免校验失败白白放弃机动性。
+                if (debuffedCount >= 2 && anchor && CanCast(anchor, massDispel, true))
                 {
-                    return true;
+                    if (me->isMoving())
+                        me->StopMoving();
+
+                    if (ExecuteSpell(anchor, massDispel, true))
+                        return true;
                 }
             }
         }
@@ -990,7 +1016,14 @@ private:
         SyncPassive(20, DisciplinePriestSpells::IMPROVED_POWER_WORD_SHIELD);     // 强化真言术：盾：吸收量 +15%
         SyncPassive(20, DisciplinePriestSpells::IMPROVED_POWER_WORD_FORTITUDE);  // 强化真言术：韧
         SyncPassive(30, DisciplinePriestSpells::MEDITATION);                     // 冥想：施法中保持法力回复
-        SyncPassive(40, DisciplinePriestSpells::SPIRITUAL_GUIDANCE);             // 精神指引：精神转化法强
+
+        // 戒律核心天赋：精神指引属神圣系天赋，戒律专精不注入，已移除。
+        // 下列天赋缺失将导致盾量、回蓝与治疗增效全面亏模，团本高压期必然崩盘。
+        SyncPassive(40, DisciplinePriestSpells::SOUL_WARDING);                   // 灵魂护体：盾 CD 归零 + 蓝耗 -30%
+        SyncPassive(40, DisciplinePriestSpells::RAPTURE);                        // 狂喜：盾吸收/被驱散时返还法力
+        SyncPassive(50, DisciplinePriestSpells::DIVINE_AEGIS);                   // 神圣庇护：暴击治疗转 30% 吸收盾
+        SyncPassive(50, DisciplinePriestSpells::GRACE);                          // 恩赐：提升目标受到的治疗效果
+        SyncPassive(60, DisciplinePriestSpells::BORROWED_TIME);                  // 争分夺秒：套盾后下个法术急速 +25%
 
         // 真言术：盾雕文：盾被打破时为目标附加治疗，预铺收益的核心放大器
         SyncPassive(60, DisciplinePriestSpells::GLYPH_OF_POWER_WORD_SHIELD);
