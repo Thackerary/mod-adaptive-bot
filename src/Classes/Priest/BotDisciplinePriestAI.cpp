@@ -166,6 +166,7 @@ public:
             if (MaintainTeamBuffs()) return;
         }
 
+        if (MaintainTankShield()) return;
         if (TryPreShield()) return;
 
         // ---- P2: 续航仲裁 ----
@@ -407,13 +408,19 @@ private:
                 return true;
         }
 
-        uint32 const renew = GetAppropriateRank(DisciplinePriestSpells::RENEW, false);
-        if (renew && !me->HasAura(renew))
+        // 绝望祷言：瞬发、无读条、无移动惩罚的自疗大招，是唯一能在濒死期
+        // 不牺牲机动性的自救底牌。原先在此处铺【恢复】属严重误配：
+        // 戒律天赋不强化 HoT，单跳治疗量远低于苦修/快速治疗，
+        // 只会白占一个救命 GCD。
+        uint32 const desperatePrayer = GetAppropriateRank(DisciplinePriestSpells::DESPERATE_PRAYER, false);
+        if (desperatePrayer && !me->HasAura(desperatePrayer))
         {
-            if (CanCast(me, renew, true) && ExecuteSpell(me, renew, true))
+            if (CanCast(me, desperatePrayer, true) && ExecuteSpell(me, desperatePrayer, true))
                 return true;
         }
 
+        // 绝望祷言冷却或未达等级时直接放行：决策流自然落入 P3 TryLadderHeal，
+        // 由苦修 (首跳瞬抬) 或快速治疗直接对自身执行高 HPS 治疗
         return false;
     }
 
@@ -466,11 +473,14 @@ private:
                 if (ally->GetHealthPct() >= 25.0f)
                     continue;
 
-                // 仅在物理集火场景下交出减伤，避免纯粹法系掉血时浪费这张底牌
-                if (!IsUnderPhysicalMelee(ally))
+                if (!IsValidHealTarget(ally))
                     continue;
 
-                if (!IsValidHealTarget(ally))
+                // 承伤判定：只要该成员正处于承伤状态 (被物理贴身，或仇恨列表非空 /
+                // 处于战斗中)，即便伤害来源是法术、远程或环境机制，也应果断交出
+                // 40% 减伤底牌。原先强制要求物理贴身，会把法系尖刺与环境致死压力
+                // 整体漏判，底牌烂在手里直至队友暴毙。
+                if (!IsUnderPhysicalMelee(ally) && !ally->IsInCombat() && ally->getAttackers().empty())
                     continue;
 
                 target = ally;
@@ -539,10 +549,10 @@ private:
     // =========================================================================
     bool TryGroupEmergencyHeal()
     {
-        // 安全门禁：全队最低血线 >= 50% 才允许停步读条。
-        // 治疗祷言读条 3 秒，若仍有单体在濒死线挣扎，这 3 秒足以让目标暴毙，
+        // 安全门禁：全队最低血线 >= 65% 才允许停步读条。
+        // 治疗祷言读条 3 秒，若仍有成员处于重伤承压线，这 3 秒足以让目标暴毙，
         // 此时施法权必须无条件让渡给 P0 瞬发急救与 P3 单体阶梯治疗。
-        if (groupSnapshot.lowestHpPct < 50.0f)
+        if (groupSnapshot.lowestHpPct < 65.0f)
             return false;
 
         // 触发门禁：全队平均血线跌入 70% 以下，且至少 3 名非宠物成员低于 80%
@@ -583,7 +593,46 @@ private:
     }
 
     // =========================================================================
-    // P1: 真言术：盾全团预铺与修血
+    // P1-a: 主坦专属真言术：盾维护 (战时承伤核心)
+    // -------------------------------------------------------------------------
+    // 主坦的盾兼具「吸收尖刺伤害」与「降低治疗压力」双重收益，
+    // 必须与「全团无差别预铺」彻底解耦：无论团队血线如何，只要主坦缺盾
+    // 且未处于灵魂虚弱，就应在血线安全时优先保持覆盖。
+    // =========================================================================
+    bool MaintainTankShield()
+    {
+        uint32 const shield = GetAppropriateRank(DisciplinePriestSpells::POWER_WORD_SHIELD, false);
+        if (!shield)
+            return false;
+
+        // 主坦锚点缺失 (团队中无坦克定位成员) 时交由 TryPreShield 兜底
+        Unit* tank = groupSnapshot.mainTank;
+        if (!tank || tank->ToPet() || !IsValidHealTarget(tank))
+            return false;
+
+        // 主坦自身血线告急时严禁套盾：单次盾的吸收量低于一发快速治疗，
+        // 此时必须把 GCD 让渡给直接治疗通道，否则就是拿救命 GCD 去换等效更低的吸收。
+        // (主坦濒死会由 TryPanicShield 单独开辟瞬发绿色通道，不受此门禁限制)
+        if (tank->GetHealthPct() < 60.0f)
+            return false;
+
+        // 法力门禁：为主坦维持盾的前提是不能抽空后续高压窗口的治疗余量
+        if (me->GetPowerPct(POWER_MANA) < 35.0f)
+            return false;
+
+        // 灵魂虚弱期无法再次获得真言术：盾，必须严格校验，
+        // 否则会陷入「缺盾 -> 补盾 -> 被灵魂虚弱吃下 -> 下一帧依旧缺盾」的无效空转
+        if (tank->HasAura(shield) || tank->HasAura(DisciplinePriestSpells::WEAKENED_SOUL))
+            return false;
+
+        if (!CanCast(tank, shield, true))
+            return false;
+
+        return ExecuteSpell(tank, shield, true);
+    }
+
+    // =========================================================================
+    // P1-b: 真言术：盾全团预铺 (仅限团队极其健康的窗口)
     // =========================================================================
     bool TryPreShield()
     {
@@ -591,18 +640,19 @@ private:
         if (!shield)
             return false;
 
-        // 法力门禁：战时 < 50%、脱战 < 60% 时禁止全团无差别预铺。
-        // 盾的覆盖收益必须让位于续航安全，抽干法力会让后续高压窗口无蓝可用。
+        bool const inCombat = me->IsInCombat();
         float const manaPct = me->GetPowerPct(POWER_MANA);
-        if (me->IsInCombat() ? (manaPct < 50.0f) : (manaPct < 60.0f))
+
+        // 战时双门禁：全员极其健康 (>= 90%) 且法力充裕 (>= 60%)，才允许把 GCD
+        // 花在给满血队友套盾上。全队只要有人掉血，施法权必须无条件让渡给
+        // P3 阶梯治疗与 P0 急救，否则会出现「主坦残血挂着灵魂虚弱，
+        // 牧师却连续给满血队友套盾」的治疗真空，最终演变为倒坦事故。
+        // 主坦自身的盾由 MaintainTankShield 独立维护，不受此门禁影响。
+        if (inCombat && (groupSnapshot.lowestHpPct < 90.0f || manaPct < 60.0f))
             return false;
 
-        // 战时血线门禁上提至 80%：只要全队出现任何需要正经治疗的目标，
-        // 施法权必须无条件让渡给 P3 阶梯治疗与 P0 急救。否则会出现
-        // 「主坦 55% 残血且挂着灵魂虚弱，牧师却连续给满血队友套盾」的治疗倒挂，
-        // 最终演变为倒坦事故。
-        // (濒死个体会由 TryPanicShield 单独开辟绿色通道，不受此门禁限制)
-        if (me->IsInCombat() && groupSnapshot.lowestHpPct < 80.0f)
+        // 脱战是全团预铺的最佳窗口：无 GCD 竞争、无读条被打断风险，仅保留法力门禁
+        if (!inCombat && manaPct < 60.0f)
             return false;
 
         std::vector<Unit*> candidates;
@@ -630,6 +680,11 @@ private:
             // 灵魂虚弱：15 秒内无法再次获得真言术：盾。
             // 必须严格校验，否则「缺盾 -> 补盾 -> 被灵魂虚弱吃下 -> 下一帧依旧判定缺盾」
             // 会造成永久无效空转，把全部 GCD 烧在无法生效的施法上。
+            // 战时只覆盖满血成员：任何掉血成员都是 P3 阶梯治疗的服务对象，
+            // 用盾去顶掉他们的治疗位等同于制造治疗真空
+            if (inCombat && target->GetHealthPct() < 100.0f)
+                continue;
+
             if (target->HasAura(DisciplinePriestSpells::WEAKENED_SOUL))
                 continue;
 
@@ -816,16 +871,11 @@ private:
         float const hpPct = groupSnapshot.lowestHpPct;
 
         // ---------------------------------------------------------------------
-        // 群体抬血通道：仅在无单体濒死危险时启用 (内部含 < 50% 安全门禁)。
-        // 恢复已被移除：戒律天赋不强化 HoT，铺恢复属纯粹抢占救命 GCD。
-        // ---------------------------------------------------------------------
-        if (TryGroupEmergencyHeal())
-            return true;
-
-        // ---------------------------------------------------------------------
-        // 高危重伤 (< 60%)：戒律瞬发三连起手
+        // 高危重伤 (< 60%)：戒律瞬发三连起手，最高优先级。
         // 补盾 (瞬发止血 + 争分夺秒 25% 急速) -> 苦修 (首跳瞬抬，单体 HPS 峰值)
         // -> 快速治疗读条兜底。
+        // 群体抬血通道被强制排在本次分支之后：3 秒读条的治疗祷言绝不允许
+        // 在单体濒死重伤期抢走救命 GCD。
         // ---------------------------------------------------------------------
         if (hpPct < 60.0f)
         {
@@ -835,6 +885,15 @@ private:
 
             return false;
         }
+
+        // ---------------------------------------------------------------------
+        // 群体抬血通道：必须在单体高危急救分支之后执行。
+        // 治疗祷言读条 3 秒，在单体重伤期占用通道等同于放弃急救，
+        // 因此内部设置 65% 安全门禁，仅在全员脱离重伤承压线时才允许停步读条。
+        // (恢复已被移除：戒律天赋不强化 HoT，铺恢复属纯粹抢占救命 GCD)
+        // ---------------------------------------------------------------------
+        if (TryGroupEmergencyHeal())
+            return true;
 
         // ---------------------------------------------------------------------
         // 中度掉血 (< 80%)：补盾连招 -> 愈合祷言挂主坦弹跳 -> 苦修 -> 快速治疗

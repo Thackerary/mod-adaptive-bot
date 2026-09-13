@@ -69,7 +69,7 @@ namespace DisciplinePriestSpells
     constexpr uint32 RAPTURE       = 47537; // 狂喜 (40 级)：盾吸收或被驱散时按比例返还法力
     constexpr uint32 DIVINE_AEGIS  = 47515; // 神圣庇护 (50 级)：暴击治疗转化为 30% 吸收盾
     constexpr uint32 GRACE         = 47517; // 恩赐 (50 级)：提升目标受到的治疗效果
-    constexpr uint32 BORROWED_TIME = 52798; // 争分夺秒 (60 级)：套盾后下个法术急速 +25%
+    constexpr uint32 BORROWED_TIME = 52800; // 争分夺秒 Rank 5 (60 级)：满额急速 +25% 且法强加成盾吸收
 
     // =========================================================================
     // 6. 核心雕文 (Major Glyphs)
