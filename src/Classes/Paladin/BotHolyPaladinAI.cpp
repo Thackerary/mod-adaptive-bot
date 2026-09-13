@@ -394,8 +394,12 @@ private:
         if (layOnHandsTarget)
         {
             uint32 const layOnHands = GetAppropriateRank(HolyPaladinSpells::LAY_ON_HANDS, false);
-            // 圣疗术会为目标施加自律：已有自律者直接跳过，避免浪费这张超长 CD 底牌
-            if (layOnHands && !layOnHandsTarget->HasAura(HolyPaladinSpells::FORBEARANCE) &&
+            bool const isMainTank = (groupSnapshot.mainTank && layOnHandsTarget == groupSnapshot.mainTank);
+
+            // 圣疗术为目标施加自律且 CD 超长，属战略级底牌：非主坦目标严禁交给宠物，
+            // 避免猎人/术士宠物白白吃掉这张本可用于救团队的关键资源
+            if (layOnHands && (isMainTank || !layOnHandsTarget->ToPet()) &&
+                !layOnHandsTarget->HasAura(HolyPaladinSpells::FORBEARANCE) &&
                 CanCast(layOnHandsTarget, layOnHands, true) &&
                 ExecuteSpell(layOnHandsTarget, layOnHands, true))
             {
@@ -416,6 +420,11 @@ private:
 
                 // 排除主坦：坦克需要持续承伤建立仇恨，不可剥夺其被攻击判定
                 if (ally == groupSnapshot.mainTank)
+                    continue;
+
+                // 严禁对宠物施放保护之手：宠物物理免疫会丢失宠物仇恨链，
+                // 且宠物死亡可由主人复活，不值得消耗这张自律封技的减伤牌
+                if (ally->ToPet())
                     continue;
 
                 if (ally->GetHealthPct() >= 25.0f)
@@ -689,11 +698,8 @@ private:
         if (!IsValidHealTarget(target))
             return false;
 
-        // 立定读条：跟随/走位途中队友血崩时立刻刹停，
-        // 否则移动状态会持续打断圣光术 / 圣光闪现的读条（跑路不加血）
-        if (me->isMoving())
-            me->StopMoving();
-
+        // 立定校验下沉到各读条分支：神圣震击等瞬发技能允许在移动/逃跑途中直接施放，
+        // 仅在真正需要读条时才刹停，避免为瞬发技能白白放弃跑位自保能力
         float const hpPct = groupSnapshot.lowestHpPct;
 
         // ---------------------------------------------------------------------
@@ -714,10 +720,16 @@ private:
             if (holyShock && CanCast(target, holyShock, true) && ExecuteSpell(target, holyShock, true))
                 return true;
 
-            // 神圣震击冷却中：回退读条圣光术大加救场
+            // 神圣震击冷却中：回退读条圣光术大加救场 (读条期间必须立定)
             uint32 const holyLight = GetAppropriateRank(HolyPaladinSpells::HOLY_LIGHT, false);
-            if (holyLight && CanCast(target, holyLight, true) && ExecuteSpell(target, holyLight, true))
-                return true;
+            if (holyLight)
+            {
+                if (me->isMoving())
+                    me->StopMoving();
+
+                if (CanCast(target, holyLight, true) && ExecuteSpell(target, holyLight, true))
+                    return true;
+            }
 
             return false;
         }
@@ -731,9 +743,16 @@ private:
             if (holyShock && CanCast(target, holyShock, true) && ExecuteSpell(target, holyShock, true))
                 return true;
 
+            // 圣光术为长读条技能：仅在此刻刹停，避免被移动打断读条
             uint32 const holyLight = GetAppropriateRank(HolyPaladinSpells::HOLY_LIGHT, false);
-            if (holyLight && CanCast(target, holyLight, true) && ExecuteSpell(target, holyLight, true))
-                return true;
+            if (holyLight)
+            {
+                if (me->isMoving())
+                    me->StopMoving();
+
+                if (CanCast(target, holyLight, true) && ExecuteSpell(target, holyLight, true))
+                    return true;
+            }
 
             return false;
         }
@@ -742,8 +761,14 @@ private:
         // 平稳掉血 (80% ~ 95%)：圣光闪现效率填充
         // ---------------------------------------------------------------------
         uint32 const flashOfLight = GetAppropriateRank(HolyPaladinSpells::FLASH_OF_LIGHT, false);
-        if (flashOfLight && CanCast(target, flashOfLight, true) && ExecuteSpell(target, flashOfLight, true))
-            return true;
+        if (flashOfLight)
+        {
+            if (me->isMoving())
+                me->StopMoving();
+
+            if (CanCast(target, flashOfLight, true) && ExecuteSpell(target, flashOfLight, true))
+                return true;
+        }
 
         return false;
     }
@@ -810,8 +835,9 @@ private:
         {
             // 被贴脸时禁止原地后撤：后撤会被持续追打并拉开与坦克的距离，
             // 必须立刻贴到坦克身侧，借坦克的 AoE 仇恨把小怪拉走。
-            // 仅在状态跃迁时下发一次指令，防止每帧重建移动生成器造成路径抖动。
-            if (!isHuggingTank && (me->GetDistance(anchor) > 3.0f || moveType != FOLLOW_MOTION_TYPE))
+            // 移除 !isHuggingTank 先决阻断：施法 / StopMoving() 会清空移动生成器，
+            // 若依赖握手标记阻断，随从停步后将再也无法重新起步，陷入原地被围殴的假死。
+            if (moveType != FOLLOW_MOTION_TYPE && dist > 3.0f)
             {
                 me->GetMotionMaster()->MoveFollow(anchor, 2.0f, 0.0f);
                 isHuggingTank = true;
