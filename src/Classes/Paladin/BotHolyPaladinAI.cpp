@@ -120,6 +120,14 @@ public:
             if (TryEngageCombat())
                 return;
 
+            // 脱战残血优先救命：只要有人在 90% 以下，立即进入急救与抬血流程。
+            // 绝不允许常驻 Buff / 道标维护抢占 GCD，导致脱战后残血队友被流血跳死
+            if (groupSnapshot.lowestHpPct < 90.0f)
+            {
+                if (TryEmergencyHeals()) return;
+                if (TryLadderHeal()) return;
+            }
+
             if (sweepDue)
             {
                 if (MaintainAura()) return;
@@ -129,10 +137,6 @@ public:
 
             if (MaintainBeaconOfLight()) return;
             if (MaintainSacredShield()) return;
-
-            // 脱战预热：为受损队友补满血线
-            if (TryEmergencyHeals()) return;
-            if (TryLadderHeal()) return;
 
             UpdateFollowMaster(diff);
             return;
@@ -178,6 +182,10 @@ public:
 private:
     GroupSnapshot groupSnapshot;
     uint32 buffSweepTimer{ 0 };
+
+    // 贴脸避难状态标记：记录当前是否处于「紧抱坦克身侧」的应急姿态。
+    // 仇恨解除后必须凭此标记主动重发跟随指令，否则奶骑会永久粘在坦克身后吃顺劈与吐息
+    bool isHuggingTank{ false };
 
     // =========================================================================
     // 队友状态巡检 (打地鼠雷达)
@@ -680,6 +688,12 @@ private:
                     return true;
             }
 
+            // 濒死期优先瞬发神圣震击：单发高额瞬回，无需承担长读条被移动/受击打断的风险
+            uint32 const holyShock = GetAppropriateRank(HolyPaladinSpells::HOLY_SHOCK, false);
+            if (holyShock && CanCast(target, holyShock, true) && ExecuteSpell(target, holyShock, true))
+                return true;
+
+            // 神圣震击冷却中：回退读条圣光术大加救场
             uint32 const holyLight = GetAppropriateRank(HolyPaladinSpells::HOLY_LIGHT, false);
             if (holyLight && CanCast(target, holyLight, true) && ExecuteSpell(target, holyLight, true))
                 return true;
@@ -775,10 +789,23 @@ private:
         {
             // 被贴脸时禁止原地后撤：后撤会被持续追打并拉开与坦克的距离，
             // 必须立刻贴到坦克身侧，借坦克的 AoE 仇恨把小怪拉走。
-            // 加双闸门 (距离 > 3 码 且 未处于跟随态) 防止每帧重建移动生成器造成路径抖动。
-            if (me->GetDistance(anchor) > 3.0f && moveType != FOLLOW_MOTION_TYPE)
+            // 仅在状态跃迁时下发一次指令，防止每帧重建移动生成器造成路径抖动。
+            if (!isHuggingTank && (me->GetDistance(anchor) > 3.0f || moveType != FOLLOW_MOTION_TYPE))
+            {
                 me->GetMotionMaster()->MoveFollow(anchor, 2.0f, 0.0f);
+                isHuggingTank = true;
+            }
 
+            return;
+        }
+
+        // 仇恨威胁解除：若此前处于贴脸避难姿态，或因击退等意外落入 8 码内，
+        // 必须主动重发跟随指令强制退回 18 码远程位。
+        // FollowMovementGenerator 不会随距离变化自动重建，缺此步奶骑将永久停在 2 码处吃顺劈与吐息。
+        if (isHuggingTank || dist < MIN_SAFE_DIST)
+        {
+            isHuggingTank = false;
+            me->GetMotionMaster()->MoveFollow(anchor, IDEAL_FOLLOW_DIST, behindAngle);
             return;
         }
 
