@@ -123,7 +123,7 @@ public:
             if (sweepDue)
             {
                 if (MaintainAura()) return;
-                if (MaintainSealOfWisdom()) return;
+                if (MaintainSeal()) return;
                 if (MaintainBlessing()) return;
             }
 
@@ -153,7 +153,7 @@ public:
         if (sweepDue)
         {
             if (MaintainAura()) return;
-            if (MaintainSealOfWisdom()) return;
+            if (MaintainSeal()) return;
             if (MaintainBlessing()) return;
         }
 
@@ -435,9 +435,14 @@ private:
         return CanCast(me, devotion, true) && ExecuteSpell(me, devotion, true);
     }
 
-    bool MaintainSealOfWisdom()
+    bool MaintainSeal()
     {
-        uint32 const seal = GetAppropriateRank(HolyPaladinSpells::SEAL_OF_WISDOM, false);
+        // 优先智慧圣印 (审判回蓝)；38 级前未学会时以正义圣印保底，
+        // 确保 1 ~ 80 级身上永远常驻一枚有效圣印，保障审判随时可用
+        uint32 seal = GetAppropriateRank(HolyPaladinSpells::SEAL_OF_WISDOM, false);
+        if (!seal)
+            seal = GetAppropriateRank(HolyPaladinSpells::SEAL_OF_RIGHTEOUSNESS, false);
+
         if (!seal || me->HasAura(seal))
             return false;
 
@@ -450,6 +455,10 @@ private:
     bool MaintainBlessing()
     {
         if (groupSnapshot.allies.empty())
+            return false;
+
+        // 战时节流：血线不稳时全力治疗，绝不因补祝福抢占急救 GCD
+        if (me->IsInCombat() && groupSnapshot.lowestHpPct < 80.0f)
             return false;
 
         // 团队祝福分流：按目标能量通道选择祝福，每帧只补一个缺口，平滑铺满全队
@@ -466,12 +475,18 @@ private:
             }
             else
             {
-                // 无蓝职业（战士/盗贼/DK/熊坦）优先力量祝福，
-                // 已有力量祝福或未解锁时退化补刷王者祝福
+                // 互斥守卫：力量 / 王者同属攻击强度类祝福，任意一个在身即视为已满，
+                // 否则「力量顶王者 -> 王者顶力量」会陷入无限互顶死循环
                 uint32 const might = GetAppropriateRank(HolyPaladinSpells::BLESSING_OF_MIGHT, false);
-                blessing = (might && !ally->HasAura(might))
-                    ? might
-                    : GetAppropriateRank(HolyPaladinSpells::BLESSING_OF_KINGS, false);
+                uint32 const kings = GetAppropriateRank(HolyPaladinSpells::BLESSING_OF_KINGS, false);
+
+                bool const hasMight = (might && ally->HasAura(might));
+                bool const hasKings = (kings && ally->HasAura(kings));
+                if (hasMight || hasKings)
+                    continue;
+
+                // 二者皆无时优先力量祝福，未解锁再退化为王者祝福
+                blessing = might ? might : kings;
             }
 
             if (!blessing || ally->HasAura(blessing))
@@ -544,6 +559,11 @@ private:
     // =========================================================================
     bool MaintainJudgementsOfThePure(Unit* victim)
     {
+        // 血线门禁：只要有人掉到 60% 以下重伤，
+        // 立即把 GCD 与施法权交还给 P3 阶梯治疗，审判让位于急救
+        if (groupSnapshot.lowestHpPct < 60.0f)
+            return false;
+
         // 仅以「急速 Buff 本体」作为判定依据；剩余 > 3 秒不重复审判，
         // 缺失或即将断档时立即补打，彻底解除对被动光环自检导致的死锁
         if (Aura* hasteAura = me->GetAura(HolyPaladinSpells::BUFF_JUDGEMENTS_OF_THE_PURE))
@@ -612,6 +632,11 @@ private:
                 return false; // 等待翅膀生效后再开祈求
             }
         }
+
+        // 单体门禁：仅平均血线达标是不够的，主坦等任一队员低于 70% 时
+        // 禁止开启降低 50% 治疗量的神圣祈求，杜绝单体大出血期间的治疗空窗灭团
+        if (groupSnapshot.lowestHpPct < 70.0f)
+            return false;
 
         uint32 const divinePlea = GetAppropriateRank(HolyPaladinSpells::DIVINE_PLEA, false);
         if (divinePlea && !me->HasAura(divinePlea))

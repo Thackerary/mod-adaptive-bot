@@ -28,6 +28,7 @@ namespace HolyPaladinSpells
     constexpr uint32 BLESSING_OF_MIGHT      = 48932; // 力量祝福 Rank 10 (无蓝职业专用)
     constexpr uint32 BLESSING_OF_KINGS      = 20217; // 王者祝福
     constexpr uint32 SEAL_OF_WISDOM         = 20166; // 智慧圣印 (审判前置)
+    constexpr uint32 SEAL_OF_RIGHTEOUSNESS  = 21084; // 正义圣印 Rank 9 (低等级过渡保底)
 
     // =========================================================================
     // 3. 爆发、续航与自保 (Burst, Sustain & Defensive Cooldowns)
@@ -36,7 +37,7 @@ namespace HolyPaladinSpells
     constexpr uint32 AVENGING_WRATH         = 31884; // 复仇之怒 (翅膀，治疗量 +20%)
     constexpr uint32 DIVINE_FAVOR           = 20216; // 神恩术 (下一发治疗必暴击)
     constexpr uint32 DIVINE_ILLUMINATION    = 28280; // 神启 (耗蓝减半 15 秒)
-    constexpr uint32 DIVINE_SHIELD          = 642;   // 圣盾术 Rank 2 (无敌自保)
+    constexpr uint32 DIVINE_SHIELD          = 1020;  // 圣盾术 Rank 2 (50 级，12 秒)
     constexpr uint32 HAND_OF_PROTECTION     = 10278; // 保护之手 Rank 3 (物理免疫保队友)
     constexpr uint32 JUDGEMENT_OF_LIGHT     = 48934; // 光明审判 Rank 6 (维持纯洁审判)
     constexpr uint32 FORBEARANCE            = 25771; // 自律 (封印圣盾/保护之手/圣佑)
