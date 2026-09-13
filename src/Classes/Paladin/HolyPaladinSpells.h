@@ -43,6 +43,7 @@ namespace HolyPaladinSpells
     // =========================================================================
     // 4. 被动天赋光环补偿 (Passive Talent Auras)
     // =========================================================================
+    constexpr uint32 IMPROVED_JUDGEMENTS    = 25956; // 强化审判 Rank 2 (审判射程 +20 码)
     constexpr uint32 ILLUMINATION           = 20272; // 启发 Rank 5 (暴击治疗回蓝)
     constexpr uint32 HOLY_GUIDANCE          = 31841; // 神圣指引 Rank 5 (智力转化法强)
     constexpr uint32 JUDGEMENTS_OF_THE_PURE = 53673; // 纯洁审判 Rank 5 (审判后 15% 急速)

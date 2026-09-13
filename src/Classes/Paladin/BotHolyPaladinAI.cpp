@@ -60,7 +60,7 @@ public:
             case HolyPaladinSpells::HOLY_SHOCK:          return 40; // 神圣震击
             case HolyPaladinSpells::DIVINE_ILLUMINATION: return 50; // 神启
             case HolyPaladinSpells::BEACON_OF_LIGHT:     return 60; // 圣光道标
-            case HolyPaladinSpells::SACRED_SHIELD:       return 60; // 圣洁护盾
+            case HolyPaladinSpells::SACRED_SHIELD:       return 80; // 圣洁护盾
             case HolyPaladinSpells::AVENGING_WRATH:      return 70; // 复仇之怒
             case HolyPaladinSpells::DIVINE_PLEA:         return 71; // 神圣祈求
             default:                                     return 0;
@@ -106,6 +106,11 @@ public:
 
         // 打地鼠雷达：每帧刷新队友状态快照
         RefreshGroupSnapshot();
+
+        // 全局读条守卫：圣光术 / 圣光闪现等长读条期间冻结一切决策，
+        // 杜绝脱战与战时被自身跟随移动指令 (UpdateFollowMaster / MoveFollow) 掐断读条。
+        if (me->HasUnitState(UNIT_STATE_CASTING))
+            return;
 
         // =====================================================================
         // 1. 脱战业务维护
@@ -371,7 +376,9 @@ private:
         if (layOnHandsTarget)
         {
             uint32 const layOnHands = GetAppropriateRank(HolyPaladinSpells::LAY_ON_HANDS, false);
-            if (layOnHands && CanCast(layOnHandsTarget, layOnHands, true) &&
+            // 圣疗术会为目标施加自律：已有自律者直接跳过，避免浪费这张超长 CD 底牌
+            if (layOnHands && !layOnHandsTarget->HasAura(HolyPaladinSpells::FORBEARANCE) &&
+                CanCast(layOnHandsTarget, layOnHands, true) &&
                 ExecuteSpell(layOnHandsTarget, layOnHands, true))
             {
                 return true;
@@ -435,22 +442,29 @@ private:
 
     bool MaintainBlessing()
     {
-        uint32 const blessing = GetAppropriateRank(HolyPaladinSpells::BLESSING_OF_WISDOM, false);
-        if (!blessing)
+        if (groupSnapshot.allies.empty())
             return false;
 
-        Player* master = GetMaster();
-
-        auto NeedsBlessing = [blessing](Unit* unit) -> bool
+        // 团队祝福分流：按目标能量通道选择祝福，每帧只补一个缺口，平滑铺满全队
+        for (Unit* ally : groupSnapshot.allies)
         {
-            return unit && unit->IsAlive() && !unit->HasAura(blessing);
-        };
+            if (!ally || !ally->IsAlive() || ally->GetMap() != me->GetMap())
+                continue;
 
-        if (NeedsBlessing(me) && CanCast(me, blessing, true) && ExecuteSpell(me, blessing, true))
-            return true;
+            uint32 const blessing = (ally->getPowerType() == POWER_MANA)
+                ? GetAppropriateRank(HolyPaladinSpells::BLESSING_OF_WISDOM, false)
+                : GetAppropriateRank(HolyPaladinSpells::BLESSING_OF_KINGS, false);
 
-        if (NeedsBlessing(master) && CanCast(master, blessing, true) && ExecuteSpell(master, blessing, true))
-            return true;
+            if (!blessing || ally->HasAura(blessing))
+                continue;
+
+            // 施法校验失败（如宠物等非法祝福目标）时继续扫描，避免阻塞其它队友
+            if (!CanCast(ally, blessing, true))
+                continue;
+
+            if (ExecuteSpell(ally, blessing, true))
+                return true;
+        }
 
         return false;
     }
@@ -465,8 +479,15 @@ private:
             return false;
 
         Unit* tank = groupSnapshot.mainTank;
-        if (!tank || !tank->IsAlive() || tank->GetMap() != me->GetMap() || tank->HasAura(beacon))
+        if (!tank || !tank->IsAlive() || tank->GetMap() != me->GetMap())
             return false;
+
+        // 剩余 < 4 秒即提前补挂：道标一旦断档，主坦折射治疗会瞬间归零
+        if (Aura* existing = tank->GetAura(beacon, me->GetGUID()))
+        {
+            if (existing->GetDuration() > 4000)
+                return false;
+        }
 
         if (!CanCast(tank, beacon, true))
             return false;
@@ -481,8 +502,15 @@ private:
             return false;
 
         Unit* tank = groupSnapshot.mainTank;
-        if (!tank || !tank->IsAlive() || tank->GetMap() != me->GetMap() || tank->HasAura(sacredShield))
+        if (!tank || !tank->IsAlive() || tank->GetMap() != me->GetMap())
             return false;
+
+        // 剩余 < 4 秒即提前补挂：吸收盾断档会导致主坦承受尖刺伤害
+        if (Aura* existing = tank->GetAura(sacredShield, me->GetGUID()))
+        {
+            if (existing->GetDuration() > 4000)
+                return false;
+        }
 
         if (!CanCast(tank, sacredShield, true))
             return false;
@@ -682,11 +710,9 @@ private:
 
         if (underMeleePressure)
         {
-            if (moveType != POINT_MOTION_TYPE && moveType != CHASE_MOTION_TYPE)
-            {
-                Position const retreatPos = anchor->GetNearPosition(IDEAL_FOLLOW_DIST, behindAngle);
-                me->GetMotionMaster()->MovePoint(0, retreatPos);
-            }
+            // 被贴脸时禁止原地后撤：后撤会被持续追打并拉开与坦克的距离，
+            // 必须立刻贴到坦克身侧，借坦克的 AoE 仇恨把小怪拉走。
+            me->GetMotionMaster()->MoveFollow(anchor, 2.0f, 0.0f);
             return;
         }
 
@@ -714,12 +740,15 @@ private:
             }
         };
 
-        SyncPassive(20, HolyPaladinSpells::ILLUMINATION);      // 启发：暴击治疗回蓝
-        SyncPassive(50, HolyPaladinSpells::HOLY_GUIDANCE);     // 神圣指引：智力转化法强
-        SyncPassive(50, HolyPaladinSpells::INFUSION_OF_LIGHT); // 圣光灌注：圣光闪现/神圣震击强化
+        SyncPassive(20, HolyPaladinSpells::ILLUMINATION);        // 启发：暴击治疗回蓝
+        SyncPassive(40, HolyPaladinSpells::IMPROVED_JUDGEMENTS); // 强化审判：审判射程 +20 码 (10 -> 30)
+        SyncPassive(50, HolyPaladinSpells::HOLY_GUIDANCE);       // 神圣指引：智力转化法强
+        SyncPassive(50, HolyPaladinSpells::INFUSION_OF_LIGHT);   // 圣光灌注：圣光闪现/神圣震击强化
 
-        // 注意：纯洁审判 (JUDGEMENTS_OF_THE_PURE) 为审判命中后激发的急速 Buff，
-        //       由 MaintainJudgementsOfThePure() 动态维护，禁止在此常驻挂载。
+        // 纯洁审判 (JUDGEMENTS_OF_THE_PURE) 是仅存在于天赋树中的被动触发器。
+        // Creature 没有天赋树，必须注入该被动本体，否则施放审判后永远无法获得急速 Buff；
+        // 急速 Buff 本身仍由 MaintainJudgementsOfThePure() 通过审判动态刷新。
+        SyncPassive(50, HolyPaladinSpells::JUDGEMENTS_OF_THE_PURE);
     }
 };
 
