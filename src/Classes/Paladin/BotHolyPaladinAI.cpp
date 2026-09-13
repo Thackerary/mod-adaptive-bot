@@ -76,6 +76,7 @@ public:
         me->setPowerType(POWER_MANA);
         AdaptiveBotAI::Reset();
         buffSweepTimer = 0;
+        isHuggingTank = false;
         ApplyPassiveTalents();
     }
 
@@ -137,6 +138,10 @@ public:
 
             if (MaintainBeaconOfLight()) return;
             if (MaintainSacredShield()) return;
+
+            // 轻伤收尾：铺完光环/祝福/道标后，仍要将 90% ~ 95% 的队友平稳抬满，
+            // 否则脱战残血会一直卡在 90% 以上无法被 TryLadderHeal 触及而断档
+            if (TryLadderHeal()) return;
 
             UpdateFollowMaster(diff);
             return;
@@ -398,20 +403,36 @@ private:
             }
         }
 
-        // 2) 非坦队友被物理围殴且生命 < 25%：保护之手 (物理免疫)
-        if (groupSnapshot.lowestHpAlly && groupSnapshot.lowestHpPct < 25.0f)
+        // 2) 保护之手 (物理免疫)：全队雷达扫描，而非只看单体最低血量。
+        //    若仅锚定 LowestHpAlly，主坦血量更低时会掩盖真正挨打的布衣/自身，
+        //    导致后者被近战围殴致死却始终等不到这张免疫底牌。
+        uint32 const handOfProtection = GetAppropriateRank(HolyPaladinSpells::HAND_OF_PROTECTION, false);
+        if (handOfProtection)
         {
-            Unit* protectTarget = groupSnapshot.lowestHpAlly;
-            bool const isMainTank = (groupSnapshot.mainTank && protectTarget == groupSnapshot.mainTank);
-
-            if (!isMainTank && !protectTarget->HasAura(HolyPaladinSpells::FORBEARANCE) && IsUnderPhysicalMelee(protectTarget))
+            for (Unit* ally : groupSnapshot.allies)
             {
-                uint32 const handOfProtection = GetAppropriateRank(HolyPaladinSpells::HAND_OF_PROTECTION, false);
-                if (handOfProtection && CanCast(protectTarget, handOfProtection, true) &&
-                    ExecuteSpell(protectTarget, handOfProtection, true))
-                {
+                if (!ally || !ally->IsAlive() || ally->GetMap() != me->GetMap())
+                    continue;
+
+                // 排除主坦：坦克需要持续承伤建立仇恨，不可剥夺其被攻击判定
+                if (ally == groupSnapshot.mainTank)
+                    continue;
+
+                if (ally->GetHealthPct() >= 25.0f)
+                    continue;
+
+                // 自律会封印保护之手，已有自律者直接跳过避免空转
+                if (ally->HasAura(HolyPaladinSpells::FORBEARANCE))
+                    continue;
+
+                if (!IsUnderPhysicalMelee(ally))
+                    continue;
+
+                if (!CanCast(ally, handOfProtection, true))
+                    continue;
+
+                if (ExecuteSpell(ally, handOfProtection, true))
                     return true;
-                }
             }
         }
 
@@ -802,7 +823,8 @@ private:
         // 仇恨威胁解除：若此前处于贴脸避难姿态，或因击退等意外落入 8 码内，
         // 必须主动重发跟随指令强制退回 18 码远程位。
         // FollowMovementGenerator 不会随距离变化自动重建，缺此步奶骑将永久停在 2 码处吃顺劈与吐息。
-        if (isHuggingTank || dist < MIN_SAFE_DIST)
+        // 但仅在「握手状态跃迁」或「尚未处于跟随态」时下发，否则 2 码走回 8 码途中会每帧重建路径造成抽搐。
+        if (isHuggingTank || (dist < MIN_SAFE_DIST && moveType != FOLLOW_MOTION_TYPE))
         {
             isHuggingTank = false;
             me->GetMotionMaster()->MoveFollow(anchor, IDEAL_FOLLOW_DIST, behindAngle);
