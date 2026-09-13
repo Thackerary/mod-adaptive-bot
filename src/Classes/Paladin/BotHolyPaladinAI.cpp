@@ -329,6 +329,11 @@ private:
             if (!application)
                 continue;
 
+            // 严格排除正面增益：王者祝福、智慧祝福、奥术光辉等自身即为 DISPEL_MAGIC，
+            // 若不过滤会陷入「驱散 -> 补 buff -> 再驱散」的空蓝死循环
+            if (application->IsPositive())
+                continue;
+
             Aura* aura = application->GetBase();
             if (!aura)
                 continue;
@@ -704,8 +709,10 @@ private:
             if (!IsValidHealTarget(ally) || !HasDispellableDebuff(ally, cleanseInfo))
                 continue;
 
+            // 单个目标施法校验失败（如超距/被卡视线）时继续扫描其余队友，
+            // 避免个别目标直接中断整轮驱散巡检
             if (!CanCast(ally, cleanse, true))
-                return false;
+                continue;
 
             return ExecuteSpell(ally, cleanse, true);
         }

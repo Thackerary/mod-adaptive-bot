@@ -38,7 +38,7 @@ namespace HolyPaladinSpells
     constexpr uint32 DIVINE_ILLUMINATION    = 28280; // 神启 (耗蓝减半 15 秒)
     constexpr uint32 DIVINE_SHIELD          = 642;   // 圣盾术 Rank 2 (无敌自保)
     constexpr uint32 HAND_OF_PROTECTION     = 10278; // 保护之手 Rank 3 (物理免疫保队友)
-    constexpr uint32 JUDGEMENT_OF_LIGHT     = 20271; // 光明审判 Rank 6 (维持纯洁审判)
+    constexpr uint32 JUDGEMENT_OF_LIGHT     = 48934; // 光明审判 Rank 6 (维持纯洁审判)
     constexpr uint32 FORBEARANCE            = 25771; // 自律 (封印圣盾/保护之手/圣佑)
 
     // =========================================================================
