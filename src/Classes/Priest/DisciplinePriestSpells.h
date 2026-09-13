@@ -34,7 +34,7 @@ namespace DisciplinePriestSpells
     constexpr uint32 POWER_WORD_FORTITUDE   = 48161; // 真言术：韧 Rank 9
     constexpr uint32 DIVINE_SPIRIT          = 48073; // 神圣之灵 Rank 6 (仅对法力职业生效)
     constexpr uint32 SHADOW_PROTECTION      = 48169; // 暗影防护 (抗性兜底)
-    constexpr uint32 FADE                   = 586;   // 渐隐 Rank 7 (降低仇恨，脱身被贴打)
+    constexpr uint32 FADE                   = 25429; // 渐隐 Rank 7 (3.3.5a 最高等级，降低仇恨脱身)
     constexpr uint32 INNER_FOCUS            = 14751; // 心灵专注 (下一发法术免费 + 25% 暴击)
 
     // =========================================================================

@@ -428,6 +428,10 @@ private:
         if (TryPanicShield())
             return true;
 
+        // 全队整体崩坏：单点阶梯治疗来不及逐个覆盖，切换群体急救底牌
+        if (TryGroupEmergencyHeal())
+            return true;
+
         return false;
     }
 
@@ -506,6 +510,52 @@ private:
             return false;
 
         return ExecuteSpell(target, shield, true);
+    }
+
+    // =========================================================================
+    // P0-3: 全队崩溃保护 (群体急救底牌)
+    // -------------------------------------------------------------------------
+    // 单点阶梯治疗 (苦修/快速治疗) 在多成员同时掉血时会被 GCD 逐个击破，
+    // 此时必须切入群体治疗通道。averageHpPct 是唯一能反映「全队整体崩坏」
+    // 而非「单点尖刺」的采样值，不参与仲裁会令群体底牌永久闲置。
+    // =========================================================================
+    bool TryGroupEmergencyHeal()
+    {
+        // 触发门禁：全队平均血线跌入 70% 以下，且至少 3 名非宠物成员低于 80%
+        if (groupSnapshot.allies.size() < 3 || groupSnapshot.averageHpPct >= 70.0f)
+            return false;
+
+        uint32 injuredCount = 0;
+        for (Unit* ally : groupSnapshot.allies)
+        {
+            if (!IsValidHealTarget(ally) || ally->ToPet())
+                continue;
+
+            if (ally->GetHealthPct() < 80.0f)
+                ++injuredCount;
+        }
+
+        if (injuredCount < 3)
+            return false;
+
+        uint32 const prayerOfHealing = GetAppropriateRank(DisciplinePriestSpells::PRAYER_OF_HEALING, false);
+        if (!prayerOfHealing)
+            return false;
+
+        // 锚点必须落在承伤核心身上：治疗祷言只覆盖目标所属小队，
+        // 以残血散人为锚点会漏掉坦克，背离群体急救的初衷
+        Unit* anchor = groupSnapshot.mainTank ? groupSnapshot.mainTank : groupSnapshot.lowestHpAlly;
+        if (!IsValidHealTarget(anchor) || anchor->ToPet())
+            return false;
+
+        if (!CanCast(anchor, prayerOfHealing, true))
+            return false;
+
+        // 读条技刹停精准下沉至校验通过之后，避免校验失败时白白放弃跑位机动性
+        if (me->isMoving())
+            me->StopMoving();
+
+        return ExecuteSpell(anchor, prayerOfHealing, true);
     }
 
     // =========================================================================
@@ -670,12 +720,13 @@ private:
         if (!penance || !target)
             return false;
 
-        // 通道技刹停：仅在真正需要引导时才放弃跑位机动性
-        if (me->isMoving())
-            me->StopMoving();
-
+        // 施法资格必须先通过校验再刹停：CanCast 失败 (GCD/被控/超距) 时提前立定，
+        // 会让随从在重构走位期间被 StopMoving 每帧拉扯成原地抽搐
         if (!CanCast(target, penance, true))
             return false;
+
+        if (me->isMoving())
+            me->StopMoving();
 
         return ExecuteSpell(target, penance, true);
     }
@@ -686,12 +737,12 @@ private:
         if (!flashHeal || !target)
             return false;
 
-        // 读条技刹停：立定校验精准下沉至此，避免为瞬发技能白白放弃自保能力
-        if (me->isMoving())
-            me->StopMoving();
-
+        // 同上：校验通过后才立定，避免 CanCast 失败时白白放弃跑位机动性
         if (!CanCast(target, flashHeal, true))
             return false;
+
+        if (me->isMoving())
+            me->StopMoving();
 
         return ExecuteSpell(target, flashHeal, true);
     }
