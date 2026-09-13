@@ -18,6 +18,7 @@ namespace HolyPaladinSpells
     constexpr uint32 HOLY_SHOCK             = 48825; // 神圣震击 Rank 7 (瞬发急救)
     constexpr uint32 LAY_ON_HANDS           = 48788; // 圣疗术 Rank 5 (极限救急)
     constexpr uint32 CLEANSE                = 4987;  // 清洁术 (驱散魔法/中毒/疾病)
+    constexpr uint32 PURIFY                 = 1152;  // 纯净术 (8 级，驱散毒素/疾病，清洁术前置过渡)
 
     // =========================================================================
     // 2. 光环、祝福与圣印 (Auras, Blessings & Seals)
@@ -38,6 +39,7 @@ namespace HolyPaladinSpells
     constexpr uint32 DIVINE_FAVOR           = 20216; // 神恩术 (下一发治疗必暴击)
     constexpr uint32 DIVINE_ILLUMINATION    = 28280; // 神启 (耗蓝减半 15 秒)
     constexpr uint32 DIVINE_SHIELD          = 1020;  // 圣盾术 Rank 2 (50 级，12 秒)
+    constexpr uint32 DIVINE_PROTECTION      = 498;   // 圣佑术 (6 级，减伤 50%，圣盾术前置过渡)
     constexpr uint32 HAND_OF_PROTECTION     = 10278; // 保护之手 Rank 3 (物理免疫保队友)
     constexpr uint32 JUDGEMENT_OF_LIGHT     = 48934; // 光明审判 Rank 6 (维持纯洁审判)
     constexpr uint32 FORBEARANCE            = 25771; // 自律 (封印圣盾/保护之手/圣佑)

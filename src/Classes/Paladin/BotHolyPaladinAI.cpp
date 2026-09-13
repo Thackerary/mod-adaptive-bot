@@ -272,11 +272,18 @@ private:
 
         snap.allies.push_back(unit);
 
-        float const hp = unit->GetHealthPct();
-        if (hp < snap.lowestHpPct)
+        // 宠物仍然保留在 allies 名单内 (以便享受溅射治疗 / 驱散等辅助)，
+        // 但严禁用宠物血线触发全队恐慌：否则猎人宠物掉血会把 lowestHpAlly
+        // 绑架到宠物身上，导致道标折射、圣疗术、保护之手全部错失真正的玩家与坦克。
+        bool const isPet = (unit->ToPet() != nullptr);
+        if (!isPet)
         {
-            snap.lowestHpPct = hp;
-            snap.lowestHpAlly = unit;
+            float const hp = unit->GetHealthPct();
+            if (hp < snap.lowestHpPct)
+            {
+                snap.lowestHpPct = hp;
+                snap.lowestHpAlly = unit;
+            }
         }
     }
 
@@ -367,14 +374,23 @@ private:
         if (me->GetHealthPct() >= 20.0f)
             return false;
 
+        // 自律会同时封印圣盾术与圣佑术，已有自律时整条自保链均不可用，直接放弃
+        if (me->HasAura(HolyPaladinSpells::FORBEARANCE))
+            return false;
+
+        // 优先圣盾术 (绝对免疫)；50 级前未习得时以圣佑术 (50% 减伤) 兜底平滑过渡
         uint32 const divineShield = GetAppropriateRank(HolyPaladinSpells::DIVINE_SHIELD, false);
-        if (!divineShield || me->HasAura(divineShield))
+        if (divineShield && !me->HasAura(divineShield))
+        {
+            if (CanCast(me, divineShield, true) && ExecuteSpell(me, divineShield, true))
+                return true;
+        }
+
+        uint32 const divineProtection = GetAppropriateRank(HolyPaladinSpells::DIVINE_PROTECTION, false);
+        if (!divineProtection || me->HasAura(divineProtection))
             return false;
 
-        if (!CanCast(me, divineShield, true))
-            return false;
-
-        return ExecuteSpell(me, divineShield, true);
+        return CanCast(me, divineProtection, true) && ExecuteSpell(me, divineProtection, true);
     }
 
     bool TryEmergencyHeals()
@@ -478,6 +494,10 @@ private:
 
     bool MaintainSeal()
     {
+        // 战时急救门禁：全队重伤时施法权必须全部让给治疗，绝不因补圣印抢占 GCD
+        if (me->IsInCombat() && groupSnapshot.lowestHpPct < 60.0f)
+            return false;
+
         // 优先智慧圣印 (审判回蓝)；38 级前未学会时以正义圣印保底，
         // 确保 1 ~ 80 级身上永远常驻一枚有效圣印，保障审判随时可用
         uint32 seal = GetAppropriateRank(HolyPaladinSpells::SEAL_OF_WISDOM, false);
@@ -711,12 +731,11 @@ private:
             return false;
 
         // 重伤期秒拔神圣祈求：该技能附带 50% 治疗量惩罚，
-        // 团血崩盘瞬间必须立刻取消，瞬时恢复全额治疗能力保坦
+        // 团血崩盘瞬间必须立刻取消，瞬时恢复全额治疗能力保坦。
+        // 注意此处不得 return：拔除后必须继续顺下执行本帧急救施法，
+        // 否则会白白吞掉一个 GCD 的治疗输出，造成 1 帧的救命延迟
         if (groupSnapshot.lowestHpPct < 50.0f && me->HasAura(HolyPaladinSpells::DIVINE_PLEA))
-        {
             me->RemoveAurasDueToSpell(HolyPaladinSpells::DIVINE_PLEA);
-            return true;
-        }
 
         // 立定校验下沉到各读条分支：神圣震击等瞬发技能允许在移动/逃跑途中直接施放，
         // 仅在真正需要读条时才刹停，避免为瞬发技能白白放弃跑位自保能力
@@ -801,7 +820,11 @@ private:
         if (!groupSnapshot.lowestHpAlly || groupSnapshot.lowestHpPct < 90.0f)
             return false;
 
-        uint32 const cleanse = GetAppropriateRank(HolyPaladinSpells::CLEANSE, false);
+        // 优先清洁术 (魔法/中毒/疾病)；42 级前未习得时以纯净术 (中毒/疾病) 兜底过渡
+        uint32 cleanse = GetAppropriateRank(HolyPaladinSpells::CLEANSE, false);
+        if (!cleanse)
+            cleanse = GetAppropriateRank(HolyPaladinSpells::PURIFY, false);
+
         if (!cleanse)
             return false;
 
