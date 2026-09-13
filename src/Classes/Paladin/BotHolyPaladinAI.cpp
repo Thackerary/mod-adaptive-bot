@@ -380,8 +380,11 @@ private:
     bool TryEmergencyHeals()
     {
         // 1) 主坦 (或任意队友) 生命 < 15%：圣疗术极限救急
+        // 主坦带自律时禁止锁定为施法目标 (自律会封印圣疗)，直接降级检测全队其他濒死成员，
+        // 否则指挥官等真正可救的队友会因主坦占位而永远等不到这张底牌
         Unit* layOnHandsTarget = nullptr;
         if (groupSnapshot.mainTank && groupSnapshot.mainTank->IsAlive() &&
+            !groupSnapshot.mainTank->HasAura(HolyPaladinSpells::FORBEARANCE) &&
             groupSnapshot.mainTank->GetHealthPct() < 15.0f && IsValidHealTarget(groupSnapshot.mainTank))
         {
             layOnHandsTarget = groupSnapshot.mainTank;
@@ -550,6 +553,11 @@ private:
         if (!beacon)
             return false;
 
+        // 战时血线门禁：全队有人掉至 60% 以下重伤时，施法权必须全部让给急救，
+        // 绝不因补道标消耗 GCD 造成主坦在补挂窗口内被秒
+        if (me->IsInCombat() && groupSnapshot.lowestHpPct < 60.0f)
+            return false;
+
         Unit* tank = groupSnapshot.mainTank;
         if (!tank || !tank->IsAlive() || tank->GetMap() != me->GetMap())
             return false;
@@ -571,6 +579,10 @@ private:
     {
         uint32 const sacredShield = GetAppropriateRank(HolyPaladinSpells::SACRED_SHIELD, false);
         if (!sacredShield)
+            return false;
+
+        // 战时血线门禁：重伤优先级高于任何常驻维护，避免护盾补挂挤占急救 GCD
+        if (me->IsInCombat() && groupSnapshot.lowestHpPct < 60.0f)
             return false;
 
         Unit* tank = groupSnapshot.mainTank;
@@ -697,6 +709,14 @@ private:
 
         if (!IsValidHealTarget(target))
             return false;
+
+        // 重伤期秒拔神圣祈求：该技能附带 50% 治疗量惩罚，
+        // 团血崩盘瞬间必须立刻取消，瞬时恢复全额治疗能力保坦
+        if (groupSnapshot.lowestHpPct < 50.0f && me->HasAura(HolyPaladinSpells::DIVINE_PLEA))
+        {
+            me->RemoveAurasDueToSpell(HolyPaladinSpells::DIVINE_PLEA);
+            return true;
+        }
 
         // 立定校验下沉到各读条分支：神圣震击等瞬发技能允许在移动/逃跑途中直接施放，
         // 仅在真正需要读条时才刹停，避免为瞬发技能白白放弃跑位自保能力
@@ -835,9 +855,9 @@ private:
         {
             // 被贴脸时禁止原地后撤：后撤会被持续追打并拉开与坦克的距离，
             // 必须立刻贴到坦克身侧，借坦克的 AoE 仇恨把小怪拉走。
-            // 移除 !isHuggingTank 先决阻断：施法 / StopMoving() 会清空移动生成器，
-            // 若依赖握手标记阻断，随从停步后将再也无法重新起步，陷入原地被围殴的假死。
-            if (moveType != FOLLOW_MOTION_TYPE && dist > 3.0f)
+            // 条件必须包含 !isHuggingTank：常态远程跟随同样是 FOLLOW_MOTION_TYPE，
+            // 若只判 moveType 则 18 码跟随态下抱坦分支永远无法进入，随从将被贴脸至死。
+            if ((!isHuggingTank || moveType != FOLLOW_MOTION_TYPE) && dist > 3.0f)
             {
                 me->GetMotionMaster()->MoveFollow(anchor, 2.0f, 0.0f);
                 isHuggingTank = true;
