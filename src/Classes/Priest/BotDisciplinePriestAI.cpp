@@ -460,7 +460,7 @@ private:
         // 首选主坦：承伤核心，40% 减伤收益最大
         if (groupSnapshot.mainTank && groupSnapshot.mainTank->IsAlive() &&
             !groupSnapshot.mainTank->ToPet() &&
-            groupSnapshot.mainTank->GetHealthPct() < 35.0f &&
+            groupSnapshot.mainTank->GetHealthPct() < 40.0f &&
             IsValidHealTarget(groupSnapshot.mainTank))
         {
             target = groupSnapshot.mainTank;
@@ -779,13 +779,16 @@ private:
 
         float const manaPct = me->GetPowerPct(POWER_MANA);
 
-        // 心灵专注：法力 < 35% 时开启，让下一发治疗免费，
-        // 提前覆盖后续高压刷血窗口，提升整场续航总效率
+        // 心灵专注：法力 < 35% 时开启，让下一发治疗免费且暴击率 +25%。
+        // 该技能在 3.3.5a 中为 Off-GCD 瞬发增益，施放成功后严禁 return true：
+        // 必须允许当帧决策流顺下执行 (继续判定能量注入，或直接下沉 P3 阶梯治疗)，
+        // 使「下一发治疗免费 + 25% 暴击」的光环能被当帧的苦修/快速治疗立即吃下，
+        // 否则白白空转一帧决策，高压窗口下等同浪费一个救命时间片。
         uint32 const innerFocus = GetAppropriateRank(DisciplinePriestSpells::INNER_FOCUS, true);
         if (innerFocus && manaPct < 35.0f && !me->HasAura(innerFocus))
         {
-            if (CanCast(me, innerFocus, true) && ExecuteSpell(me, innerFocus, true))
-                return true;
+            if (CanCast(me, innerFocus, true))
+                ExecuteSpell(me, innerFocus, true);
         }
 
         // 能量注入：法力 < 60% 时交给自己，20% 急速 + 20% 耗蓝降低同时提升
@@ -951,11 +954,16 @@ private:
         // (满血成员的预铺仍由 P1 TryPreShield 统一调度，二者不冲突)
         // 此区间严禁动用苦修：苦修是戒律单体最高爆发抬血底牌且带冷却，
         // 对 92% 血线的目标施放会造成约 80% 过量治疗并白烧长冷却，
-        // 必须严格封存于 hpPct < 80.0f 的区间，此处由快速治疗平稳收尾。
+        // 必须严格封存于 hpPct < 80.0f 的区间。
+        //
+        // 快速治疗血线门禁 (< 90%)：90%~95% 属「轻微掉血」，此时若目标已有盾
+        // 或处于灵魂虚弱，单发快速治疗的过量治疗比例极高，且会持续拖延
+        // 五秒规则下的精神回蓝重启。此区间只做零耗蓝/低耗蓝的补盾与祷言，
+        // 血量跌回 90% 以下才允许投入高耗蓝读条。
         // ---------------------------------------------------------------------
         if (TryLadderShield(target)) return true;
         if (TryPrayerOfMending()) return true;
-        if (TryFlashHeal(target)) return true;
+        if (hpPct < 90.0f && TryFlashHeal(target)) return true;
 
         return false;
     }
