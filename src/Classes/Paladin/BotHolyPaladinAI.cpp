@@ -33,6 +33,9 @@ class BotHolyPaladinAI : public AdaptiveBotAI
     static constexpr float  IDEAL_FOLLOW_DIST   = 18.0f;  // 理想站位 (主坦后方)
     static constexpr float  MIN_SAFE_DIST       = 8.0f;   // 低于此距离判定为被贴脸
     static constexpr float  MAX_SAFE_DIST       = 25.0f;  // 高于此距离判定为脱节
+    // FollowMovementGenerator 的 angle 为「相对目标朝向的偏移」，内部已叠加目标朝向。
+    // M_PI 即锚点正后方：坦克背身位，可规避顺劈斩与正面吐息
+    static constexpr float  BEHIND_ANGLE        = static_cast<float>(M_PI);
 
 public:
     explicit BotHolyPaladinAI(Creature* creature) : AdaptiveBotAI(creature) {}
@@ -297,17 +300,35 @@ private:
             return;
         }
 
+        // 兜底锚点同样必须过滤宠物：唯一可见目标恰为宠物时，
+        // 直接取 front() 会把治疗锚点重新交还给宠物，抵消最低血线的过滤
         if (!snap.lowestHpAlly)
         {
-            snap.lowestHpAlly = snap.allies.front();
-            snap.lowestHpPct = snap.lowestHpAlly->GetHealthPct();
+            for (Unit* ally : snap.allies)
+            {
+                if (ally && !ally->ToPet())
+                {
+                    snap.lowestHpAlly = ally;
+                    snap.lowestHpPct = ally->GetHealthPct();
+                    break;
+                }
+            }
         }
 
+        // 平均血线剔除宠物：猎人/术士宠物残血会把平均值拉低，
+        // 误触发「团队崩溃保护」从而永久锁死神圣祈求回蓝与复仇之怒对冲判定
         float total = 0.0f;
+        uint32 validCount = 0;
         for (Unit* ally : snap.allies)
-            total += ally->GetHealthPct();
+        {
+            if (ally && !ally->ToPet())
+            {
+                total += ally->GetHealthPct();
+                ++validCount;
+            }
+        }
 
-        snap.averageHpPct = total / static_cast<float>(snap.allies.size());
+        snap.averageHpPct = (validCount > 0) ? (total / static_cast<float>(validCount)) : 100.0f;
     }
 
     // =========================================================================
@@ -398,6 +419,8 @@ private:
         // 1) 主坦 (或任意队友) 生命 < 15%：圣疗术极限救急
         // 主坦带自律时禁止锁定为施法目标 (自律会封印圣疗)，直接降级检测全队其他濒死成员，
         // 否则指挥官等真正可救的队友会因主坦占位而永远等不到这张底牌
+        // 主坦不可救（自律封印 / 阵亡 / 未达濒死线 / 不在视线内）时，
+        // 必须全队降级扫描，否则单体的自律会占死这张战略底牌，让真正濒死的队友等死
         Unit* layOnHandsTarget = nullptr;
         if (groupSnapshot.mainTank && groupSnapshot.mainTank->IsAlive() &&
             !groupSnapshot.mainTank->HasAura(HolyPaladinSpells::FORBEARANCE) &&
@@ -405,9 +428,28 @@ private:
         {
             layOnHandsTarget = groupSnapshot.mainTank;
         }
-        else if (groupSnapshot.lowestHpAlly && groupSnapshot.lowestHpPct < 15.0f)
+        else
         {
-            layOnHandsTarget = groupSnapshot.lowestHpAlly;
+            // 取全队血量最低的濒死队友：过滤宠物 (宠物不值得交圣疗) 与自律携带者
+            float lowestCandidateHp = 15.0f;
+            for (Unit* ally : groupSnapshot.allies)
+            {
+                if (!ally || !ally->IsAlive() || ally->GetMap() != me->GetMap())
+                    continue;
+
+                if (ally->ToPet() || ally->HasAura(HolyPaladinSpells::FORBEARANCE))
+                    continue;
+
+                if (!IsValidHealTarget(ally))
+                    continue;
+
+                float const allyHp = ally->GetHealthPct();
+                if (allyHp < lowestCandidateHp)
+                {
+                    lowestCandidateHp = allyHp;
+                    layOnHandsTarget = ally;
+                }
+            }
         }
 
         if (layOnHandsTarget)
@@ -569,7 +611,7 @@ private:
     // =========================================================================
     bool MaintainBeaconOfLight()
     {
-        uint32 const beacon = GetAppropriateRank(HolyPaladinSpells::BEACON_OF_LIGHT, false);
+        uint32 const beacon = GetAppropriateRank(HolyPaladinSpells::BEACON_OF_LIGHT, true);
         if (!beacon)
             return false;
 
@@ -597,7 +639,7 @@ private:
 
     bool MaintainSacredShield()
     {
-        uint32 const sacredShield = GetAppropriateRank(HolyPaladinSpells::SACRED_SHIELD, false);
+        uint32 const sacredShield = GetAppropriateRank(HolyPaladinSpells::SACRED_SHIELD, true);
         if (!sacredShield)
             return false;
 
@@ -670,7 +712,7 @@ private:
 
         // 神启：耗蓝减半，法力 < 50% 即卡 CD 开启 (无血线门槛)，
         // 提前覆盖后续高压刷血窗口，提升整场续航总效率
-        uint32 const divineIllumination = GetAppropriateRank(HolyPaladinSpells::DIVINE_ILLUMINATION, false);
+        uint32 const divineIllumination = GetAppropriateRank(HolyPaladinSpells::DIVINE_ILLUMINATION, true);
         if (divineIllumination && manaPct < 50.0f && !me->HasAura(divineIllumination))
         {
             if (CanCast(me, divineIllumination, true) && ExecuteSpell(me, divineIllumination, true))
@@ -690,7 +732,7 @@ private:
         // 60% ~ 80%：必须先以复仇之怒 (+20% 治疗) 对冲神圣祈求的 50% 治疗惩罚
         if (avgHp < 80.0f)
         {
-            uint32 const avengingWrath = GetAppropriateRank(HolyPaladinSpells::AVENGING_WRATH, false);
+            uint32 const avengingWrath = GetAppropriateRank(HolyPaladinSpells::AVENGING_WRATH, true);
             if (!avengingWrath)
                 return false; // 未解锁对冲手段，禁止启用神圣祈求
 
@@ -708,7 +750,7 @@ private:
         if (groupSnapshot.lowestHpPct < 70.0f)
             return false;
 
-        uint32 const divinePlea = GetAppropriateRank(HolyPaladinSpells::DIVINE_PLEA, false);
+        uint32 const divinePlea = GetAppropriateRank(HolyPaladinSpells::DIVINE_PLEA, true);
         if (divinePlea && !me->HasAura(divinePlea))
         {
             if (CanCast(me, divinePlea, true) && ExecuteSpell(me, divinePlea, true))
@@ -747,7 +789,7 @@ private:
         // ---------------------------------------------------------------------
         if (hpPct < 60.0f)
         {
-            uint32 const divineFavor = GetAppropriateRank(HolyPaladinSpells::DIVINE_FAVOR, false);
+            uint32 const divineFavor = GetAppropriateRank(HolyPaladinSpells::DIVINE_FAVOR, true);
             if (divineFavor && !me->HasAura(divineFavor))
             {
                 if (CanCast(me, divineFavor, true) && ExecuteSpell(me, divineFavor, true))
@@ -755,7 +797,7 @@ private:
             }
 
             // 濒死期优先瞬发神圣震击：单发高额瞬回，无需承担长读条被移动/受击打断的风险
-            uint32 const holyShock = GetAppropriateRank(HolyPaladinSpells::HOLY_SHOCK, false);
+            uint32 const holyShock = GetAppropriateRank(HolyPaladinSpells::HOLY_SHOCK, true);
             if (holyShock && CanCast(target, holyShock, true) && ExecuteSpell(target, holyShock, true))
                 return true;
 
@@ -778,7 +820,7 @@ private:
         // ---------------------------------------------------------------------
         if (hpPct < 80.0f)
         {
-            uint32 const holyShock = GetAppropriateRank(HolyPaladinSpells::HOLY_SHOCK, false);
+            uint32 const holyShock = GetAppropriateRank(HolyPaladinSpells::HOLY_SHOCK, true);
             if (holyShock && CanCast(target, holyShock, true) && ExecuteSpell(target, holyShock, true))
                 return true;
 
@@ -870,19 +912,20 @@ private:
         if (!needsReposition)
             return;
 
-        // 站位于锚点正后方，避免与坦克抢正面仇恨面
-        float const behindAngle = anchor->GetOrientation() + static_cast<float>(M_PI);
+        // angle 严禁自行叠加 anchor->GetOrientation()：FollowMovementGenerator 内部已自行
+        // 以目标朝向为基准加算，二次叠加会让最终站位随坦克转向不断漂移
         MovementGeneratorType const moveType = me->GetMotionMaster()->GetCurrentMovementGeneratorType();
 
         if (underMeleePressure)
         {
             // 被贴脸时禁止原地后撤：后撤会被持续追打并拉开与坦克的距离，
             // 必须立刻贴到坦克身侧，借坦克的 AoE 仇恨把小怪拉走。
+            // angle 必须传正后方：传 0.0f 会贴在坦克脸前，被顺劈斩与正面吐息一并打死。
             // 条件必须包含 !isHuggingTank：常态远程跟随同样是 FOLLOW_MOTION_TYPE，
             // 若只判 moveType 则 18 码跟随态下抱坦分支永远无法进入，随从将被贴脸至死。
             if ((!isHuggingTank || moveType != FOLLOW_MOTION_TYPE) && dist > 3.0f)
             {
-                me->GetMotionMaster()->MoveFollow(anchor, 2.0f, 0.0f);
+                me->GetMotionMaster()->MoveFollow(anchor, 2.0f, BEHIND_ANGLE);
                 isHuggingTank = true;
             }
 
@@ -896,12 +939,12 @@ private:
         if (isHuggingTank || (dist < MIN_SAFE_DIST && moveType != FOLLOW_MOTION_TYPE))
         {
             isHuggingTank = false;
-            me->GetMotionMaster()->MoveFollow(anchor, IDEAL_FOLLOW_DIST, behindAngle);
+            me->GetMotionMaster()->MoveFollow(anchor, IDEAL_FOLLOW_DIST, BEHIND_ANGLE);
             return;
         }
 
         if (moveType != FOLLOW_MOTION_TYPE)
-            me->GetMotionMaster()->MoveFollow(anchor, IDEAL_FOLLOW_DIST, behindAngle);
+            me->GetMotionMaster()->MoveFollow(anchor, IDEAL_FOLLOW_DIST, BEHIND_ANGLE);
     }
 
     // =========================================================================
