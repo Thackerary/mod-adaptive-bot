@@ -66,6 +66,7 @@ public:
             case DisciplinePriestSpells::INNER_FOCUS:      return 20; // 心灵专注
             case DisciplinePriestSpells::POWER_INFUSION:   return 40; // 能量注入
             case DisciplinePriestSpells::PAIN_SUPPRESSION: return 50; // 痛苦压制
+            case DisciplinePriestSpells::DESPERATE_PRAYER: return 20; // 绝望祷言 (自保底牌)
             case DisciplinePriestSpells::PENANCE:          return 60; // 苦修 (戒律顶层天赋)
             default:                                       return 0;
         }
@@ -412,7 +413,9 @@ private:
         // 不牺牲机动性的自救底牌。原先在此处铺【恢复】属严重误配：
         // 戒律天赋不强化 HoT，单跳治疗量远低于苦修/快速治疗，
         // 只会白占一个救命 GCD。
-        uint32 const desperatePrayer = GetAppropriateRank(DisciplinePriestSpells::DESPERATE_PRAYER, false);
+        // 绝望祷言已登记于 GetTalentSpellMinLevel，第二参数必须传 true，
+        // 否则会被误判为基础技能而绕开天赋等级契约，导致低等级段空放
+        uint32 const desperatePrayer = GetAppropriateRank(DisciplinePriestSpells::DESPERATE_PRAYER, true);
         if (desperatePrayer && !me->HasAura(desperatePrayer))
         {
             if (CanCast(me, desperatePrayer, true) && ExecuteSpell(me, desperatePrayer, true))
@@ -847,8 +850,15 @@ private:
         if (!IsValidHealTarget(target) || target->ToPet())
             return false;
 
-        if (target->HasAura(prayerOfMending))
-            return false;
+        // 防顶光环：愈合祷言全团同时只能存在一个弹跳实体，
+        // 必须有任一成员持有即整轮跳过。若只校验主坦自身，会在坦克持盾、
+        // 祷言却已弹跳到队友身上的场景下反复重放，白白烧掉救命 GCD。
+        // 此处不过滤宠物：祷言弹跳同样会落在宠物身上，漏检会造成同样的顶替浪费。
+        for (Unit* ally : groupSnapshot.allies)
+        {
+            if (ally && ally->HasAura(prayerOfMending))
+                return false;
+        }
 
         if (!CanCast(target, prayerOfMending, true))
             return false;
@@ -900,18 +910,24 @@ private:
         // ---------------------------------------------------------------------
         if (hpPct < 80.0f)
         {
+            // 苦修 (首跳瞬抬，单体 HPS 峰值) 必须排在愈合祷言之前：
+            // 祷言属挂坦辅助弹跳技，单跳治疗量低于苦修首跳，
+            // 让辅助技抢占残血救急的 GCD 会直接拖慢止血速度
             if (TryLadderShield(target)) return true;
-            if (TryPrayerOfMending()) return true;
             if (TryPenance(target)) return true;
+            if (TryPrayerOfMending()) return true;
             if (TryFlashHeal(target)) return true;
 
             return false;
         }
 
         // ---------------------------------------------------------------------
-        // 平稳掉血 (80% ~ 95%)：苦修效率填充，冷却时快速治疗平稳收尾
-        // 此区间不补盾：预铺盾已由 P1 TryPreShield (80% 血线门禁) 统一调度
+        // 平稳掉血 (80% ~ 95%)：补盾联动 -> 苦修效率填充 -> 快速治疗平稳收尾。
+        // 受损目标补盾可同时兑现三重收益：吸收伤害、触发争分夺秒 25% 急速、
+        // 盾被吸收时触发狂喜 (RAPTURE) 返还法力，是平稳期性价比最高的起手式。
+        // (满血成员的预铺仍由 P1 TryPreShield 统一调度，二者不冲突)
         // ---------------------------------------------------------------------
+        if (TryLadderShield(target)) return true;
         if (TryPenance(target)) return true;
         if (TryFlashHeal(target)) return true;
 
@@ -926,23 +942,28 @@ private:
         if (!groupSnapshot.lowestHpAlly || groupSnapshot.lowestHpPct < 90.0f)
             return false;
 
-        // 优先驱散魔法；未习得时以祛病术/驱除疾病兜底过渡
-        uint32 dispel = GetAppropriateRank(DisciplinePriestSpells::DISPEL_MAGIC, false);
-        if (!dispel)
-            dispel = GetAppropriateRank(DisciplinePriestSpells::ABOLISH_DISEASE, false);
-        if (!dispel)
-            dispel = GetAppropriateRank(DisciplinePriestSpells::CURE_DISEASE, false);
+        // 魔法与疾病驱散法术必须独立获取。
+        // 原先的 if (!dispel) 级联赋值会在学会驱散魔法后直接短路，
+        // ABOLISH_DISEASE / CURE_DISEASE 永远得不到赋值，
+        // 导致随从终生无法驱散疾病，遇到疾病类机制只能干看着队友掉血。
+        uint32 const magicDispel = GetAppropriateRank(DisciplinePriestSpells::DISPEL_MAGIC, false);
 
-        if (!dispel)
+        uint32 diseaseDispel = GetAppropriateRank(DisciplinePriestSpells::ABOLISH_DISEASE, false);
+        if (!diseaseDispel)
+            diseaseDispel = GetAppropriateRank(DisciplinePriestSpells::CURE_DISEASE, false);
+
+        if (!magicDispel && !diseaseDispel)
             return false;
 
-        SpellInfo const* dispelInfo = sSpellMgr->GetSpellInfo(dispel);
-        if (!dispelInfo)
+        SpellInfo const* magicDispelInfo = magicDispel ? sSpellMgr->GetSpellInfo(magicDispel) : nullptr;
+        SpellInfo const* diseaseDispelInfo = diseaseDispel ? sSpellMgr->GetSpellInfo(diseaseDispel) : nullptr;
+
+        if (!magicDispelInfo && !diseaseDispelInfo)
             return false;
 
         // 群体驱散：多名队友同时中招时以一发代替多次单体驱散，节省大量 GCD
         uint32 const massDispel = GetAppropriateRank(DisciplinePriestSpells::MASS_DISPEL, false);
-        if (massDispel && massDispel != dispel)
+        if (massDispel && massDispel != magicDispel)
         {
             if (SpellInfo const* massDispelInfo = sSpellMgr->GetSpellInfo(massDispel))
             {
@@ -978,15 +999,26 @@ private:
 
         for (Unit* ally : groupSnapshot.allies)
         {
-            if (!IsValidHealTarget(ally) || ally->ToPet() || !HasDispellableDebuff(ally, dispelInfo))
+            if (!IsValidHealTarget(ally) || ally->ToPet())
+                continue;
+
+            // 逐目标择法：魔法优先 (法术伤害与控场类负面通常比疾病更致命)，
+            // 无魔法可驱时再回落疾病驱散通道
+            uint32 chosenDispel = 0;
+            if (magicDispelInfo && HasDispellableDebuff(ally, magicDispelInfo))
+                chosenDispel = magicDispel;
+            else if (diseaseDispelInfo && HasDispellableDebuff(ally, diseaseDispelInfo))
+                chosenDispel = diseaseDispel;
+
+            if (!chosenDispel)
                 continue;
 
             // 单个目标施法校验失败 (超距/被卡视线) 时继续扫描其余队友，
             // 避免个别目标直接中断整轮驱散巡检
-            if (!CanCast(ally, dispel, true))
+            if (!CanCast(ally, chosenDispel, true))
                 continue;
 
-            return ExecuteSpell(ally, dispel, true);
+            return ExecuteSpell(ally, chosenDispel, true);
         }
 
         return false;
