@@ -25,6 +25,7 @@ namespace HolyPaladinSpells
     constexpr uint32 CONCENTRATION_AURA     = 19746; // 专注光环 (防击退，治疗主光环)
     constexpr uint32 DEVOTION_AURA          = 48942; // 虔诚光环 Rank 10 (光环兜底)
     constexpr uint32 BLESSING_OF_WISDOM     = 48936; // 智慧祝福 Rank 9
+    constexpr uint32 BLESSING_OF_MIGHT      = 48932; // 力量祝福 Rank 10 (无蓝职业专用)
     constexpr uint32 BLESSING_OF_KINGS      = 20217; // 王者祝福
     constexpr uint32 SEAL_OF_WISDOM         = 20166; // 智慧圣印 (审判前置)
 
@@ -52,4 +53,9 @@ namespace HolyPaladinSpells
     // NPC 没有天赋树，需注入被动 (54155)，审判命中后才会由引擎派生急速 Buff (53657)。
     constexpr uint32 TALENT_JUDGEMENTS_OF_THE_PURE = 54155; // 纯洁审判 Rank 5 (天赋被动触发器)
     constexpr uint32 BUFF_JUDGEMENTS_OF_THE_PURE   = 53657; // 纯洁审判急速 Buff (15% 急速，1 分钟)
+
+    // =========================================================================
+    // 5. 核心雕文 (Major Glyphs)
+    // =========================================================================
+    constexpr uint32 GLYPH_OF_HOLY_LIGHT    = 54937; // 圣光术雕文 (圣光术溅射群抬核心)
 }

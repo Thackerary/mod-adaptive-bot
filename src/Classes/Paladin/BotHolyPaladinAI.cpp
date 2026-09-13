@@ -453,9 +453,21 @@ private:
             if (!ally || !ally->IsAlive() || ally->GetMap() != me->GetMap())
                 continue;
 
-            uint32 const blessing = (ally->getPowerType() == POWER_MANA)
-                ? GetAppropriateRank(HolyPaladinSpells::BLESSING_OF_WISDOM, false)
-                : GetAppropriateRank(HolyPaladinSpells::BLESSING_OF_KINGS, false);
+            uint32 blessing = 0;
+
+            if (ally->getPowerType() == POWER_MANA)
+            {
+                blessing = GetAppropriateRank(HolyPaladinSpells::BLESSING_OF_WISDOM, false);
+            }
+            else
+            {
+                // 无蓝职业（战士/盗贼/DK/熊坦）优先力量祝福，
+                // 已有力量祝福或未解锁时退化补刷王者祝福
+                uint32 const might = GetAppropriateRank(HolyPaladinSpells::BLESSING_OF_MIGHT, false);
+                blessing = (might && !ally->HasAura(might))
+                    ? might
+                    : GetAppropriateRank(HolyPaladinSpells::BLESSING_OF_KINGS, false);
+            }
 
             if (!blessing || ally->HasAura(blessing))
                 continue;
@@ -542,6 +554,9 @@ private:
         if (!victim || !victim->IsAlive() || victim->GetMap() != me->GetMap() || victim->IsFriendlyTo(me))
             return false;
 
+        // 强制对齐敌对目标朝向：避免怪物处于侧后方触发 SPELL_FAILED_UNIT_NOT_INFRONT 导致审判哑火
+        me->SetFacingToObject(victim);
+
         if (!CanCast(victim, judgement, true))
             return false;
 
@@ -614,6 +629,11 @@ private:
 
         if (!IsValidHealTarget(target))
             return false;
+
+        // 立定读条：跟随/走位途中队友血崩时立刻刹停，
+        // 否则移动状态会持续打断圣光术 / 圣光闪现的读条（跑路不加血）
+        if (me->isMoving())
+            me->StopMoving();
 
         float const hpPct = groupSnapshot.lowestHpPct;
 
@@ -763,6 +783,9 @@ private:
         // 否则施放审判后引擎不会派生急速 Buff (53657)；
         // 急速 Buff 本体仍由 MaintainJudgementsOfThePure() 依剩余时间动态刷新。
         SyncPassive(50, HolyPaladinSpells::TALENT_JUDGEMENTS_OF_THE_PURE);
+
+        // 圣光术雕文：圣光术命中后为周围小队成员溅射治疗，群抬核心
+        SyncPassive(60, HolyPaladinSpells::GLYPH_OF_HOLY_LIGHT);
     }
 };
 
