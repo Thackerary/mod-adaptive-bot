@@ -389,8 +389,12 @@ private:
     bool TrySelfPreservation()
     {
         // 被物理近战贴身且血线不稳：渐隐降低仇恨，把仇恨交还坦克，
-        // 从根源上解除被持续追打的死循环 (P5 的抱坦走位只是治标)
-        if (IsUnderPhysicalMelee(me) && me->GetHealthPct() < 60.0f)
+        // 从根源上解除被持续追打的死循环 (P5 的抱坦走位只是治标)。
+        // 门禁收紧至 [45%, 85%)：< 45% 濒死期生存第一，渐隐不带任何减伤与
+        // 吸收，丢在这里只会白烧一个救命 GCD，此时必须交给盾与绝望祷言；
+        // >= 85% 时血线尚稳，也无需为了一点仇恨提前消耗渐隐。
+        float const selfHpPct = me->GetHealthPct();
+        if (selfHpPct >= 45.0f && selfHpPct < 85.0f && IsUnderPhysicalMelee(me))
         {
             uint32 const fade = GetAppropriateRank(DisciplinePriestSpells::FADE, false);
             if (fade && !me->HasAura(fade) && CanCast(me, fade, true) && ExecuteSpell(me, fade, true))
@@ -604,6 +608,13 @@ private:
     // =========================================================================
     bool MaintainTankShield()
     {
+        // 战时节流门禁：全队只要出现需要正经治疗的目标，主坦的预铺盾必须
+        // 无条件让位给 P3 单体急救。否则会出现「队友濒死、牧师却在给 75%
+        // 血线的坦克补盾」的治疗倒挂，最终演变为减员事故。
+        // (主坦自身濒死由 TryPanicShield 单独开辟瞬发绿色通道，不受此门禁限制)
+        if (me->IsInCombat() && groupSnapshot.lowestHpPct < 70.0f)
+            return false;
+
         uint32 const shield = GetAppropriateRank(DisciplinePriestSpells::POWER_WORD_SHIELD, false);
         if (!shield)
             return false;
@@ -714,6 +725,12 @@ private:
         if (!innerFire || me->HasAura(innerFire))
             return false;
 
+        // 战时节流门禁：心灵之火属常驻增益，掉落后补挂不急于一时。
+        // 战时只要有人掉血，补 buff 的 GCD 必须让渡给治疗通道；
+        // 否则一次 1.5 秒的读条就可能错过救命窗口。脱战时无此限制。
+        if (me->IsInCombat() && groupSnapshot.lowestHpPct < 75.0f)
+            return false;
+
         return CanCast(me, innerFire, true) && ExecuteSpell(me, innerFire, true);
     }
 
@@ -781,6 +798,12 @@ private:
         }
 
         if (manaPct >= 45.0f)
+            return false;
+
+        // 血线安全门禁：暗影魔需敌对目标承载且占用一个完整 GCD，
+        // 必须在团队脱离濒死承压线后才允许交出。否则「队友正在暴毙，
+        // 牧师却停下来招回蓝宠」会直接导致减员，回蓝收益远低于人命成本。
+        if (groupSnapshot.lowestHpPct < 65.0f)
             return false;
 
         // 暗影魔：法力枯竭时的主力回蓝手段。
@@ -926,9 +949,12 @@ private:
         // 受损目标补盾可同时兑现三重收益：吸收伤害、触发争分夺秒 25% 急速、
         // 盾被吸收时触发狂喜 (RAPTURE) 返还法力，是平稳期性价比最高的起手式。
         // (满血成员的预铺仍由 P1 TryPreShield 统一调度，二者不冲突)
+        // 此区间严禁动用苦修：苦修是戒律单体最高爆发抬血底牌且带冷却，
+        // 对 92% 血线的目标施放会造成约 80% 过量治疗并白烧长冷却，
+        // 必须严格封存于 hpPct < 80.0f 的区间，此处由快速治疗平稳收尾。
         // ---------------------------------------------------------------------
         if (TryLadderShield(target)) return true;
-        if (TryPenance(target)) return true;
+        if (TryPrayerOfMending()) return true;
         if (TryFlashHeal(target)) return true;
 
         return false;
