@@ -54,8 +54,11 @@ namespace HolyPriestSpells
     constexpr uint32 EMPOWERED_RENEW             = 33152; // 强化恢复 Rank 3 (30级)：恢复额外加成 + 立即生效一跳
     constexpr uint32 DIVINE_PROVIDENCE           = 47567; // 神圣天恩 Rank 5 (40级)：环/祷言治疗量 +10%
     constexpr uint32 INSPIRATION                 = 15363; // 灵感 Rank 3 (20级)：暴击治疗使目标受物理伤害 -10%
-    constexpr uint32 SURGE_OF_LIGHT              = 33154; // 圣光涌动 (30级)：暴击触发瞬发免费快速治疗
+    constexpr uint32 MEDITATION                  = 14777; // 冥想 Rank 3 (30级)：施法中仍保持 50% 精神回蓝
+    constexpr uint32 SURGE_OF_LIGHT_TALENT       = 33154; // 圣光涌动【天赋被动】(30级)：注入自身，由治疗暴击触发 Proc
+    constexpr uint32 SURGE_OF_LIGHT_PROC         = 33151; // 圣光涌动【临时 Proc】：使下一发快速治疗瞬发且零蓝耗
     constexpr uint32 SERENDIPITY                 = 63730; // 好运 Rank 3 (50级)：快疗/联结使下发大加/祷言读条 -20%
+    constexpr uint32 SERENDIPITY_PROC            = 63734; // 好运【临时 Proc】：叠满 2 层后强效治疗术/治疗祷言读条 -40%
     constexpr uint32 GLYPH_OF_CIRCLE_OF_HEALING  = 55675; // 治疗之环雕文 (50级)：目标数量增至 6 个
     constexpr uint32 GLYPH_OF_PRAYER_OF_HEALING  = 55680; // 治疗祷言雕文 (60级)：附加持续 HoT
 }

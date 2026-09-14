@@ -568,6 +568,12 @@ private:
         if (!prayerOfMending)
             return false;
 
+        // 战时节流门禁：全队出现重伤 (< 60%) 时，愈合祷言作为「挂坦辅助弹跳技」，
+        // 单跳治疗量低于快速治疗/强效治疗术，必须无条件让渡施法权给 P3 单体直接抬血，
+        // 否则会出现「队友濒死、牧师却在给主坦补祷言」的治疗倒挂。
+        if (me->IsInCombat() && groupSnapshot.lowestHpPct < 60.0f)
+            return false;
+
         // 愈合祷言瞬发且智能弹跳，挂在主坦身上可最大化弹跳收益 (每次受击触发一跳)
         Unit* target = groupSnapshot.mainTank;
         if (!IsValidHealTarget(target) || target->ToPet())
@@ -666,9 +672,13 @@ private:
         }
 
         // 希望圣歌：法力见底且全队整体健康时引导回蓝。
-        // 引导技必须刹停，否则移动中施法会被引擎以 SPELL_FAILED_MOVING 直接拒绝；
+        // 双门禁：平均血线达标只能证明「整体没崩」，不能证明「没人要死」。
+        // 该技能为长达 8 秒的引导，期间随从完全丧失治疗能力，必须追加单体安全门禁：
+        // 凡有任一成员跌破 70% 承压线 (尤其是主坦)，施法权无条件让渡给治疗通道，
+        // 否则极易出现「全队均值健康、主坦濒死，牧师站桩引导 8 秒」的倒坦事故。
+        // 引导技还必须刹停，否则移动中施法会被引擎以 SPELL_FAILED_MOVING 直接拒绝；
         // 刹停时机严格下沉至 CanCast 通过之后，避免校验失败白白放弃机动性。
-        if (manaPct < 25.0f && groupSnapshot.averageHpPct >= 75.0f)
+        if (manaPct < 25.0f && groupSnapshot.averageHpPct >= 75.0f && groupSnapshot.lowestHpPct >= 70.0f)
         {
             uint32 const hymnOfHope = GetAppropriateRank(HolyPriestSpells::HYMN_OF_HOPE, false);
             if (hymnOfHope && !me->HasAura(hymnOfHope) && CanCast(me, hymnOfHope, true))
@@ -749,8 +759,11 @@ private:
 
     bool TrySurgeFlashHeal(Unit* target)
     {
-        // 圣光涌动：暴击触发的免费瞬发快速治疗，必须在重伤期第一时间兑现
-        if (!me->HasAura(HolyPriestSpells::SURGE_OF_LIGHT))
+        // 圣光涌动【Proc】判定：天赋被动 (SURGE_OF_LIGHT_TALENT) 常驻注入自身，
+        // 真正的施法资格必须校验「治疗暴击触发的临时 Proc 光环」(SURGE_OF_LIGHT_PROC)。
+        // 若误把天赋被动当作施法条件，该条件将恒为真，随从会在无 Proc 时反复
+        // 抢占 GCD 尝试瞬发快速治疗；若误判为 Proc 缺失又会永久空转，二者皆致命。
+        if (!me->HasAura(HolyPriestSpells::SURGE_OF_LIGHT_PROC))
             return false;
 
         uint32 const flashHeal = GetAppropriateRank(HolyPriestSpells::FLASH_HEAL, false);
@@ -789,6 +802,9 @@ private:
 
         // 强效治疗术为 3 秒高耗蓝读条：仅在法力充裕时作为兜底，
         // 否则会抽空后续高压窗口的治疗余量。
+        // 注：在持有 2 层好运 (SERENDIPITY_PROC) 时读条被压缩至约 1.8 秒，
+        //     此时它由「兜底技」升格为单体最高 HPS 选择，调用已在 TryLadderHeal
+        //     的重伤分支中显式前置，本函数不再重复判定，保持职责单一。
         if (me->GetPowerPct(POWER_MANA) < 35.0f)
             return false;
 
@@ -799,6 +815,41 @@ private:
             me->StopMoving();
 
         return ExecuteSpell(target, greaterHeal, true);
+    }
+
+    // =========================================================================
+    // P3-b: 联结治疗 (自身与目标同时受益 + 叠加好运层数)
+    // -------------------------------------------------------------------------
+    // 联结治疗为 1.5 秒读条，一次施法同时治疗施法者与目标，并触发好运
+    // (SERENDIPITY) 叠层。仅当「自身也在承压」时才有替换快速治疗的价值：
+    //  + 自身健康时用它等于白付一份蓝耗，不如快速治疗集中治疗量给目标。
+    // =========================================================================
+    bool TryBindingHeal(Unit* target)
+    {
+        uint32 const bindingHeal = GetAppropriateRank(HolyPriestSpells::BINDING_HEAL, false);
+        if (!bindingHeal || !target)
+            return false;
+
+        // 门禁一：目标即自身时，联结治疗退化为单体治疗，无联动收益，
+        // 直接放行给快速治疗通道，避免无意义地拉长施法链条。
+        if (target == me)
+            return false;
+
+        // 门禁二：仅在自身血线不稳 (< 75%) 时才用联结治疗替代快速治疗，
+        // 兼顾「自疗 + 目标治疗」双收益并顺带叠加好运层数；
+        // 自身健康时回归快速治疗，把蓝耗集中在最需要治疗的目标身上。
+        if (me->GetHealthPct() >= 75.0f)
+            return false;
+
+        // 施法资格必须先通过校验再刹停：CanCast 失败时提前立定会让随从
+        // 在重构走位期间被 StopMoving 每帧拉扯成原地抽搐。
+        if (!CanCast(target, bindingHeal, true))
+            return false;
+
+        if (me->isMoving())
+            me->StopMoving();
+
+        return ExecuteSpell(target, bindingHeal, true);
     }
 
     // =========================================================================
@@ -823,7 +874,24 @@ private:
         // ---------------------------------------------------------------------
         if (hpPct < 60.0f)
         {
+            // 圣光涌动 Proc 优先：免费且瞬发，零 GCD 成本止血
             if (TrySurgeFlashHeal(target)) return true;
+
+            // 好运联动：目标 < 55% 且已叠满 2 层好运 (SERENDIPITY_PROC) 时，
+            // 强效治疗术读条被压缩至约 1.8 秒，等效「大治疗量 + 快疗速度」，
+            // 是单体重伤期最高 HPS 的选择，必须前置优先。
+            // 未叠满好运时严禁抢占：3 秒原速读条在重伤期足以让目标被尖刺带走。
+            if (hpPct < 55.0f &&
+                me->GetAuraCount(HolyPriestSpells::SERENDIPITY_PROC) >= 2 &&
+                TryGreaterHeal(target))
+            {
+                return true;
+            }
+
+            // 联结治疗替代快速治疗：自身血线不稳时一次施法同时治疗自己与目标，
+            // 并顺带叠加好运层数，为下一次强效治疗术铺路。
+            if (TryBindingHeal(target)) return true;
+
             if (TryFlashHeal(target)) return true;
             if (TryGreaterHeal(target)) return true;
 
@@ -844,6 +912,11 @@ private:
         if (hpPct < 80.0f)
         {
             if (TryRenew(target)) return true;
+
+            // 联结治疗优先替代快速治疗：中度掉血期自身常伴随 AoE 溅射损伤，
+            // 一次施法同时覆盖自身与目标，并叠加好运层数为后续大加预铺。
+            if (TryBindingHeal(target)) return true;
+
             if (TryFlashHeal(target)) return true;
 
             return false;
@@ -1052,7 +1125,8 @@ private:
 
         SyncPassive(20, HolyPriestSpells::INSPIRATION);                 // 灵感：暴击治疗后目标受物理伤害 -10%
         SyncPassive(30, HolyPriestSpells::EMPOWERED_RENEW);            // 强化恢复：恢复额外加成 + 立即生效一跳
-        SyncPassive(30, HolyPriestSpells::SURGE_OF_LIGHT);             // 圣光涌动：暴击触发瞬发免费快速治疗
+        SyncPassive(30, HolyPriestSpells::MEDITATION);                 // 冥想：施法中仍保持 50% 精神回蓝
+        SyncPassive(30, HolyPriestSpells::SURGE_OF_LIGHT_TALENT);      // 圣光涌动【天赋】：注入后由治疗暴击触发 Proc
         SyncPassive(40, HolyPriestSpells::SPIRITUAL_GUIDANCE);         // 精神指引：25% 精神转法强
         SyncPassive(40, HolyPriestSpells::DIVINE_PROVIDENCE);          // 神圣天恩：环/祷言治疗量 +10%
         SyncPassive(50, HolyPriestSpells::SERENDIPITY);                // 好运：快疗/联结使下发大加/祷言读条 -20%
