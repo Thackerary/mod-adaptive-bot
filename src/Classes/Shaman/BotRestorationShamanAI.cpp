@@ -505,15 +505,38 @@ private:
 
     bool TryEmergencyHeals()
     {
+        // ---------------------------------------------------------------------
+        // 情形一 (最高优先级)：自然迅捷光环已就绪 —— 必须当帧兑现，
+        // 严禁把这张瞬发大加留到 P3 被次级治疗波误吞。
+        // 自然迅捷光环仅短时存在 (10s 窗口)，若仍先走 SelectEmergencyTarget()
+        // 的严格濒死门禁 (< 30%)，目标血线恰在 P3 前被抬离阈值就会失去目标；
+        // 光环随即被 P3 中任何一发自然系法术 (次级治疗波 / 激流) 消耗掉，
+        // 2 分钟底牌被 1.5 秒小加白白吞没。
+        // 因此只要光环存在且仍有任何受损目标，就当帧施放瞬发治疗波兑现。
+        // ---------------------------------------------------------------------
+        if (me->HasAura(RestorationShamanSpells::NATURES_SWIFTNESS))
+        {
+            Unit* swiftTarget = SelectEmergencyTarget();
+
+            // 降级锚点：无严格濒死目标时，只要全队仍有受损成员即兑现，
+            // 避免光环在 10 秒窗口内白白过期。
+            if (!swiftTarget &&
+                groupSnapshot.lowestHpAlly && !groupSnapshot.lowestHpAlly->ToPet() &&
+                groupSnapshot.lowestHpPct < 95.0f &&
+                IsValidHealTarget(groupSnapshot.lowestHpAlly))
+            {
+                swiftTarget = groupSnapshot.lowestHpAlly;
+            }
+
+            if (swiftTarget)
+                return TryHealingWave(swiftTarget, true);
+        }
+
+        // 情形二：光环未激活，尝试主动开启自然迅捷 (Off-GCD，2 分钟自家冷却)
         Unit* target = SelectEmergencyTarget();
         if (!target)
             return false;
 
-        // 情形一：自然迅捷已激活 —— 治疗波变为瞬发，当帧直接完成极限救急
-        if (me->HasAura(RestorationShamanSpells::NATURES_SWIFTNESS))
-            return TryHealingWave(target, true);
-
-        // 情形二：尝试激活自然迅捷 (Off-GCD，2 分钟自家冷却)
         uint32 const naturesSwiftness = GetAppropriateRank(RestorationShamanSpells::NATURES_SWIFTNESS, true);
         if (!naturesSwiftness || naturesSwiftnessCooldown > 0)
             return false;
@@ -912,7 +935,12 @@ private:
         if (hpPct < 90.0f)
         {
             if (TryRiptide(target)) return true;
-            if (TryLesserHealingWave(target)) return true;
+
+            // 法力节流门禁：88% 血线目标并无生命危险，在此区间投入高蓝读条
+            // 会把残蓝高危期最后的法力余量烧光。残蓝 (< 35%) 时直接放行，
+            // 让随从停手进入五秒规则精神回蓝 / 水之护盾回蓝通道，
+            // 把法力留给真正的高压救命窗口。
+            if (me->GetPowerPct(POWER_MANA) >= 35.0f && TryLesserHealingWave(target)) return true;
 
             return false;
         }
