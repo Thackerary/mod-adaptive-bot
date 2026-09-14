@@ -48,8 +48,11 @@ class BotRestorationDruidAI : public AdaptiveBotAI
     static constexpr uint32 CD_NATURES_SWIFTNESS = 120000;
     static constexpr uint32 CD_BARKSPIN          = 60000;
 
-    // 生命之绽「三花不落」补刷窗口：叠满 3 层且剩余时间低于此值时提前续花
-    static constexpr int32  LIFEBLOOM_REFRESH_WINDOW = 3000;
+    // 生命之绽「三花不落」补刷窗口：叠满 3 层且剩余时间低于此值时提前续花。
+    // 必须显著大于 BUFF_SWEEP_INTERVAL (3000ms 巡检周期)：若窗口小于等于巡检间隔，
+    // 两轮巡检之间三花会自然到期断档 (层数直接归零重挂)。
+    // 放宽到 4000ms，保证每轮巡检都能在三花落地前提前接续。
+    static constexpr int32  LIFEBLOOM_REFRESH_WINDOW = 4000;
 
 public:
     explicit BotRestorationDruidAI(Creature* creature) : AdaptiveBotAI(creature) {}
@@ -170,6 +173,7 @@ public:
             if (sweepDue)
             {
                 if (MaintainTreeOfLife()) return;
+                if (MaintainMarkOfTheWild()) return;
                 if (MaintainTankHoTs()) return;
             }
 
@@ -189,10 +193,11 @@ public:
         // ---- P0: 极限急救 (树皮自保 + 自然迅捷瞬发治疗之触) ----
         if (TryEmergencyHeals()) return;
 
-        // ---- P1: 生命之树形态维持与主坦「三花聚顶」滚动 ----
+        // ---- P1: 生命之树形态维持、野性印记与主坦「三花聚顶」滚动 ----
         if (sweepDue)
         {
             if (MaintainTreeOfLife()) return;
+            if (MaintainMarkOfTheWild()) return;
             if (MaintainTankHoTs()) return;
         }
 
@@ -624,6 +629,50 @@ private:
     }
 
     // =========================================================================
+    // P1-c: 野性印记 (团队常驻增益巡检)
+    // -------------------------------------------------------------------------
+    // 爪子是长效团队增益，收益恒定但不救命：仅在脱战维护或战时全队脱离承压线
+    // (最低血线 >= 80%) 时才补，绝不允许抢占同帧急救施法权。
+    // =========================================================================
+    bool MaintainMarkOfTheWild()
+    {
+        uint32 const markOfTheWild = GetAppropriateRank(RestorationDruidSpells::MARK_OF_THE_WILD, false);
+        if (!markOfTheWild)
+            return false;
+
+        // 战时节流门禁：全队承压时补爪子的 GCD 必须让渡给治疗通道
+        if (me->IsInCombat() && groupSnapshot.lowestHpPct < 80.0f)
+            return false;
+
+        // 先保自身：随从本体缺印时优先补齐 (自身无印记会连带削弱承伤与续航)
+        if (!me->HasAura(markOfTheWild))
+        {
+            if (CanCast(me, markOfTheWild, true) && ExecuteSpell(me, markOfTheWild, true))
+                return true;
+        }
+
+        for (Unit* ally : groupSnapshot.allies)
+        {
+            // 宠物由主人自行管理增益：宠物不参与打地鼠雷达的优先级排序，
+            // 在此为其补印会白白消耗救命 GCD。
+            if (!ally || ally->ToPet() || !IsValidHealTarget(ally))
+                continue;
+
+            if (ally->HasAura(markOfTheWild))
+                continue;
+
+            // 单个目标校验失败 (超距/被卡视线) 时继续扫描其余队友，
+            // 避免个别目标直接中断整轮增益巡检。
+            if (!CanCast(ally, markOfTheWild, true))
+                continue;
+
+            return ExecuteSpell(ally, markOfTheWild, true);
+        }
+
+        return false;
+    }
+
+    // =========================================================================
     // P2-a: 团队智能群抬 (野性成长)
     // -------------------------------------------------------------------------
     // 以 lowestHpAlly 为锚点：野性成长会自动向附近最需要治疗的队友逐跳扩散，
@@ -763,14 +812,19 @@ private:
         return ExecuteSpell(target, rejuvenation, true);
     }
 
-    bool TryRegrowth(Unit* target)
+    // forceDirectHeal: 应急直疗模式。
+    // 愈合自带 HoT，常规施放会跳过已挂愈合的目标以省蓝；但在重伤急救且
+    // 更高阶大加不可用时 (典型为未满 80 级尚无滋养)，必须允许吃下愈合的
+    // 直接治疗部分兜底，杜绝「有法术可放却因防顶守卫原地发呆」的断奶死锁。
+    bool TryRegrowth(Unit* target, bool forceDirectHeal = false)
     {
         uint32 const regrowth = GetAppropriateRank(RestorationDruidSpells::REGROWTH, false);
         if (!regrowth || !target || target->ToPet() || !IsValidHealTarget(target))
             return false;
 
         // 光环防顶守卫：愈合自带 HoT，重复施放只取直接治疗部分，收益被浪费
-        if (target->HasAura(regrowth))
+        // (应急直疗模式下旁路该守卫，仅取其直接治疗量救命)
+        if (!forceDirectHeal && target->HasAura(regrowth))
             return false;
 
         // 施法资格必须先通过校验再刹停：CanCast 失败 (GCD/被控/超距) 时提前立定，
@@ -804,6 +858,14 @@ private:
         uint32 const healingTouch = GetAppropriateRank(RestorationDruidSpells::HEALING_TOUCH, false);
         if (!healingTouch || !target)
             return false;
+
+        // 3.3.5a 铁律：树形态底层硬性禁止施放治疗之触，直接下发必被引擎拒绝，
+        // 形成「自然迅捷已开却无法兑现」的断奶死锁。
+        // 救急优先于形态收益，必须在 CanCast 之前瞬拔树形态：
+        // RemoveAurasDueToSpell 不是施法动作，不占用 GCD，后续瞬发治疗之触可当帧落地；
+        // 脱战或低压力期由 MaintainTreeOfLife 自动变回树形态。
+        if (me->GetShapeshiftForm() == FORM_TREE)
+            me->RemoveAurasDueToSpell(RestorationDruidSpells::TREE_OF_LIFE);
 
         if (!CanCast(target, healingTouch, true))
             return false;
@@ -849,6 +911,11 @@ private:
 
             // 4. 快速读条愈合兜底 (低等级尚无滋养时的唯一大加通道)
             if (TryRegrowth(target)) return true;
+
+            // 5. 终极防断奶兜底：目标已挂愈合 HoT 而滋养不可用 (未满 80 级) 时，
+            //    步骤 4 会被光环防顶守卫拦下。此刻必须强制吃下愈合的直接治疗部分
+            //    续命，绝不允许在重伤期原地发呆直至目标阵亡。
+            if (TryRegrowth(target, true)) return true;
 
             return false;
         }
@@ -1082,6 +1149,7 @@ private:
             }
         };
 
+        SyncPassive(15, RestorationDruidSpells::INTENSITY);             // 强烈：施法中保持 50% 精神回蓝 (核心续航)
         SyncPassive(20, RestorationDruidSpells::GLYPH_OF_SWIFTMEND);    // 迅捷治愈雕文：迅捷治愈不再吞噬回春/愈合 (核心必带)
         SyncPassive(20, RestorationDruidSpells::GLYPH_OF_RAPID_REJUV);  // 快速回春雕文：急速使回春跳得更快
         SyncPassive(30, RestorationDruidSpells::MASTER_SHAPESHIFTER);   // 兽性大师：树形态治疗 +4%
@@ -1092,11 +1160,6 @@ private:
     }
 };
 
-// =============================================================================
-// 【重复粘贴残留区】以下整段内容为同一文件被重复写入产生的冗余副本，
-// 已用 #if 0 整体屏蔽以保证编译通过。
-// 清理时请删除自本注释下方 #if 0 起、至文件末尾 #endif 之间的全部内容。
-// =============================================================================
 #if 0
 /*
  * Copyright (C) 2016+ AzerothCore <www.azerothcore.org>, released under GNU AGPL v3 license

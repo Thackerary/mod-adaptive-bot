@@ -39,6 +39,7 @@ namespace RestorationDruidSpells
     constexpr uint32 ABOLISH_POISON        = 2893;  // 驱毒术 (仅解中毒)
 
     // ---- 被动天赋补偿与雕文 (NPC 无天赋树, 由 AddAura 静态补偿) ----
+    constexpr uint32 INTENSITY             = 17108; // 强烈 Rank 3 (15级, 施法中保持 50% 精神回蓝)
     constexpr uint32 MASTER_SHAPESHIFTER   = 48412; // 兽性大师 Rank 2 (树形态治疗 +4%)
     constexpr uint32 EMPOWERED_TOUCH       = 33879; // 强化之触 Rank 2 (滋养增效)
     constexpr uint32 EMPOWERED_REJUV       = 33886; // 强化回春术 Rank 5 (HoT 效果 +10%)
