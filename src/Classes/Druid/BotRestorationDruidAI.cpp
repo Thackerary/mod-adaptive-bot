@@ -1054,10 +1054,50 @@ private:
         if (isHuggingTank || (dist < MIN_SAFE_DIST && moveType != FOLLOW_MOTION_TYPE))
         {
             isHuggingTank = false;
-            me->GetMotionGroup... // placeholder
+            me->GetMotionMaster()->MoveFollow(anchor, IDEAL_FOLLOW_DIST, BEHIND_ANGLE);
+            return;
         }
+
+        if (moveType != FOLLOW_MOTION_TYPE)
+            me->GetMotionMaster()->MoveFollow(anchor, IDEAL_FOLLOW_DIST, BEHIND_ANGLE);
+    }
+
+    // =========================================================================
+    // 恢复天赋被动光环补偿 (弥补 NPC 缺天赋树缺陷)
+    // =========================================================================
+    void ApplyPassiveTalents()
+    {
+        uint8 const level = me->GetLevel();
+
+        auto SyncPassive = [this, level](uint8 minLevel, uint32 spellId)
+        {
+            if (level >= minLevel)
+            {
+                if (!me->HasAura(spellId))
+                    me->AddAura(spellId, me);
+            }
+            else
+            {
+                me->RemoveAurasDueToSpell(spellId);
+            }
+        };
+
+        SyncPassive(20, RestorationDruidSpells::GLYPH_OF_SWIFTMEND);    // 迅捷治愈雕文：迅捷治愈不再吞噬回春/愈合 (核心必带)
+        SyncPassive(20, RestorationDruidSpells::GLYPH_OF_RAPID_REJUV);  // 快速回春雕文：急速使回春跳得更快
+        SyncPassive(30, RestorationDruidSpells::MASTER_SHAPESHIFTER);   // 兽性大师：树形态治疗 +4%
+        SyncPassive(30, RestorationDruidSpells::EMPOWERED_REJUV);       // 强化回春术：HoT 效果 +10%
+        SyncPassive(35, RestorationDruidSpells::EMPOWERED_TOUCH);       // 强化之触：滋养增效
+        SyncPassive(40, RestorationDruidSpells::GIFT_OF_EARTHMOTHER);   // 大地母亲的赐福：法术急速
+        SyncPassive(60, RestorationDruidSpells::GLYPH_OF_WILD_GROWTH);  // 野性成长雕文：目标数量 +1 (达 6 目标)
     }
 };
+
+// =============================================================================
+// 【重复粘贴残留区】以下整段内容为同一文件被重复写入产生的冗余副本，
+// 已用 #if 0 整体屏蔽以保证编译通过。
+// 清理时请删除自本注释下方 #if 0 起、至文件末尾 #endif 之间的全部内容。
+// =============================================================================
+#if 0
 /*
  * Copyright (C) 2016+ AzerothCore <www.azerothcore.org>, released under GNU AGPL v3 license
  */
@@ -2152,6 +2192,8 @@ private:
         SyncPassive(60, RestorationDruidSpells::GLYPH_OF_WILD_GROWTH);  // 野性成长雕文：目标数量 +1 (达 6 目标)
     }
 };
+
+#endif
 
 void AddSC_bot_restoration_druid()
 {
