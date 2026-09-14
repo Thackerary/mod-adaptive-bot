@@ -13,6 +13,7 @@ void AddSC_bot_holy_paladin();
 void AddSC_bot_discipline_priest();
 void AddSC_bot_holy_priest();
 void AddSC_bot_restoration_shaman();
+void AddSC_bot_restoration_druid();
 
 // 模块总入口：函数名必须严格匹配 "Add" + 模块目录名(连字符变下划线) + "Scripts"
 void Addmod_adaptive_botScripts()
@@ -25,4 +26,5 @@ void Addmod_adaptive_botScripts()
     AddSC_bot_discipline_priest();
     AddSC_bot_holy_priest();
     AddSC_bot_restoration_shaman();
+    AddSC_bot_restoration_druid();
 }
