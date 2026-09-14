@@ -794,7 +794,7 @@ private:
         return ExecuteSpell(target, flashHeal, true);
     }
 
-    bool TryGreaterHeal(Unit* target)
+    bool TryGreaterHeal(Unit* target, bool isSerendipity = false)
     {
         uint32 const greaterHeal = GetAppropriateRank(HolyPriestSpells::GREATER_HEAL, false);
         if (!greaterHeal || !target)
@@ -802,10 +802,12 @@ private:
 
         // 强效治疗术为 3 秒高耗蓝读条：仅在法力充裕时作为兜底，
         // 否则会抽空后续高压窗口的治疗余量。
-        // 注：在持有 2 层好运 (SERENDIPITY_PROC) 时读条被压缩至约 1.8 秒，
-        //     此时它由「兜底技」升格为单体最高 HPS 选择，调用已在 TryLadderHeal
-        //     的重伤分支中显式前置，本函数不再重复判定，保持职责单一。
-        if (me->GetPowerPct(POWER_MANA) < 35.0f)
+        // 注：在持有 2 层好运 (SERENDIPITY_PROC) 时读条被压缩至约 1.8 秒且蓝耗降 20%，
+        //     此时它由「兜底技」升格为单体最高 HPS 选择，属于救命性质施法，
+        //     法力门禁必须相应放宽：若仍沿用 35% 常规门禁，会在 32% 蓝量的重伤窗口
+        //     误拦截这发 1.8 秒急救大加，直接导致倒坦。
+        float const manaGate = isSerendipity ? 15.0f : 35.0f;
+        if (me->GetPowerPct(POWER_MANA) < manaGate)
             return false;
 
         if (!CanCast(target, greaterHeal, true))
@@ -881,9 +883,13 @@ private:
             // 强效治疗术读条被压缩至约 1.8 秒，等效「大治疗量 + 快疗速度」，
             // 是单体重伤期最高 HPS 的选择，必须前置优先。
             // 未叠满好运时严禁抢占：3 秒原速读条在重伤期足以让目标被尖刺带走。
-            if (hpPct < 55.0f &&
-                me->GetAuraCount(HolyPriestSpells::SERENDIPITY_PROC) >= 2 &&
-                TryGreaterHeal(target))
+            //
+            // 层数检测必须走 Aura::GetStackAmount()：可叠加 Buff 在底层仅有一个
+            // AuraApplication 实例，GetAuraCount() 恒返回 1，用其判 >= 2 会使
+            // 好运联动永久失效，本分支彻底沦为死代码。
+            Aura* serendipity = me->GetAura(HolyPriestSpells::SERENDIPITY_PROC);
+            if (hpPct < 55.0f && serendipity && serendipity->GetStackAmount() >= 2 &&
+                TryGreaterHeal(target, true))
             {
                 return true;
             }
@@ -893,8 +899,11 @@ private:
             if (TryBindingHeal(target)) return true;
 
             if (TryFlashHeal(target)) return true;
-            if (TryGreaterHeal(target)) return true;
 
+            // 兜底常规大加已被移除：本分支已由好运大加 (isSerendipity) 与
+            // 快速治疗覆盖，此处再排一发不带好运的 3 秒原速大加毫无意义——
+            // 走到这一步说明前两者均不可用 (好运不足或蓝量 < 15%)，
+            // 该调用只会在 35% 蓝量门禁下被驳回，是永不执行的死代码。
             return false;
         }
 
@@ -946,8 +955,11 @@ private:
         // ---------------------------------------------------------------------
         // 极其安全 (>= 90%)：不打快速治疗，依靠已有 HoT 自行跳满，
         // 让法力进入精神回蓝通道。
+        // 法力节流门禁：此区间目标并无生命危险，补恢复的收益远低于法力成本。
+        // 残蓝 (法力 < 50%) 时必须直接放行，让随从停手进入五秒规则精神回蓝，
+        // 否则会在 94% 血线的成员身上持续空耗法力，把高压窗口的治疗余量烧光。
         // ---------------------------------------------------------------------
-        if (TryRenew(target))
+        if (me->GetPowerPct(POWER_MANA) >= 50.0f && TryRenew(target))
             return true;
 
         return false;
