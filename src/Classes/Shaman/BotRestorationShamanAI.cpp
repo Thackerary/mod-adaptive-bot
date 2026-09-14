@@ -559,15 +559,21 @@ private:
             return false;
 
         Unit* tank = groupSnapshot.mainTank;
-        if (!tank || !tank->IsAlive() || tank->ToPet() || !IsValidHealTarget(tank))
+
+        // 排己判定 (致命)：单人 / 队伍退化 (无独立主坦) 时 anchor 会退化为指挥官或自身，
+        // 若不做 tank == me 排除，大地之盾会与自身的水之护盾互顶。
+        // 恢复萨满自身必须恒定享受水之护盾回蓝，大地之盾只为他人主坦维持。
+        if (!tank || tank == me || !tank->IsAlive() || tank->ToPet() || !IsValidHealTarget(tank))
             return false;
 
-        // 防顶层数浪费：层数 > 2 时覆盖重放纯属白烧 GCD，必须整轮跳过。
-        // 层数检测必须走 Aura::GetStackAmount()：可叠加 Buff 在底层仅有一个
-        // AuraApplication 实例，GetAuraCount() 恒返回 1，用它判层数必然失效。
+        // 防顶层数浪费：剩余充能 > 2 时覆盖重放纯属白烧 GCD，必须整轮跳过。
+        // 致命坑位：大地之盾在 3.3.5a 属 ProcCharges 充能型光环 (初始 9 次)，
+        // 其底层并不使用 StackAmount，Aura::GetStackAmount() 恒返回 1，
+        // 用其判 > 2 将使门禁永久失效并触发每 3 秒一次的无脑空耗刷新。
+        // 必须改走 Aura::GetCharges() 才能真实反映剩余可触发次数。
         if (Aura* aura = tank->GetAura(earthShield))
         {
-            if (aura->GetStackAmount() > 2)
+            if (aura->GetCharges() > 2)
                 return false;
         }
 
@@ -905,7 +911,7 @@ private:
         // ---------------------------------------------------------------------
         if (hpPct < 90.0f)
         {
-            if (TryRiptide(target)) return false || TryRiptide(target) ? true : TryLesserHealingWave(target);
+            if (TryRiptide(target)) return true;
             if (TryLesserHealingWave(target)) return true;
 
             return false;
