@@ -59,13 +59,29 @@ class BotFuryWarriorAI : public AdaptiveBotAI
     static constexpr uint32 CD_RECKLESSNESS         = 300000;
     static constexpr uint32 CD_ENRAGED_REGENERATION = 180000;
     static constexpr uint32 CD_PUMMEL               = 10000;
+    static constexpr uint32 CD_INTERCEPT            = 30000;  // 拦截突进自管冷却
 
     // =========================================================================
     // 血线与阶段阈值
     // =========================================================================
     static constexpr float ENRAGED_REGENERATION_HP_PCT = 30.0f;  // 狂暴回复自救血线
-    static constexpr float BURST_TARGET_HP_PCT         = 20.0f;  // 目标爆发窗口下限
+    static constexpr float BURST_TARGET_HP_PCT         = 20.0f;  // 普通精英的爆发窗口下限
+    static constexpr float NON_BOSS_BURST_HP_PCT       = 10.0f;  // 非首领精英的爆发封印血线
     static constexpr float EXECUTE_PHASE_HP_PCT        = 20.0f;  // 斩杀期血线
+
+    // =========================================================================
+    // 拦截突进窗口
+    // -------------------------------------------------------------------------
+    // 目标脱离近战盲区 (8 码) 且仍在突进射程 (25 码) 内时，拦截瞬间贴身并昏迷，
+    // 根除狂暴战在换目标 / Boss 位移 / 转阶段后长时间追不上导致平砍与怒气断供。
+    // =========================================================================
+    static constexpr float  INTERCEPT_MIN_DIST         = 8.0f;
+    static constexpr float  INTERCEPT_MAX_DIST         = 25.0f;
+    static constexpr uint32 INTERCEPT_RAGE_COST        = 100;    // 拦截怒气门槛 (引擎定点 10 点)
+
+    // 战斗怒吼重试节流：同类 AP 增益 (圣骑士力量祝福等) 覆盖时底层会拒绝施放怒吼，
+    // 若无节流守卫，脱战分支会每帧空转重入并白烧决策流与 GCD。
+    static constexpr uint32 BATTLE_SHOUT_RETRY_MS      = 5000;
 
     // 狂暴姿态解锁等级：低于该等级无狂暴姿态可用，回退战斗姿态
     static constexpr uint8 BERSERKER_STANCE_MIN_LEVEL = 30;
@@ -182,6 +198,10 @@ public:
         if (TryBreakIncapacitate())
             return;
 
+        // ---- P0: 拦截突进 (目标脱离近战时瞬间贴身并昏迷) ----
+        if (TryIntercept(victim))
+            return;
+
         // ---- P0: 极限自保 (狂暴回复 + 激怒前置) ----
         if (TrySurvival())
             return;
@@ -224,6 +244,10 @@ private:
     uint32 recklessnessCooldown{ 0 };
     uint32 enragedRegenerationCooldown{ 0 };
     uint32 pummelCooldown{ 0 };
+    uint32 interceptCooldown{ 0 };
+
+    // 战斗怒吼重试节流计时器 (被同类 AP 增益覆盖时防止每帧空转被底层拒放)
+    uint32 battleShoutRetryTimer{ 0 };
 
     // 平砍队列节流：英勇打击/顺劈斩为 on-next-swing 技能，引擎侧无独立 CD，
     // 若每帧重复下发会被底层反复吞并队列，必须由专精自行节流。
@@ -244,6 +268,8 @@ private:
         Tick(recklessnessCooldown);
         Tick(enragedRegenerationCooldown);
         Tick(pummelCooldown);
+        Tick(interceptCooldown);
+        Tick(battleShoutRetryTimer);
         Tick(heroicStrikeCooldown);
     }
 
@@ -257,6 +283,8 @@ private:
         recklessnessCooldown = 0;
         enragedRegenerationCooldown = 0;
         pummelCooldown = 0;
+        interceptCooldown = 0;
+        battleShoutRetryTimer = 0;
         heroicStrikeCooldown = 0;
     }
 
@@ -379,6 +407,49 @@ private:
     }
 
     // =========================================================================
+    // P0: 拦截突进
+    // -------------------------------------------------------------------------
+    // 目标脱离近战盲区 (8 码) 且仍在突进射程 (25 码) 内时瞬间贴身并昏迷，
+    // 门禁: 狂暴姿态 (姿态强制契约) + 至少 10 点怒气 (引擎定点 100) + 可攻击目标。
+    // =========================================================================
+    bool TryIntercept(Unit* victim)
+    {
+        if (interceptCooldown > 0 || !victim || !victim->IsAlive() || !victim->IsInWorld())
+            return false;
+
+        if (victim->GetMap() != me->GetMap() || !me->IsValidAttackTarget(victim))
+            return false;
+
+        float const dist = me->GetDistance(victim);
+        if (dist < INTERCEPT_MIN_DIST || dist > INTERCEPT_MAX_DIST)
+            return false;
+
+        // 拦截为狂暴姿态专属技能，姿态不匹配时底层会直接拒绝施放
+        if (!me->HasAura(FuryWarriorSpells::BERSERKER_STANCE))
+            return false;
+
+        // 怒气门禁：拦截消耗 10 点怒气，不足时严禁空放，必须留给嗜血/旋风斩
+        if (me->GetPower(POWER_RAGE) < INTERCEPT_RAGE_COST)
+            return false;
+
+        uint32 const intercept = GetAppropriateRank(FuryWarriorSpells::INTERCEPT, false);
+        if (!intercept || !CanCast(victim, intercept, true))
+            return false;
+
+        if (ExecuteSpell(victim, intercept, true))
+        {
+            interceptCooldown = CD_INTERCEPT;
+
+            if (isDebugLogging)
+                LOG_INFO("scripts", "[Bot: {}] 拦截突进贴身 -> [{}] (距离 {} 码)", me->GetName(), victim->GetName(), dist);
+
+            return true;
+        }
+
+        return false;
+    }
+
+    // =========================================================================
     // P0: 极限自保 (狂暴回复)
     // -------------------------------------------------------------------------
     // 狂暴回复为「需要激怒状态」的强力回血底牌。若底层因缺少激怒而拒绝施放，
@@ -478,6 +549,13 @@ private:
         if (me->GetAuraOfRankedSpell(FuryWarriorSpells::BATTLE_SHOUT))
             return false;
 
+        // 重试节流：圣骑士力量祝福 (BoM) 等同类 AP 增益覆盖时底层会拒绝施放怒吼，
+        // 无节流守卫会在脱战分支每一帧重新尝试并被拒绝，空转烧掉决策流与 GCD。
+        if (battleShoutRetryTimer > 0)
+            return false;
+
+        battleShoutRetryTimer = BATTLE_SHOUT_RETRY_MS;
+
         if (!CanCast(me, battleShout, true))
             return false;
 
@@ -512,8 +590,11 @@ private:
         if (!victim)
             return;
 
-        // 爆发窗口：首领/精英且仍处于 50% 以上血量 (高血量窗口才值得交底牌)
-        bool const burstWindow = IsEliteOrBossTarget(victim) && victim->GetHealthPct() > BURST_TARGET_HP_PCT;
+        // 爆发窗口：首领单位全程开放 (含斩杀期)，普通精英则限定 10% 以上血量。
+        // 旧逻辑以统一 20% 血线一刀切封印爆发，导致首领战进入斩杀期后
+        // 死亡之愿与鲁莽即便冷却就绪也永远开不出来，后半程伤害直接塌方。
+        bool const isBoss = victim->ToCreature() && victim->ToCreature()->isWorldBoss();
+        bool const burstWindow = IsEliteOrBossTarget(victim) && (isBoss || victim->GetHealthPct() > NON_BOSS_BURST_HP_PCT);
 
         // ---- 死亡之愿：纯天赋 (30 级解锁)，20% 增伤换取 5% 受疗惩罚 ----
         if (burstWindow && deathWishCooldown == 0)
@@ -524,7 +605,7 @@ private:
                 deathWishCooldown = CD_DEATH_WISH;
 
             // Off-GCD 铁律：严禁在此 return，必须允许当帧决策流顺下，
-            // 让嗜血/旋风斩立即吃满这 20% 增伤。
+            // 让嗜血/旋风斩/斩杀立即吃满这 20% 增伤 (斩杀期同样生效)。
         }
 
         // ---- 鲁莽：100% 暴击率窗口，需狂暴姿态 ----
