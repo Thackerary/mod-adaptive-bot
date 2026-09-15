@@ -50,10 +50,12 @@ class BotFuryWarriorAI : public AdaptiveBotAI
     // 否则 HasSpellCooldown 恒 false 会在每一帧对同一技能空转重入。
     // =========================================================================
     static constexpr uint32 CD_BLOODTHIRST          = 4000;
-    static constexpr uint32 CD_WHIRLWIND            = 5000;
+    static constexpr uint32 CD_WHIRLWIND            = 10000;  // 旋风斩基础冷却
+    static constexpr uint32 CD_WHIRLWIND_GLYPHED    = 8000;   // 旋风斩雕文：冷却缩短 2s
+    static constexpr uint32 CD_HEROIC_STRIKE_QUEUE  = 1200;   // 英勇打击/顺劈斩平砍队列节流
     static constexpr uint32 CD_BLOODRAGE            = 60000;
     static constexpr uint32 CD_BERSERKER_RAGE       = 30000;
-    static constexpr uint32 CD_DEATH_WISH           = 180000;
+    static constexpr uint32 CD_DEATH_WISH           = 120000; // 死亡之愿：狂暴系 2 分钟 CD
     static constexpr uint32 CD_RECKLESSNESS         = 300000;
     static constexpr uint32 CD_ENRAGED_REGENERATION = 180000;
     static constexpr uint32 CD_PUMMEL               = 10000;
@@ -223,6 +225,10 @@ private:
     uint32 enragedRegenerationCooldown{ 0 };
     uint32 pummelCooldown{ 0 };
 
+    // 平砍队列节流：英勇打击/顺劈斩为 on-next-swing 技能，引擎侧无独立 CD，
+    // 若每帧重复下发会被底层反复吞并队列，必须由专精自行节流。
+    uint32 heroicStrikeCooldown{ 0 };
+
     // =========================================================================
     // 专精自管计时器维护
     // =========================================================================
@@ -238,6 +244,7 @@ private:
         Tick(recklessnessCooldown);
         Tick(enragedRegenerationCooldown);
         Tick(pummelCooldown);
+        Tick(heroicStrikeCooldown);
     }
 
     void ResetWarriorTimers()
@@ -250,6 +257,7 @@ private:
         recklessnessCooldown = 0;
         enragedRegenerationCooldown = 0;
         pummelCooldown = 0;
+        heroicStrikeCooldown = 0;
     }
 
     // =========================================================================
@@ -381,18 +389,30 @@ private:
         if (enragedRegenerationCooldown > 0 || me->GetHealthPct() >= ENRAGED_REGENERATION_HP_PCT)
             return false;
 
-        uint32 const enragedRegeneration = GetAppropriateRank(FuryWarriorSpells::ENRAGED_REGENERATION, false);
-        if (!enragedRegeneration || me->HasAura(enragedRegeneration) || !CanCast(me, enragedRegeneration, true))
-            return false;
-
-        if (ExecuteSpell(me, enragedRegeneration, true))
+        // 激怒门禁前置：狂暴回复要求存在激怒状态，否则底层直接拒绝施法。
+        // 旧实现在施法失败后才补激怒，等于每帧都先空烧一次被拒绝的施法请求，
+        // 且与血性狂暴的当帧产怒互相挤占，既浪费诊断日志又拖慢急救响应。
+        // 故必须先判定激怒，缺失时只补前置并立即让出本帧决策流。
+        bool const hasEnrage = me->HasAura(FuryWarriorSpells::BERSERKER_RAGE) ||
+                               me->HasAura(FuryWarriorSpells::BLOODRAGE);
+        if (!hasEnrage)
         {
-            enragedRegenerationCooldown = CD_ENRAGED_REGENERATION;
-            return true;
+            TryTriggerEnrage();
+            return false; // 等待激怒光环就绪，下一帧再吃狂暴回复
         }
 
-        // 底层拒绝施法 (缺少激怒状态)：当帧立即补激怒前置，下一帧再吃狂暴回复
-        return TryTriggerEnrage();
+        uint32 const enragedRegeneration = GetAppropriateRank(FuryWarriorSpells::ENRAGED_REGENERATION, false);
+        if (enragedRegeneration && !me->HasAura(enragedRegeneration) &&
+            CanCast(me, enragedRegeneration, true))
+        {
+            if (ExecuteSpell(me, enragedRegeneration, true))
+            {
+                enragedRegenerationCooldown = CD_ENRAGED_REGENERATION;
+                return true;
+            }
+        }
+
+        return false;
     }
 
     // 激怒前置源：狂暴之怒 (顺带解控、冷却更短) 优先，血性狂暴兜底
@@ -537,20 +557,27 @@ private:
         if (!victim)
             return false;
 
-        // ---- 1. 斩杀：目标 20% 以下优先泄怒斩杀 ----
-        if (TryExecute(victim))
-            return true;
-
-        // ---- 2. 嗜血：核心伤害 + 自我治疗 ----
+        // ---- 1. 嗜血：核心伤害 + 自我治疗 (最高优先级) ----
         if (TryBloodthirst(victim))
             return true;
 
-        // ---- 3. 旋风斩：多目标武器伤害 ----
+        // ---- 2. 旋风斩：多目标武器伤害 ----
         if (TryWhirlwind(victim))
             return true;
 
-        // ---- 4. 血涌瞬发猛击：填充 ----
-        return TryBloodsurgeSlam(victim);
+        // ---- 3. 血涌瞬发猛击：填充 ----
+        if (TryBloodsurgeSlam(victim))
+            return true;
+
+        // ---- 4. 斩杀：低顺位填充 ----
+        // 斩杀为「泄怒型」技能，单发怒气消耗远高于嗜血/旋风斩。
+        // 若按血线把它提到反超核心打击的优先位，20% 阶段会把怒气池瞬间抽空，
+        // 导致嗜血与旋风斩在整段斩杀期内因缺怒永久饿死，总伤害反而塌方。
+        // 故斩杀只作为核心打击双 CD 空窗期的填充手段，绝不抢占其怒气预算。
+        if (TryExecute(victim))
+            return true;
+
+        return false;
     }
 
     bool TryExecute(Unit* victim)
@@ -595,7 +622,11 @@ private:
 
         if (ExecuteSpell(victim, whirlwind, true))
         {
-            whirlwindCooldown = CD_CD_WHIRLWIND_PLACEHOLDER;
+            // 旋涡斩雕文将冷却由 10s 缩短至 8s，必须随雕文动态结算，
+            // 否则固定 10s 会平白吞掉 2 秒的可用窗口，多目标持续输出直接受损。
+            whirlwindCooldown = me->HasAura(FuryWarriorSpells::GLYPH_OF_WHIRLWIND)
+                              ? CD_WHIRLWIND_GLYPHED
+                              : CD_WHIRLWIND;
             return true;
         }
 
@@ -639,17 +670,28 @@ private:
         if (me->GetPower(POWER_RAGE) < RAGE_DUMP_THRESHOLD)
             return false;
 
+        // 队列节流：on-next-swing 技能不占 GCD，但引擎仍会吞并重复下发，
+        // 必须按平砍周期节流，否则每帧重入等于把怒气全部烧在一个等待队列上。
+        if (heroicStrikeCooldown > 0)
+            return false;
+
         // 多目标 (>= 2) 走顺劈斩，否则用英勇打击
         if (CountNearbyEnemies(CLEAVE_RADIUS) >= CLEAVE_MIN_TARGETS)
         {
             uint32 const cleave = GetAppropriateRank(FuryWarriorSpells::CLEAVE, false);
             if (cleave && CanCast(victim, cleave, true) && ExecuteSpell(victim, cleave, true))
+            {
+                heroicStrikeCooldown = CD_HEROIC_STRIKE_QUEUE;
                 return true;
+            }
         }
 
         uint32 const heroicStrike = GetAppropriateRank(FuryWarriorSpells::HEROIC_STRIKE, false);
         if (heroicStrike && CanCast(victim, heroicStrike, true) && ExecuteSpell(victim, heroicStrike, true))
+        {
+            heroicStrikeCooldown = CD_HEROIC_STRIKE_QUEUE;
             return true;
+        }
 
         return false;
     }
