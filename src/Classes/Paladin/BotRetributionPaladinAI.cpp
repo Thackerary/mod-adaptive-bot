@@ -56,9 +56,12 @@ class BotRetributionPaladinAI : public AdaptiveBotAI
     static constexpr float AVENGING_WRATH_HP_PCT  = 50.0f;
     static constexpr float CONSECRATION_MANA_PCT  = 35.0f;   // 奉献法力门禁
 
-    // 圣盾术自解门禁：
+    // 圣盾术自解门禁 (三重，缺一不可)：
     // a) 满 2000ms 最小保护期，给坦克稳接仇恨的时间，防止开无敌当帧秒解白交 5 分钟 CD；
-    // b) 血线被抬至 60% 以上 或 威胁完全解除，即可出无敌继续输出 —— 根除 -50% 伤害衰减惩罚。
+    // b) 敌对仇恨已完全转移 (不再有单位越过主坦盯防随从)；
+    // c) 血线已被抬至 60% 以上 或 已脱离近战压制。
+    // 其中 (b) 是硬性前提：高血量 OT 时开无敌，若仅按血线安全判定，
+    // 会在仇恨尚未转移的情况下 2 秒即秒解无敌，随从当场被原怪群围殴暴毙。
     static constexpr uint32 DIVINE_SHIELD_MIN_HOLD_MS = 2000;
     static constexpr float  DIVINE_SHIELD_SAFE_HP_PCT = 60.0f;
 
@@ -90,12 +93,12 @@ public:
     // =========================================================================
     uint8 GetTalentSpellMinLevel(uint32 spellId) const override
     {
+        // 仅登记纯天赋技能；复仇之怒与圣洁护盾均为训练师基础技能，
+        // 其等级门槛已由 DBC SpellLevel 承载，交回 GetAppropriateRank 自动降阶处理。
         switch (spellId)
         {
             case RetributionPaladinSpells::CRUSADER_STRIKE: return 20;
             case RetributionPaladinSpells::DIVINE_STORM:    return 60;
-            case RetributionPaladinSpells::AVENGING_WRATH:  return 70;
-            case RetributionPaladinSpells::SACRED_SHIELD:   return 80;
             default:                                        return 0;
         }
     }
@@ -151,10 +154,12 @@ public:
             uint32 const dsDuration = CD_DIVINE_SHIELD - divineShieldCooldown;
 
             bool const dsMinHoldPassed  = (dsDuration >= DIVINE_SHIELD_MIN_HOLD_MS);
-            bool const dsThreatResolved = (!IsUnderPhysicalMelee(me) && !IsTopThreatTarget());
-            bool const dsHealedSafe     = (me->GetHealthPct() > DIVINE_SHIELD_SAFE_HP_PCT);
+            bool const dsThreatResolved = !IsTopThreatTarget();
+            bool const dsSafe           = (me->GetHealthPct() > DIVINE_SHIELD_SAFE_HP_PCT) || !IsUnderPhysicalMelee(me);
 
-            if (dsMinHoldPassed && (dsThreatResolved || dsHealedSafe))
+            // 仇恨未完全转移时严禁解除无敌：无敌的核心价值就是清仇恨 + 硬免伤，
+            // 抢在坦克接稳之前点掉，等于既交了 5 分钟 CD 又当场吃满致死伤害。
+            if (dsMinHoldPassed && dsThreatResolved && dsSafe)
                 me->RemoveAurasDueToSpell(RetributionPaladinSpells::DIVINE_SHIELD);
 
             return;
@@ -385,9 +390,11 @@ private:
             }
         }
 
-        // ---- 圣疗术：生命 < 15% 且无敌进入 CD (或身上无自律) 时的极限满血自救 ----
-        if (layOnHandsCooldown == 0 && me->GetHealthPct() < LAY_ON_HANDS_HP_PCT &&
-            (divineShieldCooldown > 0 || !hasForbearance))
+        // ---- 圣疗术：生命 < 15% 时的极限满血自救 ----
+        // 自律 Debuff 必须是绝对前置：开完圣盾术会立即施加自律锁，
+        // 旧逻辑用「无敌已 CD 或 无自律」的或判断，导致自律锁定期内随从疯狂抛圣疗，
+        // 每帧被底层拒绝空转，真正可用的救命窗口反被白白浪费。
+        if (layOnHandsCooldown == 0 && !hasForbearance && me->GetHealthPct() < LAY_ON_HANDS_HP_PCT)
         {
             uint32 const layOnHands = GetAppropriateRank(RetributionPaladinSpells::LAY_ON_HANDS, false);
             if (layOnHands && CanCast(me, layOnHands, true) && ExecuteSpell(me, layOnHands, true))
@@ -424,38 +431,46 @@ private:
     // =========================================================================
     bool MaintainSeal()
     {
-        uint32 const corruption = GetAppropriateRank(RetributionPaladinSpells::SEAL_OF_CORRUPTION, false);
-
-        // 圣印光环与施法法术共用同一 ID，直接以自身所选 Rank 判定，
-        // 避免分阶查询在单阶圣印上恒返回 nullptr 导致每帧重复顶替浪费 GCD。
-        if (corruption && !me->HasAura(corruption))
+        // 阵营差异：腐蚀圣印 (53736) 仅部落可用，复仇圣印 (31801) 为联盟等效圣印，
+        // 两者机制完全一致 (单体叠加 DoT)。必须依次尝试，由 CanCast 负责阵营与习得校验，
+        // 任何阵营的随从都能挂上输出圣印，根除联盟骑士只能挂正义圣印的伤害塌方。
+        uint32 const dotSeals[2] =
         {
-            if (!CanCast(me, corruption, true))
+            GetAppropriateRank(RetributionPaladinSpells::SEAL_OF_CORRUPTION, false),
+            GetAppropriateRank(RetributionPaladinSpells::SEAL_OF_VENGEANCE, false)
+        };
+
+        for (uint32 const seal : dotSeals)
+        {
+            if (!seal)
+                continue;
+
+            // 圣印光环与施法法术共用同一 ID，直接按该 Rank 判定存在性即可，
+            // 避免分阶查询在单阶圣印上恒返回 nullptr 导致每帧重复顶替浪费 GCD。
+            if (me->HasAura(seal))
                 return false;
 
-            return ExecuteSpell(me, corruption, true);
+            if (!CanCast(me, seal, true))
+                continue;
+
+            if (ExecuteSpell(me, seal, true))
+                return true;
         }
 
-        // 未习得腐蚀圣印的低等级段：降阶挂正义圣印维持基础伤害
-        if (!corruption)
-        {
-            uint32 const righteousness = GetAppropriateRank(RetributionPaladinSpells::SEAL_OF_RIGHTEOUSNESS, false);
-            if (righteousness && !me->HasAura(righteousness))
-            {
-                if (!CanCast(me, righteousness, true))
-                    return false;
-
-                return ExecuteSpell(me, righteousness, true);
-            }
-        }
+        // 低等级或双阵营 DoT 圣印均不可用：平滑回退正义圣印，
+        // 保证任何阵营、任何等级段的随从都恒定持有有效圣印光环。
+        uint32 const righteousness = GetAppropriateRank(RetributionPaladinSpells::SEAL_OF_RIGHTEOUSNESS, false);
+        if (righteousness && !me->HasAura(righteousness) && CanCast(me, righteousness, true))
+            return ExecuteSpell(me, righteousness, true);
 
         return false;
     }
 
     bool MaintainSacredShield()
     {
-        // 圣洁护盾属天赋：必须经天赋门禁解析，低等级不注入也不施放
-        uint32 const sacredShield = GetTalentRank(RetributionPaladinSpells::SACRED_SHIELD);
+        // 圣洁护盾为训练师基础技能：交回 DBC 通道解析，
+        // allowRankOneFallback 传 false，未达 80 级 (无更低 Rank 可降) 时直接返回 0。
+        uint32 const sacredShield = GetAppropriateRank(RetributionPaladinSpells::SACRED_SHIELD, false);
         if (!sacredShield)
             return false;
 
@@ -486,7 +501,8 @@ private:
         if (avengingWrathCooldown == 0 && IsEliteOrBossTarget(victim) &&
             victim->GetHealthPct() > AVENGING_WRATH_HP_PCT)
         {
-            uint32 const avengingWrath = GetTalentRank(RetributionPaladinSpells::AVENGING_WRATH);
+            // 复仇之怒为训练师基础技能：同样走 DBC 降阶通道，等级不足返回 0 不空放
+            uint32 const avengingWrath = GetAppropriateRank(RetributionPaladinSpells::AVENGING_WRATH, false);
             if (avengingWrath && !me->HasAura(avengingWrath) &&
                 CanCast(me, avengingWrath, true) && ExecuteSpell(me, avengingWrath, true))
                 avengingWrathCooldown = CD_AVENGING_WRATH;
@@ -624,14 +640,10 @@ private:
         if (exorcismCooldown > 0 || !victim)
             return false;
 
-        bool const hasArtOfWar = me->HasAura(RetributionPaladinSpells::AURA_THE_ART_OF_WAR);
-
-        // 3.3.5a 驱邪术的合法目标仅限亡灵与恶魔；其余目标必须依赖战争艺术光环解锁。
-        // 故无光环且目标非亡灵/恶魔时，底层必然拒绝，绝对禁止硬搓白烧一帧决策窗口。
-        uint32 const creatureType = victim->GetCreatureType();
-        bool const isExorcismableTarget = (creatureType == CREATURE_TYPE_UNDEAD || creatureType == CREATURE_TYPE_DEMON);
-
-        if (!hasArtOfWar && !isExorcismableTarget)
+        // APL 契约：驱邪术只允许在【战争艺术】触发时瞬发交出。
+        // 无光环时若照旧施放，底层会强制站桩 1.5 秒读条，直接掐断近战白字、
+        // 招导致命顺劈并拖垮整条 FCFS 循环。故无光环一律直接放弃，绝不硬读条。
+        if (!me->HasAura(RetributionPaladinSpells::AURA_THE_ART_OF_WAR))
             return false;
 
         uint32 const exorcism = GetAppropriateRank(RetributionPaladinSpells::EXORCISM, false);

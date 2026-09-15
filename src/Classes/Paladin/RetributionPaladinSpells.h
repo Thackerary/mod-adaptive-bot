@@ -30,8 +30,9 @@ namespace RetributionPaladinSpells
     // -------------------------------------------------------------------------
     // 圣印与自保
     // -------------------------------------------------------------------------
-    constexpr uint32 SEAL_OF_CORRUPTION    = 53736; // 腐蚀圣印 (单体叠加 DoT 圣印，联盟等效复仇圣印 31801)
-    constexpr uint32 SEAL_OF_RIGHTEOUSNESS = 20290; // 正义圣印 Rank 9 (低等级主力单体圣印)
+    constexpr uint32 SEAL_OF_CORRUPTION    = 53736; // 腐蚀圣印 (部落可用，单体叠加 DoT 圣印)
+    constexpr uint32 SEAL_OF_VENGEANCE     = 31801; // 复仇圣印 Rank 1 (联盟等效腐蚀圣印，同机制 DoT)
+    constexpr uint32 SEAL_OF_RIGHTEOUSNESS = 20290; // 正义圣印 Rank 9 (低等级/双阵营兜底单体圣印)
     constexpr uint32 SACRED_SHIELD         = 53601; // 圣洁护盾 (80 级天赋，伤害吸收盾，维持自身 30s)
     constexpr uint32 DIVINE_SHIELD         = 642;   // 圣盾术/无敌 (全免疫清仇恨但伤害 -50%，5m CD，触发自律)
     constexpr uint32 LAY_ON_HANDS          = 48788; // 圣疗术 Rank 5 (生命 < 15% 瞬间满血，20m CD，触发自律)
