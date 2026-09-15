@@ -50,6 +50,8 @@ namespace ArcaneMageSpells
     constexpr uint32 AURA_MISSILE_BARRAGE = 44401;  // 飞弹速射触发光环 (奥术飞弹引导减半且零耗蓝)
     constexpr uint32 ARCANE_MEDITATION    = 18464;  // 奥术冥想 Rank 3 (施法中保持 50% 回蓝)
     constexpr uint32 TORMENT_THE_WEAK     = 55340;  // 欺凌弱小 Rank 3 (对被减速目标伤害 +12%)
+    constexpr uint32 SPELL_POWER          = 35589;  // 法术能量 Rank 2 (法术暴击伤害加成 +50%)
+    constexpr uint32 ARCANE_EMPOWERMENT   = 31583;  // 奥术增效 Rank 3 (奥术冲击伤害 +9%，团队伤害 +3%)
     constexpr uint32 GLYPH_OF_ARCANE_BLAST    = 56366; // 奥术冲击雕文 (奥术冲击增伤效果提升)
     constexpr uint32 GLYPH_OF_ARCANE_MISSILES = 56364; // 奥术飞弹雕文 (奥术飞弹暴击伤害提升)
 }

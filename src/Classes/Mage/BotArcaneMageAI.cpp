@@ -62,7 +62,7 @@ class BotArcaneMageAI : public AdaptiveBotAI
     static constexpr float MANA_SHIELD_HP_PCT  = 35.0f;
 
     // 法力阈值
-    static constexpr float MANA_GEM_USE_PCT     = 30.0f;  // 低于此线吞法力宝石
+    static constexpr float MANA_GEM_USE_PCT     = 75.0f;  // 低于此线即吞法力宝石 (尽早进入 2 分钟冷却轮转)
     static constexpr float EVOCATION_MANA_PCT   = 25.0f;  // 低于此线且宝石 CD 中才引导唤醒
     static constexpr float ARCANE_POWER_MANA_PCT = 50.0f; // 奥术强化开启所需法力安全线
     static constexpr float ARCANE_DUMP_MANA_PCT  = 85.0f; // 法力充盈泄蓝线：满层后继续奥冲压榨伤害
@@ -73,6 +73,16 @@ class BotArcaneMageAI : public AdaptiveBotAI
     // 冰箱/隐形的硬性超时兜底 (防止解除条件永不满足时长期躺平发呆)
     static constexpr uint32 ICE_BLOCK_TIMEOUT_MS   = 2500;
     static constexpr uint32 INVISIBILITY_TIMEOUT_MS = 3000;
+
+    // 冰箱最小保护时长与安全血线：低于该时长严禁点掉冰箱。
+    // 若缺少这一层门禁，开冰箱当帧「已不再被近战压制」即成立，
+    // 会在 50ms 内闪解冰箱，白交 5 分钟 CD 且当场吃满致死伤害。
+    static constexpr uint32 ICE_BLOCK_MIN_HOLD_MS  = 1500;
+    static constexpr float  ICE_BLOCK_SAFE_HP_PCT  = 50.0f;
+
+    // 法力宝石的最早可习得等级：低于此等级宝石自管冷却恒为 0，
+    // 唤醒若以「宝石已进入 CD」为前置将永久无法引导，形成低级唤醒死锁。
+    static constexpr uint8  MANA_GEM_MIN_LEVEL     = 28;
 
 public:
     explicit BotArcaneMageAI(Creature* creature) : AdaptiveBotAI(creature) {}
@@ -156,10 +166,19 @@ public:
         {
             // 已卧冰箱时长由自管冷却反算：施放成功时 iceBlockCooldown 被置为 CD_ICE_BLOCK，
             // 故 (CD_ICE_BLOCK - iceBlockCooldown) 即已定身毫秒数。
-            // 硬性 2.5 秒超时兜底必不可少：无主坦或威胁判定未命中时解除条件可能永远无法满足。
-            bool const iceBlockTimeout = (CD_ICE_BLOCK - iceBlockCooldown >= ICE_BLOCK_TIMEOUT_MS);
+            uint32 const ibDuration = CD_ICE_BLOCK - iceBlockCooldown;
 
-            if (iceBlockTimeout || (!IsUnderPhysicalMelee(me) && !IsTopThreatTarget()))
+            // 三重解除门禁，缺一不可：
+            // a) 最小保护时长：防止开冰箱当帧因「未被近战压制」成立而闪解自杀；
+            // b) 血线已被抬起：治疗已把血线拉回安全区，可以出来继续输出；
+            // c) 威胁已完全解除：既无近战压制也不再被敌对单位盯防；
+            // 以及 2.5 秒硬性超时兜底：无主坦或威胁判定未命中时，
+            // 解除条件可能永远无法满足，随从会躺满整个冰箱时限全程零输出。
+            bool const ibMinHoldPassed = (ibDuration >= ICE_BLOCK_MIN_HOLD_MS);
+            bool const ibHealedSafe    = (me->GetHealthPct() > ICE_BLOCK_SAFE_HP_PCT);
+            bool const ibTimeout       = (ibDuration >= ICE_BLOCK_TIMEOUT_MS);
+
+            if (ibTimeout || (ibMinHoldPassed && (ibHealedSafe || (!IsUnderPhysicalMelee(me) && !IsTopThreatTarget()))))
                 me->RemoveAurasDueToSpell(ArcaneMageSpells::ICE_BLOCK);
 
             return;
@@ -460,7 +479,11 @@ private:
         }
 
         // ---- 唤醒：宝石进入 CD 后的深度回蓝引导 (占用引导通道，必须阻塞当帧) ----
-        if (evocationCooldown == 0 && manaPct < EVOCATION_MANA_PCT && manaGemCooldown > 0 &&
+        // 放行条件补充「尚未习得法力宝石的等级段」：20 ~ 27 级没有宝石，
+        // manaGemCooldown 恒为 0，若仅以宝石已 CD 为前置，随从法力耗尽后将永久停摆。
+        bool const canEvocate = (manaGemCooldown > 0) || (me->GetLevel() < MANA_GEM_MIN_LEVEL);
+
+        if (evocationCooldown == 0 && manaPct < EVOCATION_MANA_PCT && canEvocate &&
             !IsUnderPhysicalMelee(me))
         {
             uint32 const evocation = GetAppropriateRank(ArcaneMageSpells::EVOCATION, false);
@@ -516,8 +539,15 @@ private:
                 arcanePowerCooldown = CD_ARCANE_POWER;
         }
 
-        // ---- 气定神闲：奥冲叠满 4 层时开启，让下一发高伤奥冲当帧瞬发打出 ----
-        if (presenceOfMindCooldown == 0 && GetArcaneBlastStacks() >= ARCANE_BLAST_MAX_STACKS)
+        // ---- 减速维护：首领/精英目标常驻 SLOW，激活欺凌弱小的 12% 增伤通道 ----
+        MaintainSlowDebuff(victim);
+
+        // ---- 气定神闲：奥冲叠满 4 层且未触发飞弹速射时开启 ----
+        // 必须排除飞弹速射：若开着气定又触发速射，当帧决策流会优先被免费飞弹吸走，
+        // 气定光环被白白留存到后续低级填充技上，等于把 2 分钟底牌喂给了寒冰箭/弹幕。
+        // 加此门禁后，气定必定用于瞬发打出一发最高伤害的 4 层奥冲。
+        if (presenceOfMindCooldown == 0 && GetArcaneBlastStacks() >= ARCANE_BLAST_MAX_STACKS &&
+            !me->HasAura(ArcaneMageSpells::AURA_MISSILE_BARRAGE))
         {
             uint32 const presenceOfMind = GetTalentRank(ArcaneMageSpells::PRESENCE_OF_MIND);
             if (presenceOfMind && !me->HasAura(presenceOfMind) &&
@@ -562,6 +592,12 @@ private:
             // ---- 4 层满层：消层与泄蓝仲裁 ----
             if (stacks >= ARCANE_BLAST_MAX_STACKS)
             {
+                // 气定神闲已开启：最优先用瞬发奥冲吃掉该光环。
+                // 若放任后续的免费飞弹或瞬发弹幕先行，4 层会被提前消掉，
+                // 气定只能打在 0 层的低伤奥冲上，白白浪费这发 2 分钟底牌。
+                if (pomActive && TryArcaneBlast(victim, arcaneBlast, true))
+                    return true;
+
                 // 飞弹速射：零耗蓝 + 引导减半，最优消层手段
                 if (hasBarrageProc && TryArcaneMissiles(victim, arcaneMissiles))
                     return true;
@@ -701,6 +737,29 @@ private:
         return false;
     }
 
+    // 首领/精英减速维护：瞬发 SLOW 是【欺凌弱小】12% 增伤的唯一触发器，
+    // 增伤通道一旦断档，奥术冲击/飞弹/弹幕全线掉 12% 伤害。
+    // 仅对首领/精英维持：小怪转火频繁，交减速只会白烧瞬发窗口。
+    void MaintainSlowDebuff(Unit* victim)
+    {
+        if (!victim || slowCooldown > 0)
+            return;
+
+        if (!IsEliteOrBossTarget(victim))
+            return;
+
+        uint32 const slow = GetTalentRank(ArcaneMageSpells::SLOW);
+        if (!slow || victim->HasAura(slow))
+            return;
+
+        if (!CanCast(victim, slow, true))
+            return;
+
+        // 瞬发无弹道：允许在跑位途中直接施放，严禁 StopMoving 破坏机动性
+        if (ExecuteSpell(victim, slow, true))
+            slowCooldown = CD_SLOW;
+    }
+
     // =========================================================================
     // P4: 远程站位与贴身避难 (风筝与拉开状态机，维持 20 ~ 30 码施法站位)
     // =========================================================================
@@ -808,6 +867,8 @@ private:
         SyncPassive(20, ArcaneMageSpells::GLYPH_OF_ARCANE_MISSILES);      // 奥术飞弹雕文：飞弹暴击伤害提升
         SyncPassive(30, ArcaneMageSpells::ARCANE_MEDITATION);             // 奥术冥想：施法中保持 50% 回蓝
         SyncPassive(40, ArcaneMageSpells::TORMENT_THE_WEAK);              // 欺凌弱小：被减速目标伤害 +12%
+        SyncPassive(40, ArcaneMageSpells::SPELL_POWER);                   // 法术能量：法术暴击伤害加成 +50%
+        SyncPassive(50, ArcaneMageSpells::ARCANE_EMPOWERMENT);            // 奥术增效：奥冲伤害 +9%，团队伤害 +3%
     }
 };
 
