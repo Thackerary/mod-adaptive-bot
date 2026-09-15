@@ -143,8 +143,11 @@ public:
             SpellInfo const* const drainSoulInfo = sSpellMgr->GetSpellInfo(AfflictionWarlockSpells::DRAIN_SOUL);
 
             // 以「同根 Rank」判定而非裸 ID 比较：低等级降阶施放的吸取灵魂同样是合法通道
+            // 等级自适应门禁：只有已习得鬼影缠身 (>= 60 级) 的随从身上才可能存在鬼影 Debuff。
+            // 若低于 60 级仍沿用原判定，GetOwnDotRemaining(HAUNT) 恒为 0，
+            // 会在每一次引导的首帧就无脑秒断吸取灵魂，使低等级段的斩杀通道彻底报废。
             if (channeledInfo && drainSoulInfo && channeledInfo->IsRankOf(drainSoulInfo) &&
-                hauntCooldown == 0)
+                GetTalentRank(AfflictionWarlockSpells::HAUNT) > 0 && hauntCooldown == 0)
             {
                 Unit* const channelTarget = me->GetVictim();
                 if (channelTarget && GetOwnDotRemaining(channelTarget, AfflictionWarlockSpells::HAUNT) == 0)
@@ -562,11 +565,17 @@ private:
         // 引导单次长达十余秒，必须强制要求鬼影与痛苦无常剩余余量同时 >= 3.5s。
         // 若余量不足即开抽，中途任一 Debuff 断档都会让剩余全部跳数丢失增伤乘数，
         // 同时触发引导死锁破除机制掐断通道，白白浪费一发引导起手。
-        int32 const hauntRemaining = GetOwnDotRemaining(victim, AfflictionWarlockSpells::HAUNT);
-        int32 const uaRemaining    = GetOwnDotRemaining(victim, AfflictionWarlockSpells::UNSTABLE_AFFLICTION);
-        bool const inDrainRange    = (me->GetDistance(victim) <= DRAIN_SOUL_MAX_DIST);
+        //
+        // 等级自适应：未习得对应天赋的等级段 (鬼影 < 60 级、痛苦无常 < 50 级) 视同条件满足，
+        // 否则余量恒为 0 会把低等级随从永久锁在引导通道之外，退化为纯暗影箭填充，
+        // 白白丢失死亡之拥 4 倍伤害窗口。
+        bool const hasHaunt = (GetTalentRank(AfflictionWarlockSpells::HAUNT) > 0);
+        bool const hasUa    = (GetTalentRank(AfflictionWarlockSpells::UNSTABLE_AFFLICTION) > 0);
+        bool const hauntOk  = !hasHaunt || (GetOwnDotRemaining(victim, AfflictionWarlockSpells::HAUNT) >= DRAIN_GATE_REMAINING_MS);
+        bool const uaOk     = !hasUa || (GetOwnDotRemaining(victim, AfflictionWarlockSpells::UNSTABLE_AFFLICTION) >= DRAIN_GATE_REMAINING_MS);
+        bool const inDrainRange = (me->GetDistance(victim) <= DRAIN_SOUL_MAX_DIST);
 
-        if (hauntRemaining >= DRAIN_GATE_REMAINING_MS && uaRemaining >= DRAIN_GATE_REMAINING_MS && inDrainRange)
+        if (hauntOk && uaOk && inDrainRange)
         {
             uint32 const drainSoul = GetAppropriateRank(AfflictionWarlockSpells::DRAIN_SOUL, false);
             if (TryChannelDrainSoul(victim, drainSoul))
