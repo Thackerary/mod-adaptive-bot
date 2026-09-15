@@ -47,6 +47,7 @@ namespace AfflictionWarlockSpells
     constexpr uint32 GLYPH_OF_LIFE_TAP      = 56218;  // 生命分流雕文 (分流后提供SP增益 63321)
     constexpr uint32 AURA_GLYPH_OF_LIFE_TAP = 63321;  // 生命分流雕文触发光环
     constexpr uint32 GLYPH_OF_HAUNT         = 56224;  // 鬼影缠身雕文 (+3%鬼影增伤)
+    constexpr uint32 IMPROVED_CORRUPTION    = 17814;  // 强化腐蚀术 Rank 5 (使腐蚀术变为瞬发法术，支持风筝跑动中直接上 DoT)
 }
 
 #endif // _AFFLICTION_WARLOCK_SPELLS_H

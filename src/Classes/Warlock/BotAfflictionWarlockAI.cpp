@@ -46,6 +46,14 @@ class BotAfflictionWarlockAI : public AdaptiveBotAI
     // DoT 断档预判窗口：引导通道 (吸取灵魂) 耗时极长，DoT 必须在通道开始前预留安全余量
     static constexpr int32  DOT_REFRESH_WINDOW_MS = 3000;
 
+    // 鬼影缠身刷新窗口：1.5s 读条 + 约 1s 弹道飞行，必须在 Debuff 归零前 2.5s 就起手，
+    // 否则整条 DoT 链会出现 20% 暗影增伤空窗，并连带把斩杀期的引导开启门禁永久锁死。
+    static constexpr int32  HAUNT_REFRESH_WINDOW_MS = 2500;
+
+    // 吸取灵魂引导开启门禁：引导单次持续十余秒，鬼影与痛苦无常的剩余余量
+    // 必须同时 >= 3.5s，否则中途断档会让剩余全部跳数丢失增伤乘数。
+    static constexpr int32  DRAIN_GATE_REMAINING_MS = 3500;
+
     // 生命/法力阈值
     static constexpr float DEATH_COIL_HP_PCT    = 35.0f;  // 死亡缠绕自保血线
     static constexpr float LIFE_TAP_MANA_PCT    = 40.0f;  // 法力枯竭补蓝线
@@ -120,6 +128,29 @@ public:
     {
         UpdateTimers(diff);
         UpdateWarlockTimers(diff);
+
+        // =====================================================================
+        // 引导死锁破除 (必须置于全局通道守卫之前)
+        // ---------------------------------------------------------------------
+        // 吸取灵魂单次引导长达十余秒，期间全局通道守卫会锁定整个决策流。
+        // 若引导途中目标身上的鬼影已完全断档，剩余全部跳数都将在缺失 20%
+        // 暗影增伤乘数 (以及死亡之拥乘数底座) 的情况下空抽。
+        // 必须主动掐断通道，让当帧决策流立即重补鬼影。
+        // =====================================================================
+        if (Spell* const channeled = me->GetCurrentSpell(CURRENT_CHANNELED_SPELL))
+        {
+            SpellInfo const* const channeledInfo = channeled->GetSpellInfo();
+            SpellInfo const* const drainSoulInfo = sSpellMgr->GetSpellInfo(AfflictionWarlockSpells::DRAIN_SOUL);
+
+            // 以「同根 Rank」判定而非裸 ID 比较：低等级降阶施放的吸取灵魂同样是合法通道
+            if (channeledInfo && drainSoulInfo && channeledInfo->IsRankOf(drainSoulInfo) &&
+                hauntCooldown == 0)
+            {
+                Unit* const channelTarget = me->GetVictim();
+                if (channelTarget && GetOwnDotRemaining(channelTarget, AfflictionWarlockSpells::HAUNT) == 0)
+                    me->InterruptSpell(CURRENT_CHANNELED_SPELL);
+            }
+        }
 
         // 全局读条/通道双保险守卫：痛苦无常/鬼影缠身为读条施法，引擎会置位 UNIT_STATE_CASTING；
         // 但吸取灵魂属引导类法术，在部分状态下并不置位该标记，故追加
@@ -279,29 +310,40 @@ private:
         return aura ? aura->GetDuration() : 0;
     }
 
+    // 腐蚀术是否已由【强化腐蚀术】转为瞬发：仅在天赋已注入时才允许跑动中直接上 DoT
+    bool IsCorruptionInstant() const
+    {
+        return me->HasAura(AfflictionWarlockSpells::IMPROVED_CORRUPTION);
+    }
+
     // =========================================================================
     // 通用施法通道 (立定判定与瞬发解耦)
     // =========================================================================
-    // 非瞬发读条：移动中一律挂起等待站位稳定，严禁在跑位途中下发读条
-    // (会被后续走位指令当场掐断，白白浪费一帧决策窗口)；
-    // 瞬发技能 (痛苦诅咒/灵魂碎裂/生命分流/死亡缠绕)：允许跑动中直接打出，保障机动性。
+    // 非瞬发读条：CanCast 通过后立即刹停并当帧起手。
+    // 严禁写成「移动中直接 return false」——随从在风筝跑位期间会判定读条永久失败，
+    // 决策流被 P4 站位分支反复抢占，DoT 无限期缺席，形成「越跑越不打、越不打越要跑」的死锁。
+    // 瞬发技能 (allowMoving = true) 则完整保留机动性，严禁刹停。
     bool TryCastSpell(Unit* victim, uint32 spellId, bool allowMoving)
     {
         if (!spellId || !victim)
             return false;
 
-        if (!allowMoving && me->isMoving())
-            return false;
-
+        // 施法资格必须先通过校验再刹停：CanCast 失败时提前立定，
+        // 会让随从在重构走位期间被 StopMoving 每帧拉扯成原地抽搐。
         if (!CanCast(victim, spellId, true))
             return false;
+
+        if (!allowMoving && me->isMoving())
+            me->StopMoving();
 
         return ExecuteSpell(victim, spellId, true);
     }
 
     // DoT 维持统一通道：以「分阶查询 + 自身施放」双重判定 DoT 是否存在。
     // 严禁直接用满级 ID 做 HasAura —— 低等级降阶施放时判定必然失败，会陷入每帧空转重刷。
-    bool TryMaintainDot(Unit* victim, uint32 rankedSpellId, uint32 castSpellId, int32 refreshWindowMs = 0)
+    // allowMoving = true 仅授予瞬发 DoT (痛苦诅咒，以及已点出【强化腐蚀术】的腐蚀术)，
+    // 使其可在风筝跑位途中直接挂上；痛苦无常等读条 DoT 必须传 false 走刹停通道。
+    bool TryMaintainDot(Unit* victim, uint32 rankedSpellId, uint32 castSpellId, int32 refreshWindowMs = 0, bool allowMoving = false)
     {
         if (!victim || !castSpellId)
             return false;
@@ -309,7 +351,7 @@ private:
         if (GetOwnDotRemaining(victim, rankedSpellId) > refreshWindowMs)
             return false;
 
-        return TryCastSpell(victim, castSpellId, false);
+        return TryCastSpell(victim, castSpellId, allowMoving);
     }
 
     // =========================================================================
@@ -398,13 +440,14 @@ private:
         if (!lifeTap || gcdTimer > 0)
             return false;
 
-        // 生命分流的消耗通道为「生命值」(POWER_HEALTH)：CanCast 的能量校验会对该非法
-        // 能量索引执行 GetPower 读取，存在读到邻域字段垃圾值并误判「能量不足」，
-        // 从而把分流永久阻断的风险。故此处以自管蓝线/血线/GCD 三重门禁替代资源校验，
-        // 施放环节仍复用 ExecuteSpell 通道 (自动处理 GCD 与瞬发施法)。
-        if (!ExecuteSpell(me, lifeTap, true))
+        // 生命分流的消耗通道为「生命值」(POWER_HEALTH)：CanCast / ExecuteSpell 的能量校验
+        // 会对该非法能量索引执行 GetPower 读取，存在读到邻域字段垃圾值并误判
+        // 「能量不足」从而把分流永久阻断的风险。故此处彻底绕开通用施法通道，
+        // 直接以引擎底层 CastSpell 直放，并以自管蓝线/血线/GCD 三重门禁替代资源校验。
+        if (me->CastSpell(me, lifeTap, false) != SPELL_CAST_OK)
             return false;
 
+        gcdTimer = 1500;
         lifeTapRetryTimer = LIFE_TAP_RETRY;
         return true;
     }
@@ -442,11 +485,14 @@ private:
         if (!spellId || !victim)
             return false;
 
-        // Debuff 判定：只认自身施加的鬼影，多术士场景下严禁把他人的鬼影误判为自己的
-        if (victim->GetAuraOfRankedSpell(AfflictionWarlockSpells::HAUNT, me->GetGUID()))
+        if (hauntCooldown > 0)
             return false;
 
-        if (hauntCooldown > 0)
+        // Debuff 判定：只认自身施加的鬼影，多术士场景下严禁把他人的鬼影误判为自己的。
+        // 剩余时间 <= 2.5s 即视为断档并立即读条刷新 (覆盖 1.5s 读条 + 约 1s 弹道飞行)：
+        // 若等 Debuff 真正归零才起手，读条与飞行全程都没有 20% 增伤覆盖，
+        // 还会连带把斩杀期的吸取灵魂开启门禁永久锁死，退化为无增伤盲抽。
+        if (GetOwnDotRemaining(victim, AfflictionWarlockSpells::HAUNT) > HAUNT_REFRESH_WINDOW_MS)
             return false;
 
         if (!TryCastSpell(victim, spellId, false))
@@ -466,13 +512,14 @@ private:
             return true;
 
         // ---- 腐蚀术：目标缺失时补齐 (后续由鬼影/吸取灵魂的【永恒痛苦】自动刷新) ----
+        // 强化腐蚀术生效后腐蚀术为瞬发，允许风筝跑动途中直接补 DoT，严禁刹停丢机动性
         uint32 const corruption = GetAppropriateRank(AfflictionWarlockSpells::CORRUPTION, false);
-        if (TryMaintainDot(victim, AfflictionWarlockSpells::CORRUPTION, corruption))
+        if (TryMaintainDot(victim, AfflictionWarlockSpells::CORRUPTION, corruption, 0, IsCorruptionInstant()))
             return true;
 
-        // ---- 痛苦诅咒：缺失自身诅咒时瞬发维持 ----
+        // ---- 痛苦诅咒：缺失自身诅咒时瞬发维持 (瞬发法术，允许跑动中直接打出) ----
         uint32 const curseOfAgony = GetAppropriateRank(AfflictionWarlockSpells::CURSE_OF_AGONY, false);
-        if (TryMaintainDot(victim, AfflictionWarlockSpells::CURSE_OF_AGONY, curseOfAgony))
+        if (TryMaintainDot(victim, AfflictionWarlockSpells::CURSE_OF_AGONY, curseOfAgony, 0, true))
             return true;
 
         // ---- 暗影箭填充：全 DoT 齐备后的站桩填充，持续叠满并维持 3 层暗影之拥 ----
@@ -493,20 +540,33 @@ private:
         if (TryMaintainDot(victim, AfflictionWarlockSpells::UNSTABLE_AFFLICTION, unstableAffliction, DOT_REFRESH_WINDOW_MS))
             return true;
 
-        // ---- 2. 腐蚀术兜底：仅在【永恒痛苦】光环缺失 (未注入/未生效) 时才手工续期 ----
-        if (!me->HasAura(AfflictionWarlockSpells::EVERLASTING_AFFLICTION))
+        // ---- 2. 腐蚀术：必须先判定 DoT 是否「已存在」，再决定是否依赖被动续期 ----
+        // 致命缺陷修复：【永恒痛苦】只能刷新「已存在」的腐蚀术，无法凭空挂上 DoT。
+        // 若目标是在 25% 以下血线才被转火 (斩杀起步阶段腐蚀术从未上过)，
+        // 仅依赖永恒痛苦将导致腐蚀术在整个斩杀期永久缺席，白白损失一条核心 DoT。
+        uint32 const corruption = GetAppropriateRank(AfflictionWarlockSpells::CORRUPTION, false);
+        if (GetOwnDotRemaining(victim, AfflictionWarlockSpells::CORRUPTION) == 0)
         {
-            uint32 const corruption = GetAppropriateRank(AfflictionWarlockSpells::CORRUPTION, false);
-            if (TryMaintainDot(victim, AfflictionWarlockSpells::CORRUPTION, corruption, DOT_REFRESH_WINDOW_MS))
+            // 基础 DoT 完全缺失：立即补挂，不受永恒痛苦门禁约束
+            if (TryMaintainDot(victim, AfflictionWarlockSpells::CORRUPTION, corruption, 0, IsCorruptionInstant()))
+                return true;
+        }
+        else if (!me->HasAura(AfflictionWarlockSpells::EVERLASTING_AFFLICTION))
+        {
+            // 腐蚀术已在身但被动尚未生效：手工在断档前续期
+            if (TryMaintainDot(victim, AfflictionWarlockSpells::CORRUPTION, corruption, DOT_REFRESH_WINDOW_MS, IsCorruptionInstant()))
                 return true;
         }
 
-        // ---- 3. 双 Debuff 齐备且射程内：引导吸取灵魂 (死亡之拥 4 倍伤害通道) ----
-        bool const hasHauntDebuff = (victim->GetAuraOfRankedSpell(AfflictionWarlockSpells::HAUNT, me->GetGUID()) != nullptr);
-        bool const hasUaDebuff    = (victim->GetAuraOfRankedSpell(AfflictionWarlockSpells::UNSTABLE_AFFLICTION, me->GetGUID()) != nullptr);
-        bool const inDrainRange   = (me->GetDistance(victim) <= DRAIN_SOUL_MAX_DIST);
+        // ---- 3. 双 Debuff 余量充足且射程内：引导吸取灵魂 (死亡之拥 4 倍伤害通道) ----
+        // 引导单次长达十余秒，必须强制要求鬼影与痛苦无常剩余余量同时 >= 3.5s。
+        // 若余量不足即开抽，中途任一 Debuff 断档都会让剩余全部跳数丢失增伤乘数，
+        // 同时触发引导死锁破除机制掐断通道，白白浪费一发引导起手。
+        int32 const hauntRemaining = GetOwnDotRemaining(victim, AfflictionWarlockSpells::HAUNT);
+        int32 const uaRemaining    = GetOwnDotRemaining(victim, AfflictionWarlockSpells::UNSTABLE_AFFLICTION);
+        bool const inDrainRange    = (me->GetDistance(victim) <= DRAIN_SOUL_MAX_DIST);
 
-        if (hasHauntDebuff && hasUaDebuff && inDrainRange)
+        if (hauntRemaining >= DRAIN_GATE_REMAINING_MS && uaRemaining >= DRAIN_GATE_REMAINING_MS && inDrainRange)
         {
             uint32 const drainSoul = GetAppropriateRank(AfflictionWarlockSpells::DRAIN_SOUL, false);
             if (TryChannelDrainSoul(victim, drainSoul))
@@ -648,6 +708,8 @@ private:
         SyncPassive(20, AfflictionWarlockSpells::GLYPH_OF_QUICK_DECAY);    // 急速凋零雕文：急速缩短腐蚀术跳数间隔
         SyncPassive(20, AfflictionWarlockSpells::GLYPH_OF_HAUNT);          // 鬼影缠身雕文：鬼影增伤 +3%
         SyncPassive(20, AfflictionWarlockSpells::GLYPH_OF_LIFE_TAP);       // 生命分流雕文：分流后提供 SP 增益 63321
+        // 强化腐蚀术 (10 级即点满)：使腐蚀术变为瞬发，是风筝跑位期 DoT 维持与斩杀期补挂的硬依赖
+        SyncPassive(10, AfflictionWarlockSpells::IMPROVED_CORRUPTION);
     }
 };
 
