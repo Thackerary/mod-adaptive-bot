@@ -525,7 +525,9 @@ private:
             if (cloak && !me->HasAura(cloak) && CanCast(me, cloak, true) && ExecuteSpell(me, cloak, true))
             {
                 cloakCooldown = CD_CLOAK;
-                return true;
+
+                // Off-GCD 铁律：暗影斗篷独立于公共冷却，施放成功严禁 return true，
+                // 否则会白吞当帧的脚踢打断与毒伤终结技窗口 (自保技挤占输出帧)。
             }
         }
 
@@ -696,7 +698,16 @@ private:
     {
         uint8 const cp = GetComboPoints(victim);
 
-        // ---- 终结技分支：连击点 >= 4 ----
+        // ---- 终结技攒能挂起 (Energy Pooling) ----
+        // 连击点已到 4~5 星但能量不足以支付终结技时，必须原地挂起等待能量回充。
+        // 此时若贪打一发毁伤/邪恶攻击，会同时踩两个坑：连击点被顶到 5 星上限白白溢出，
+        // 且残余能量被产星技吸干，终结技要再等一整轮回能才能打出，DPS 直接塌方。
+        // 挂起 return false 后决策流顺下至 P5 贴背与白字平砍 (平砍不耗能量)，
+        // 能量一到即由下方终结技分支当帧顺发。
+        if (cp >= ENVENOM_MIN_CP && me->GetPower(POWER_ENERGY) < ENVENOM_ENERGY)
+            return false;
+
+        // ---- 终结技分支：连击点 >= 4 且能量充足 ----
         if (cp >= ENVENOM_MIN_CP && TryFinisher(victim))
             return true;
 
