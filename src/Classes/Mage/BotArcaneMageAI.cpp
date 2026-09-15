@@ -186,10 +186,11 @@ public:
 
         if (me->HasAura(ArcaneMageSpells::INVISIBILITY))
         {
-            // 渐隐同样压制行动：仇恨已解除 (或渐隐超时) 即主动现身继续输出
-            bool const invisibilityTimeout = (CD_INVISIBILITY - invisibilityCooldown >= INVISIBILITY_TIMEOUT_MS);
-
-            if (invisibilityTimeout || (!IsUnderPhysicalMelee(me) && !IsTopThreatTarget()))
+            // 隐形术在 3.3.5a 中必须跑满 3 秒淡入期，底层才会真正结算仇恨清零。
+            // 若沿用「仇恨已解除即主动现身」的判定，会在渐隐尚未完成时提前点掉光环，
+            // 结果是仇恨根本没被清除，随从一现身就被原样追打，白交 3 分钟底牌。
+            // 故此处只保留超时放行，必须等淡入期完整跑满再恢复输出。
+            if (CD_INVISIBILITY - invisibilityCooldown >= INVISIBILITY_TIMEOUT_MS)
                 me->RemoveAurasDueToSpell(ArcaneMageSpells::INVISIBILITY);
 
             return;
@@ -469,7 +470,9 @@ private:
         float const manaPct = me->GetPowerPct(POWER_MANA);
 
         // ---- 法力宝石：法力枯竭时瞬发补蓝 (Off-GCD，顺下不清空当帧决策流) ----
-        if (manaGemCooldown == 0 && manaPct < MANA_GEM_USE_PCT)
+        // 等级门禁必不可少：法力宝石在 MANA_GEM_MIN_LEVEL 以下尚未习得，
+        // 若不加限制，低等级随从会偷吃这发 80 级满级宝石效果 (非法高额回蓝)，直接破坏法力平衡。
+        if (manaGemCooldown == 0 && manaPct < MANA_GEM_USE_PCT && me->GetLevel() >= MANA_GEM_MIN_LEVEL)
         {
             // 法力宝石属物品触发类法术：随从没有实体宝石物品，
             // 常规施法通道会被物品所有权/目标物品校验直接拒绝，
@@ -661,7 +664,10 @@ private:
         if (!CanCast(victim, spellId, true))
             return false;
 
-        if (me->isMoving())
+        // 气定神闲生效时该发奥冲为瞬发，严禁刹停：随从必须能边跑位边交出这发 4 层奥冲。
+        // 只有真正的站桩读条才需要立定，否则会当场掐断跑位机动性，
+        // 使气定这张 2 分钟底牌反而成为拖慢站位的负担。
+        if (!instantCast && me->isMoving())
             me->StopMoving();
 
         return ExecuteSpell(victim, spellId, true);
@@ -742,6 +748,12 @@ private:
     // 仅对首领/精英维持：小怪转火频繁，交减速只会白烧瞬发窗口。
     void MaintainSlowDebuff(Unit* victim)
     {
+        // 奥术强化 15 秒核心泄蓝窗口内严禁交减速：减速本身零伤害，
+        // 在此期占用 GCD 等于直接把爆发窗口从满层奥冲手里偷跑掉。
+        // 强化结束后欺凌弱小的增伤链路会由本函数自动补回。
+        if (me->HasAura(ArcaneMageSpells::ARCANE_POWER))
+            return;
+
         if (!victim || slowCooldown > 0)
             return;
 
