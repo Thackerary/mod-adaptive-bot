@@ -42,12 +42,12 @@ namespace BalanceDruidSpells
     // =========================================================================
     constexpr uint32 AURA_ECLIPSE_LUNAR      = 48518;  // 月蚀触发光环 (+40% 星火术暴击率)，由愤怒暴击触发
     constexpr uint32 AURA_ECLIPSE_SOLAR      = 48517;  // 日蚀触发光环 (+40% 愤怒伤害)，由星火术暴击触发
-    constexpr uint32 ECLIPSE                 = 48516;  // 日月蚀天赋 Rank 3 (暴击触发双蚀的核心被动，必须根源注入)
-    constexpr uint32 NATURES_GRACE           = 16880;  // 自然之赐 Rank 3 (法术暴击后降低读条时间 0.5s)
-    constexpr uint32 EARTH_AND_MOON          = 48506;  // 大地与月亮 Rank 3 (法术命中附加 13% 法术易伤 Debuff)
+    constexpr uint32 ECLIPSE                 = 48525;  // 日月蚀 Rank 3 (暴击 100% 触发双蚀的核心被动根源，必须根源注入)
+    constexpr uint32 NATURES_GRACE           = 61346;  // 自然之赐 Rank 3 (法术暴击 100% 触发降低读条 0.5s)
+    constexpr uint32 EARTH_AND_MOON          = 48511;  // 大地与月亮 Rank 3 (13% 法术易伤 Debuff + 3% 暴击)
     constexpr uint32 MOONKIN_AURA            = 24907;  // 枭兽光环 (随枭兽形态派生的全团暴击增益)
     constexpr uint32 GLYPH_OF_STARFIRE       = 54844;  // 星火雕文 (星火术延长月火持续时间 3s，最多叠加 9s)
     constexpr uint32 GLYPH_OF_STARFALL       = 54828;  // 星辰坠落雕文 (冷却缩短 30s)
     constexpr uint32 GLYPH_OF_INSECT_SWARM   = 54830;  // 虫群雕文 (虫群伤害 +30%，但不再降低目标命中)
-    constexpr uint32 IMPROVED_INSECT_SWARM   = 57849;  // 强化虫群 Rank 3 (目标有虫群时愤怒伤害 +3%，有月火时星火暴击 +3%)
+    constexpr uint32 IMPROVED_INSECT_SWARM   = 57848;  // 强化虫群 Rank 3 (目标有虫群时愤怒伤害 +3%，有月火时星火暴击 +3%)
 }
