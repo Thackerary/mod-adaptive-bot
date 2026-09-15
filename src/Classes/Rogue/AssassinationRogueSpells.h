@@ -23,6 +23,8 @@ namespace AssassinationRogueSpells
     constexpr uint32 HUNGER_FOR_BLOOD    = 53819;  // 血之饥渴 (50 级终极天赋，需目标流血，伤害 +5%，持续 1 分钟)
     constexpr uint32 RUPTURE             = 48672;  // 割裂 Rank 9 (终结流血技，为血之饥渴铺垫)
     constexpr uint32 GARROTE             = 48676;  // 绞喉 Rank 10 (潜行背后起手流血技，+1 星)
+    constexpr uint32 SINISTER_STRIKE     = 48638;  // 邪恶攻击 Rank 12 (40 级前未习得毁伤时的产星填充)
+    constexpr uint32 EVISCERATE          = 48668;  // 剔骨 Rank 12 (62 级前未习得毒伤时的物理终结技)
 
     // -------------------------------------------------------------------------
     // 潜行、爆发与控场
@@ -49,4 +51,10 @@ namespace AssassinationRogueSpells
     constexpr uint32 GLYPH_OF_MUTILATE   = 56807;  // 毁伤雕文 (毁伤能量消耗 -5 点)
     constexpr uint32 GLYPH_OF_HUNGER_FOR_BLOOD = 63249; // 血之饥渴雕文 (增伤提升至 8%)
     constexpr uint32 GLYPH_OF_TRICKS_OF_TRADE  = 63420; // 嫁祸诀窍雕文 (嫁祸增益持续时间延长)
+
+    // -------------------------------------------------------------------------
+    // 武器毒药 (随从无武器涂毒对象，由 ProcPoisons 以 triggered 方式模拟注入)
+    // -------------------------------------------------------------------------
+    constexpr uint32 DEADLY_POISON       = 57970;  // 致命毒药 Rank 9 (DoT 光环，可叠 5 层，毒伤硬性前置)
+    constexpr uint32 INSTANT_POISON      = 57968;  // 速效毒药 Rank 9 (直接自然伤害)
 }

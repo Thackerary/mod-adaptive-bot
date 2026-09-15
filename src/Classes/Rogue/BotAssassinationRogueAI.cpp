@@ -58,6 +58,17 @@ class BotAssassinationRogueAI : public AdaptiveBotAI
     // 流血机制位掩码：Unit::HasAuraWithMechanic 内部采用 1 << (mechanic - 1) 编码
     static constexpr uint64 BLEED_MECHANIC_MASK = uint64(1) << (MECHANIC_BLEED - 1);
 
+    // =========================================================================
+    // 毒药模拟参数
+    // -------------------------------------------------------------------------
+    // 随从无武器涂毒对象，且底层毒药依赖 ProcFlag 武器命中事件，
+    // 必须由专精以 triggered 方式手工注入，否则毒伤将因缺少致命毒药被 100% 拒绝。
+    // =========================================================================
+    static constexpr uint32 POISON_PROC_INTERVAL     = 1000;  // 毒药巡检周期 (等效武器毒药 PPM 节流)
+    static constexpr uint32 DEADLY_POISON_MAX_STACKS = 5;     // 致命毒药满层数
+    static constexpr uint32 DEADLY_POISON_REFRESH_MS = 3000;  // 致命毒药提前续期窗口 (防止断档导致毒伤被拒)
+    static constexpr uint32 INSTANT_POISON_CHANCE    = 50;    // 速效毒药触发概率 (%)
+
 public:
     explicit BotAssassinationRogueAI(Creature* creature) : AdaptiveBotAI(creature) {}
 
@@ -198,7 +209,13 @@ public:
         // 必须在决策流末帧显式调用，否则双持白字与毒药伤害永久缺失。
         // 潜行起手窗口内严禁驱动：挥砍会立即破潜吞掉绞喉。
         if (!stealthHold)
+        {
             DoMeleeAttackIfReady();
+
+            // 白字平砍结算后立即补一次毒药模拟：维持 5 层致命毒药，
+            // 使毒伤能够通过底层校验，打通「毒伤 -> 名天堑 -> 切割续期」闭环。
+            ProcPoisons(victim);
+        }
     }
 
 private:
@@ -217,6 +234,9 @@ private:
     // 灭绝 (Overkill) 回能补偿计时器
     uint32 overkillRegenTimer{ 0 };
 
+    // 毒药模拟巡检节流计时器
+    uint32 poisonProcTimer{ 0 };
+
     // =========================================================================
     // 专精自管计时器维护
     // =========================================================================
@@ -231,13 +251,26 @@ private:
         Tick(feintCooldown);
         Tick(evasionCooldown);
         Tick(cloakCooldown);
+        Tick(poisonProcTimer);
 
-        // 潜行起手窗口仅在潜行态内递减；一旦脱离潜行立即复位，
-        // 保证每次重新隐身 (起手 / 消失) 都能获得完整的绞喉起手窗口。
+        // 潜行起手窗口：仅当「已潜行 且 已贴近起手距离」时才开始倒计时。
+        // 若在赶路途中等比扣减，随从尚未走到目标背后窗口就已耗尽，
+        // 必然在破潜瞬间断掉绞喉起手与灭绝回能链路，因此赶路途中维持满额窗口。
         if (IsStealthed())
-            Tick(stealthOpenTimer);
+        {
+            Unit* openerTarget = SelectAssistTarget();
+            bool const inOpenerRange = (openerTarget && openerTarget->IsAlive() &&
+                                        openerTarget->IsInWorld() &&
+                                        openerTarget->GetMap() == me->GetMap() &&
+                                        me->GetDistance(openerTarget) <= STEALTH_OPENER_DIST);
+
+            if (inOpenerRange)
+                Tick(stealthOpenTimer);
+        }
         else
+        {
             stealthOpenTimer = STEALTH_OPEN_WINDOW;
+        }
 
         // 灭绝 (Overkill) 回能补偿：潜行中及破潜后 20 秒内回能速度 +30%。
         // NPC 不走玩家能量再生公式，此处按 1000ms 粒度手工补足 30% 增量 (基准 10/s -> 13/s)。
@@ -269,6 +302,7 @@ private:
 
         stealthOpenTimer = STEALTH_OPEN_WINDOW;
         overkillRegenTimer = 0;
+        poisonProcTimer = 0;
     }
 
     // =========================================================================
@@ -611,6 +645,51 @@ private:
     }
 
     // =========================================================================
+    // 武器毒药模拟注入 (随从无武器涂毒对象，由白字平砍与毁伤命中驱动)
+    // =========================================================================
+    void ProcPoisons(Unit* victim)
+    {
+        if (!victim || !victim->IsAlive() || !victim->IsInWorld() || victim->GetMap() != me->GetMap())
+            return;
+
+        // 白字命中的几何前提：脱离近战判定区时不会触发武器毒药
+        if (!me->IsWithinMeleeRange(victim))
+            return;
+
+        // 巡检节流：逐帧触发会把毒药变成无上限的伤害来源，
+        // 按 1000ms 周期结算，等效玩家武器的毒药 PPM 节奏。
+        if (poisonProcTimer > 0)
+            return;
+
+        poisonProcTimer = POISON_PROC_INTERVAL;
+
+        // ---- A. 致命毒药：维持满 5 层，并在剩余 3 秒时提前续期 ----
+        uint32 const deadlyPoison = GetAppropriateRank(AssassinationRogueSpells::DEADLY_POISON, false);
+        if (deadlyPoison)
+        {
+            Aura* poisonAura = victim->GetAura(deadlyPoison, me->GetGUID());
+
+            bool const needRefresh = (!poisonAura) ||
+                                     (poisonAura->GetStackAmount() < DEADLY_POISON_MAX_STACKS) ||
+                                     (poisonAura->GetDuration() < static_cast<int32>(DEADLY_POISON_REFRESH_MS));
+
+            if (needRefresh)
+            {
+                // triggered = true：毒药模拟属引擎外补偿，严禁占用 GCD 与读条通道
+                me->CastSpell(victim, deadlyPoison, true);
+            }
+        }
+
+        // ---- B. 速效毒药：按概率补充直接自然伤害 ----
+        if (urand(0, 99) < INSTANT_POISON_CHANCE)
+        {
+            uint32 const instantPoison = GetAppropriateRank(AssassinationRogueSpells::INSTANT_POISON, false);
+            if (instantPoison)
+                me->CastSpell(victim, instantPoison, true);
+        }
+    }
+
+    // =========================================================================
     // P4: 连击点循环与终结技
     // =========================================================================
     bool TryComboPointRotation(Unit* victim)
@@ -635,8 +714,12 @@ private:
         if (TryEnvenom(victim))
             return true;
 
-        // 毒伤需目标身中致命毒药，随从无武器涂毒时可能被底层拒绝；
-        // 此时以割裂兜底消耗连击点，绝不让 5 星满溢空转导致产星循环停摆。
+        // 62 级前未习得毒伤，或致命毒药被打断导致毒伤被底层拒绝：
+        // 以剔骨打出高额物理终结直伤兜底，绝不让 5 星满溢空转导致产星停摆。
+        if (TryEviscerate(victim))
+            return true;
+
+        // 末位兜底：割裂铺垫流血，至少保住血之饥渴的增伤跳板
         return TryRupture(victim);
     }
 
@@ -647,6 +730,22 @@ private:
             return false;
 
         if (ExecuteSpell(victim, envenom, true))
+        {
+            SpendComboPoints();
+            return true;
+        }
+
+        return false;
+    }
+
+    bool TryEviscerate(Unit* victim)
+    {
+        // 剔骨为单阶法术，全程可用的物理终结技 (62 级前替代毒伤)
+        uint32 const eviscerate = GetAppropriateRank(AssassinationRogueSpells::EVISCERATE, false);
+        if (!eviscerate || !CanCast(victim, eviscerate, true))
+            return false;
+
+        if (ExecuteSpell(victim, eviscerate, true))
         {
             SpendComboPoints();
             return true;
@@ -672,14 +771,27 @@ private:
 
     bool TryMutilate(Unit* victim)
     {
+        // 主力产星：毁伤 (40 级天赋，双持匕首双段打击，命中 +2 星)
         uint32 const mutilate = GetAppropriateRank(AssassinationRogueSpells::MUTILATE, true);
-        if (!mutilate || !CanCast(victim, mutilate, true))
-            return false;
-
-        if (ExecuteSpell(victim, mutilate, true))
+        if (mutilate && CanCast(victim, mutilate, true) && ExecuteSpell(victim, mutilate, true))
         {
             // 毁伤为双持双段打击，命中即产 2 星 (上限 5 星由基类状态机钳制)
             AddComboPoints(victim, 2);
+
+            // 双持打击同样触发武器毒药结算
+            ProcPoisons(victim);
+            return true;
+        }
+
+        // 40 级前未习得毁伤 (或被底层拒绝)：降级邪恶攻击产星，
+        // 保证任何等级段的连击点循环都不出现断层。
+        uint32 const sinisterStrike = GetAppropriateRank(AssassinationRogueSpells::SINISTER_STRIKE, false);
+        if (!sinisterStrike || !CanCast(victim, sinisterStrike, true))
+            return false;
+
+        if (ExecuteSpell(victim, sinisterStrike, true))
+        {
+            AddComboPoints(victim, 1);
             return true;
         }
 
@@ -700,13 +812,30 @@ private:
         me->SetFacingToObject(victim);
 
         float const dist = me->GetDistance(victim);
-        bool const isFollowing = (me->GetMotionMaster()->GetCurrentMovementGeneratorType() == FOLLOW_MOTION_TYPE);
+        MovementGeneratorType const moveType = me->GetMotionMaster()->GetCurrentMovementGeneratorType();
+        bool const isFollowing = (moveType == FOLLOW_MOTION_TYPE);
+        bool const isChasing   = (moveType == CHASE_MOTION_TYPE);
+
+        // 怪物仇恨锚定随从本人：此时严禁绕后找背身位。
+        // 因为怪会随随从的移动实时转向，绕后指令会让两者围绕同一圆心无限对转，
+        // 形成「旋转木马」同心圆死锁，随从全程贴不上背且一发技能打不出。
+        bool const mobTargetingMe = (victim->GetVictim() == me);
+
+        if (mobTargetingMe)
+        {
+            // 怪看随从时只求贴身：用 MoveChase 直线贴上去，不追求背后位，
+            // 待嫁祸/消失把仇恨交回主坦后，再由下方分支恢复严格找背。
+            if (!isChasing || dist > MELEE_REACH_DIST)
+                me->GetMotionMaster()->MoveChase(victim, MELEE_FOLLOW_DIST);
+
+            return;
+        }
 
         // ---- 已平滑贴身：保持贴背输出，不打断普攻节奏 ----
         if (isFollowing && dist <= MELEE_COMFORT_DIST)
             return;
 
-        // ---- 超出近战判定区 / 未处于贴背跟随态：重新下发目标背身位跟随 ----
+        // ---- 怪物盯防主坦：严格占住目标背身位，规避正面顺劈/吐息与被招架加速 ----
         // angle 必须传正后方 BEHIND_ANGLE (M_PI)：引擎内部已按目标当前朝向结算偏移，
         // 严禁自行叠加 victim->GetOrientation()，否则站位会随目标转向持续漂移；
         // 传 0.0f 会贴在 Boss 脸前吃顺劈与正面吐息，物理近战必须始终占住背后位。
