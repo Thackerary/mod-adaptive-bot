@@ -41,6 +41,7 @@ class BotRetributionPaladinAI : public AdaptiveBotAI
     static constexpr uint32 CD_DIVINE_STORM      = 10000;
     static constexpr uint32 CD_JUDGEMENT         = 8000;
     static constexpr uint32 CD_CONSECRATION      = 8000;
+    static constexpr uint32 CD_CONSECRATION_GLYPHED = 10000; // 奉献雕文：持续与冷却同步延长至 10s
     static constexpr uint32 CD_EXORCISM          = 15000;
     static constexpr uint32 CD_HAMMER_OF_WRATH   = 6000;
     static constexpr uint32 CD_AVENGING_WRATH    = 120000;
@@ -377,16 +378,29 @@ private:
         // 自律 Debuff：无敌与圣疗共享 2 分钟冷却锁，必须提前读取避免无效施法
         bool const hasForbearance = me->HasAura(RetributionPaladinSpells::FORBEARANCE);
 
-        // ---- 圣盾术：生命 < 20% 且被近战压制，或仇恨失控，且身上无自律 ----
-        if (divineShieldCooldown == 0 && !hasForbearance &&
-            ((me->GetHealthPct() < DIVINE_SHIELD_HP_PCT && IsUnderPhysicalMelee(me)) || IsTopThreatTarget()))
+        // ---- 拯救之手：常规 (非濒死) 仇恨过高时的首选减仇手段 ----
+        // 必须先于圣盾术判定：拯救之手只烧 2 分钟 CD 且不触发自律锁，
+        // 而圣盾术是 5 分钟 CD + 自律锁 + 12 秒半伤惩罚的重量级底牌。
+        // 若顺序倒挂，随从满血 OT 的瞬间就会秒交无敌并浪费自律，
+        // 真正濒死时反而因自律锁而无牌可打。
+        // 血线进入濒死区 (< DIVINE_SHIELD_HP_PCT) 时本分支主动让位：
+        // 濒死窗口必须完整交给圣疗术与圣盾术，缓慢的仇恨渐退救不了当场致命伤。
+        if (handOfSalvationCooldown == 0 && IsTopThreatTarget() &&
+            me->GetHealthPct() >= DIVINE_SHIELD_HP_PCT)
         {
-            uint32 const divineShield = GetAppropriateRank(RetributionPaladinSpells::DIVINE_SHIELD, false);
-            if (divineShield && !me->HasAura(divineShield) &&
-                CanCast(me, divineShield, true) && ExecuteSpell(me, divineShield, true))
+            Unit* tank = GetGroupTank();
+            bool const hasLivingTank = (tank && tank != me && tank->IsAlive() && tank->IsInWorld() && tank->GetMap() == me->GetMap());
+
+            // 无活坦时严禁交拯救之手：仇恨无可转移对象，减仇毫无意义，纯属白烧 2 分钟 CD
+            if (hasLivingTank)
             {
-                divineShieldCooldown = CD_DIVINE_SHIELD;
-                return true;
+                uint32 const handOfSalvation = GetAppropriateRank(RetributionPaladinSpells::HAND_OF_SALVATION, false);
+                if (handOfSalvation && !me->HasAura(handOfSalvation) &&
+                    CanCast(me, handOfSalvation, true) && ExecuteSpell(me, handOfSalvation, true))
+                {
+                    handOfSalvationCooldown = CD_HAND_OF_SALVATION;
+                    return true;
+                }
             }
         }
 
@@ -404,22 +418,22 @@ private:
             }
         }
 
-        // ---- 拯救之手：仇恨失控且有活坦可承接时，对自身施放渐退仇恨 ----
-        if (handOfSalvationCooldown == 0 && IsTopThreatTarget())
-        {
-            Unit* tank = GetGroupTank();
-            bool const hasLivingTank = (tank && tank != me && tank->IsAlive() && tank->IsInWorld() && tank->GetMap() == me->GetMap());
+        // ---- 圣盾术：低血量必须是绝对前置条件 ----
+        // 旧逻辑用 (低血 && 近战) || 仇恨失控 的布尔优先级，
+        // 导致 100% 满血 OT 的瞬间就会秒交无敌，无端浪费 5 分钟 CD 与自律锁。
+        // 无敌只服务于「真正濒死」：仇恨问题交回上方拯救之手，
+        // 血量问题由圣疗术兜底，无敌只覆盖 15% ~ 20% 且仍被压制/盯防的致死窗口。
+        bool const needEmergencyImmunity =
+            (me->GetHealthPct() < DIVINE_SHIELD_HP_PCT) && (IsUnderPhysicalMelee(me) || IsTopThreatTarget());
 
-            // 无活坦时严禁交拯救之手：仇恨无可转移对象，减仇毫无意义，纯属白烧 2 分钟 CD
-            if (hasLivingTank)
+        if (divineShieldCooldown == 0 && !hasForbearance && needEmergencyImmunity)
+        {
+            uint32 const divineShield = GetAppropriateRank(RetributionPaladinSpells::DIVINE_SHIELD, false);
+            if (divineShield && !me->HasAura(divineShield) &&
+                CanCast(me, divineShield, true) && ExecuteSpell(me, divineShield, true))
             {
-                uint32 const handOfSalvation = GetAppropriateRank(RetributionPaladinSpells::HAND_OF_SALVATION, false);
-                if (handOfSalvation && !me->HasAura(handOfSalvation) &&
-                    CanCast(me, handOfSalvation, true) && ExecuteSpell(me, handOfSalvation, true))
-                {
-                    handOfSalvationCooldown = CD_HAND_OF_SALVATION;
-                    return true;
-                }
+                divineShieldCooldown = CD_DIVINE_SHIELD;
+                return true;
             }
         }
 
@@ -679,7 +693,11 @@ private:
 
         if (ExecuteSpell(me, consecration, true))
         {
-            consecrationCooldown = CD_CONSECRATION;
+            // 奉献雕文将地面持续与冷却同步延长：冷却必须随之动态结算，
+            // 否则 8 秒重放会顶掉地面残留的奉献跳数，并白烧一截法力。
+            consecrationCooldown = me->HasAura(RetributionPaladinSpells::GLYPH_OF_CONSECRATION)
+                                 ? CD_CONSECRATION_GLYPHED
+                                 : CD_CONSECRATION;
             return true;
         }
 
