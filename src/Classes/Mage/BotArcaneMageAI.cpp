@@ -632,8 +632,8 @@ private:
         // =====================================================================
         // 二、低等级降级 (未习得奥术冲击)
         // =====================================================================
-        // 飞弹速射触发即免费快打
-        if (hasBarrageProc && TryArcaneMissiles(victim, arcaneBarrage ? arcaneMissiles : arcaneMissiles))
+        // 飞弹速射触发即免费快打 (低等级段无奥冲，速射直接消化为零耗蓝引导)
+        if (hasBarrageProc && TryArcaneMissiles(victim, arcaneMissiles))
             return true;
 
         // 法力充足时以奥术飞弹填充
