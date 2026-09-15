@@ -5,7 +5,7 @@
 #ifndef _AFFLICTION_WARLOCK_SPELLS_H
 #define _AFFLICTION_WARLOCK_SPELLS_H
 
-#include <cstdint>
+#include "Define.h"
 
 // =============================================================================
 // 痛苦术士 (Affliction Warlock) 3.3.5a 法术与天赋常量表
