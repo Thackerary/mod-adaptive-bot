@@ -24,7 +24,10 @@ class BotMarksmanshipHunterAI : public AdaptiveBotAI
     static constexpr float MELEE_BLIND_DIST  = 8.0f;   // 近战盲区阈值：进入即触发逃脱 / 垫刀
     static constexpr float MAX_ENGAGE_DIST   = 35.0f;  // 脱节上限：超出必须主动压进
     static constexpr float IDEAL_SHOT_DIST   = 20.0f;  // 理想射击站位 15 ~ 30 码，站位目标点取 20 码
-    static constexpr float TANK_RETREAT_DIST = 6.0f;   // 近战盲区撤离时贴附坦克的距离
+    // 撤离锚定坦克背身位时的跟随距离：必须 >= 15 码。
+    // 若沿用 6 码贴坦，随从与 Boss 的间距仍落在 8 ~ 12 码近战盲区内，
+    // 会持续反复触发逃脱与垫刀，永远无法恢复 15 ~ 30 码射击站位。
+    static constexpr float TANK_RETREAT_DIST = 15.0f;  // 近战盲区撤离时贴附坦克的距离 (确保脱离 8 码盲区)
 
     // FollowMovementGenerator 的 angle 为「相对目标朝向的偏移」，引擎内部已叠加目标朝向。
     // 严禁自行叠加 tank->GetOrientation()，否则站位会随坦克转向持续漂移。
@@ -41,6 +44,7 @@ class BotMarksmanshipHunterAI : public AdaptiveBotAI
     static constexpr uint32 CD_CHIMERA_SHOT_GLYPHED = 9000;
     static constexpr uint32 CD_AIMED_SHOT           = 10000;
     static constexpr uint32 CD_KILL_SHOT            = 15000;
+    static constexpr uint32 CD_KILL_SHOT_GLYPHED    = 9000;   // 杀戮射击雕文：斩杀目标未死 CD -6s
     static constexpr uint32 CD_ARCANE_SHOT          = 6000;   // 奥术射击本体 CD，防止每帧空烧法力
     static constexpr uint32 CD_RAPTOR_STRIKE        = 6000;   // 猛禽一击本体 CD
     static constexpr uint32 CD_WING_CLIP            = 3000;   // 摔绊本体无 CD，此处仅作节流防刷屏
@@ -59,7 +63,7 @@ class BotMarksmanshipHunterAI : public AdaptiveBotAI
 
     // 法力阈值
     static constexpr float VIPER_ASPECT_MANA_PCT = 20.0f;  // 低于此线切蝰蛇回蓝
-    static constexpr float HAWK_ASPECT_MANA_PCT  = 85.0f;  // 回升至此线切回输出守护
+    static constexpr float HAWK_ASPECT_MANA_PCT  = 55.0f;  // 回升至此线即切回输出守护 (阈值过高会把低伤害期拖得过长)
 
 public:
     explicit BotMarksmanshipHunterAI(Creature* creature) : AdaptiveBotAI(creature) {}
@@ -134,6 +138,22 @@ public:
         // 杜绝长读条与引导被跟随/走位指令掐断。
         if (me->HasUnitState(UNIT_STATE_CASTING) || me->GetCurrentSpell(CURRENT_CHANNELED_SPELL))
             return;
+
+        // =====================================================================
+        // 0. 假死脱困闸门 (最高优先级，覆盖脱战与战斗双分支)
+        // ---------------------------------------------------------------------
+        // 假死光环在底层会持续压制随从行动 (定身于倒地姿态、强制脱战)，
+        // 若不在解除条件达成时主动移除，随从会被永久钉死在地，形成开怪即瘫的
+        // 致命死锁。解除条件：已脱离物理近战压制 且 不再被敌对单位越过主坦盯防。
+        // 假死期间直接 return，严禁下发任何走位/施法指令 (否则会与倒地姿态互相拉扯)。
+        // =====================================================================
+        if (me->HasAura(MarksmanshipHunterSpells::FEIGN_DEATH))
+        {
+            if (!IsUnderPhysicalMelee(me) && !IsTopThreatTarget())
+                me->RemoveAurasDueToSpell(MarksmanshipHunterSpells::FEIGN_DEATH);
+
+            return;
+        }
 
         // =====================================================================
         // 1. 脱战业务维护
@@ -396,10 +416,9 @@ private:
         if (!tank || tank == me || !tank->IsAlive() || !tank->IsInWorld() || tank->GetMap() != me->GetMap())
             return false;
 
-        // 误导只能作用于小队/团队玩家成员：随从坦克在底层不满足 TARGET_FLAG_UNIT_PARTY，
-        // 盲放会被引擎直接拒绝并白白空转一帧决策流。
-        if (!tank->ToPlayer())
-            return false;
+        // 注：此处不再限制 tank 必须为玩家。坦克随从同样能承接误导，
+        // 由 CanCast/ExecuteSpell 负责最终的目标类型合法性校验，
+        // 严禁在上层硬编码拦截，否则纯随从队伍将永久失去仇恨转移手段。
 
         if (!CanCast(tank, misdirection, true) || !ExecuteSpell(tank, misdirection, true))
             return false;
@@ -499,7 +518,12 @@ private:
         }
 
         // ---- 准备就绪：奇美拉与急速射击双双进入 CD 时立即重置全部猎人技能 ----
-        if (readinessCooldown == 0 && chimeraShotCooldown > 0 && rapidFireCooldown > 0)
+        // ---- 准备就绪：必须等待第一轮急速射击「光环结束」且奇美拉/瞄准双双进入 CD ----
+        // 仅判 rapidFireCooldown > 0 会在开怪瞬间急速射击光环尚未铺开时就触发准备就绪，
+        // 当帧把 rapidFireCooldown 归零，2 分钟底牌被自己吞掉，且后续无任何技能可重置。
+        // 追加 !HasAura(RAPID_FIRE) 判定，确保第一轮爆发真正打完收工后再刷新第二轮。
+        bool const rapidFireDone = (rapidFireCooldown > 0) && !me->HasAura(MarksmanshipHunterSpells::RAPID_FIRE);
+        if (readinessCooldown == 0 && rapidFireDone && chimeraShotCooldown > 0 && aimedShotCooldown > 0)
         {
             uint32 const readiness = GetAppropriateRank(MarksmanshipHunterSpells::READINESS, true);
             if (readiness && CanCast(me, readiness, true) && ExecuteSpell(me, readiness, true))
@@ -536,7 +560,11 @@ private:
 
         if (ExecuteSpell(victim, killShot, true))
         {
-            killShotCooldown = CD_KILL_SHOT;
+            // 杀戮射击雕文：斩杀目标未被击杀时 CD 由 15s 缩短至 9s，
+            // 使低血量窗口内能多打出一发斩杀，显著提升收尾效率。
+            killShotCooldown = me->HasAura(MarksmanshipHunterSpells::GLYPH_OF_KILL_SHOT)
+                             ? CD_KILL_SHOT_GLYPHED
+                             : CD_KILL_SHOT;
             return true;
         }
 
@@ -552,9 +580,12 @@ private:
         if (!serpentSting)
             return false;
 
-        // 光环防顶守卫：目标已持有毒蛇钉刺时严禁重复刷新 (奇美拉射击会自行续期)，
-        // 否则会白白顶掉剩余跳数并浪费瞬发 GCD。
-        if (victim->HasAura(serpentSting))
+        // 光环防顶守卫 + 施法者归属鉴别：目标已存在「本随从自己」的毒蛇钉刺时严禁重复刷新
+        // (奇美拉射击会自行续期)，否则会白白顶掉剩余跳数并浪费瞬发 GCD。
+        // 必须带 me->GetGUID() 自查：团队若存在其他猎人，用 HasAura 会把队友的钉刺
+        // 误判为自己的，导致本随从终生不再补钉刺，奇美拉射击的 40% 自然爆击链路彻底失效。
+        bool const hasMySting = (victim->GetAura(serpentSting, me->GetGUID()) != nullptr);
+        if (hasMySting)
             return false;
 
         if (!CanCast(victim, serpentSting, true))
@@ -574,8 +605,12 @@ private:
 
         // 奇美拉射击的核心收益来自刷新毒蛇钉刺：无钉刺铺垫时严禁空放，
         // 应回到铺垫梯队先补钉刺。
+        // 钉刺归属鉴别：必须确认目标身上挂的是「本随从自己施放」的毒蛇钉刺。
+        // 若仅用 HasAura，队友猎人的钉刺会被误认为有效跳板，本随从的奇美拉射击
+        // 将无法刷新自己的钉刺、也吃不到 40% 自然伤害加成，团队双猎人时收益直接归零。
         uint32 const serpentSting = GetAppropriateRank(MarksmanshipHunterSpells::SERPENT_STING, false);
-        if (!serpentSting || !victim->HasAura(serpentSting))
+        bool const hasMySting = serpentSting && (victim->GetAura(serpentSting, me->GetGUID()) != nullptr);
+        if (!hasMySting)
             return false;
 
         if (!CanCast(victim, chimeraShot, true))
@@ -768,11 +803,19 @@ private:
                 return;
             }
 
-            // 无坦克可依：退而求其次，直接向目标外侧拉开至理想射击距离
-            if (!isRetreatingToTank || moveType != CHASE_MOTION_TYPE)
+            // 无坦克可依：严禁对 victim 调用 MoveChase —— ChaseMovementGenerator 在
+            // 施法者已位于指定距离「以内」时会原地立定，而随从此刻恰处于 8 码盲区内，
+            // 结果是发出指令却纹丝不动，形成粘脸卡死。必须改用矢量外推硬位移：
+            // 以 victim 为原点，沿 victim -> me 的当前向量外推至 IDEAL_SHOT_DIST 落点。
+            if (!isRetreatingToTank || moveType != POINT_MOTION_TYPE)
             {
                 isRetreatingToTank = true;
-                me->GetMotionMaster()->MoveChase(victim, IDEAL_SHOT_DIST);
+
+                float const angle = victim->GetAngle(me);
+                float const retreatX = victim->GetPositionX() + IDEAL_SHOT_DIST * std::cos(angle);
+                float const retreatY = victim->GetPositionY() + IDEAL_SHOT_DIST * std::sin(angle);
+
+                me->GetMotionMaster()->MovePoint(0, retreatX, retreatY, me->GetPositionZ());
             }
             return;
         }
