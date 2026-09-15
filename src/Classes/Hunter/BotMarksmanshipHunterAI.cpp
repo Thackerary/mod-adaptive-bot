@@ -1,0 +1,825 @@
+/*
+ * Copyright (C) 2016+ AzerothCore <www.azerothcore.org>, released under GNU AGPL v3 license
+ */
+
+#include "MarksmanshipHunterSpells.h"
+#include "AdaptiveBotAI.h"
+#include "Player.h"
+#include "Group.h"
+#include "Creature.h"
+#include "SpellAuras.h"
+#include "Spell.h"
+#include "SpellMgr.h"
+#include "Chat.h"
+#include <algorithm>
+#include <cmath>
+#include <mutex>
+#include <vector>
+
+class BotMarksmanshipHunterAI : public AdaptiveBotAI
+{
+    // =========================================================================
+    // 站位与射程参数
+    // =========================================================================
+    static constexpr float MELEE_BLIND_DIST  = 8.0f;   // 近战盲区阈值：进入即触发逃脱 / 垫刀
+    static constexpr float MAX_ENGAGE_DIST   = 35.0f;  // 脱节上限：超出必须主动压进
+    static constexpr float IDEAL_SHOT_DIST   = 20.0f;  // 理想射击站位 15 ~ 30 码，站位目标点取 20 码
+    static constexpr float TANK_RETREAT_DIST = 6.0f;   // 近战盲区撤离时贴附坦克的距离
+
+    // FollowMovementGenerator 的 angle 为「相对目标朝向的偏移」，引擎内部已叠加目标朝向。
+    // 严禁自行叠加 tank->GetOrientation()，否则站位会随坦克转向持续漂移。
+    // M_PI 即锚点正后方：坦克背身位，可规避顺劈斩与正面吐息。
+    static constexpr float BEHIND_ANGLE      = static_cast<float>(M_PI);
+
+    // =========================================================================
+    // 自管冷却时长
+    // -------------------------------------------------------------------------
+    // Creature 不参与引擎技能 CD 追踪，凡无「持续光环保护」的 CD 技能必须由专精自行计时，
+    // 否则会因 HasSpellCooldown 恒 false 而在每一帧对同一技能空转重入。
+    // =========================================================================
+    static constexpr uint32 CD_CHIMERA_SHOT         = 10000;
+    static constexpr uint32 CD_CHIMERA_SHOT_GLYPHED = 9000;
+    static constexpr uint32 CD_AIMED_SHOT           = 10000;
+    static constexpr uint32 CD_KILL_SHOT            = 15000;
+    static constexpr uint32 CD_ARCANE_SHOT          = 6000;   // 奥术射击本体 CD，防止每帧空烧法力
+    static constexpr uint32 CD_RAPTOR_STRIKE        = 6000;   // 猛禽一击本体 CD
+    static constexpr uint32 CD_WING_CLIP            = 3000;   // 摔绊本体无 CD，此处仅作节流防刷屏
+    static constexpr uint32 CD_DISENGAGE            = 25000;
+    static constexpr uint32 CD_DETERRENCE           = 90000;
+    static constexpr uint32 CD_FEIGN_DEATH          = 30000;
+    static constexpr uint32 CD_MISDIRECTION         = 30000;
+    static constexpr uint32 CD_RAPID_FIRE           = 180000;
+    static constexpr uint32 CD_READINESS            = 180000;
+    static constexpr uint32 CD_SILENCING_SHOT       = 20000;
+
+    // 生命阈值
+    static constexpr float FEIGN_DEATH_HP_PCT = 30.0f;
+    static constexpr float DETERRENCE_HP_PCT  = 25.0f;
+    static constexpr float KILL_SHOT_HP_PCT   = 20.0f;
+
+    // 法力阈值
+    static constexpr float VIPER_ASPECT_MANA_PCT = 20.0f;  // 低于此线切蝰蛇回蓝
+    static constexpr float HAWK_ASPECT_MANA_PCT  = 85.0f;  // 回升至此线切回输出守护
+
+public:
+    explicit BotMarksmanshipHunterAI(Creature* creature) : AdaptiveBotAI(creature) {}
+
+    // =========================================================================
+    // 角色定位契约
+    // =========================================================================
+    bool IsHealerBot() const override { return false; }
+
+    // 远程随从按远程单位接管移动逻辑，禁止迈入怪物近战范围
+    bool IsRangedBot() const override { return true; }
+
+    // 猎人专修契约：物理远程与法系远程彻底解耦，输出完全由远程攻击强度 (AP) 支撑
+    bool IsRangedPhysicalBot() const override { return true; }
+
+    // 物理远程按真实装备模型结算：严禁继承法系远程的 2.0x ~ 3.3x 法伤放大乘数
+    float GetDamageDealtMultiplier() const override { return 1.0f; }
+
+    // =========================================================================
+    // 天赋依赖技能的最低等级契约
+    // 注：基础法术 (稳固/杀戮/毒蛇/龙鹰/蝰蛇/误导/逃脱等) 严禁登记于此，
+    //     其等级门槛由 GetAppropriateRank 依据 DBC SpellLevel 自动降阶处理。
+    // =========================================================================
+    uint8 GetTalentSpellMinLevel(uint32 spellId) const override
+    {
+        switch (spellId)
+        {
+            case MarksmanshipHunterSpells::AIMED_SHOT:      return 20;
+            case MarksmanshipHunterSpells::DETERRENCE:      return 20;
+            case MarksmanshipHunterSpells::SILENCING_SHOT:  return 30;
+            case MarksmanshipHunterSpells::FEIGN_DEATH:     return 30;
+            case MarksmanshipHunterSpells::TRUESHOT_AURA:   return 40;
+            case MarksmanshipHunterSpells::READINESS:       return 50;
+            case MarksmanshipHunterSpells::CHIMERA_SHOT:    return 60;
+            default:                                        return 0;
+        }
+    }
+
+    // =========================================================================
+    // 生命周期
+    // =========================================================================
+    void Reset() override
+    {
+        // 法力通道必须在基类 Reset 之前配置，以便等级同步时正确补满法力池
+        me->setPowerType(POWER_MANA);
+        AdaptiveBotAI::Reset();
+        ResetHunterTimers();
+        ApplyPassiveTalents();
+    }
+
+    void OnLevelSynced(uint8 level) override
+    {
+        AdaptiveBotAI::OnLevelSynced(level);
+        me->setPowerType(POWER_MANA);
+
+        if (me->GetMaxPower(POWER_MANA) > 0)
+            me->SetPower(POWER_MANA, me->GetMaxPower(POWER_MANA));
+
+        ApplyPassiveTalents();
+    }
+
+    // =========================================================================
+    // 核心决策循环
+    // =========================================================================
+    void UpdateAI(uint32 diff) override
+    {
+        UpdateTimers(diff);
+        UpdateHunterTimers(diff);
+
+        // 全局读条/通道双保险守卫：稳固射击读条期间引擎会置位 UNIT_STATE_CASTING，
+        // 但引导类法术在部分状态下并不置位该标记，故追加 CURRENT_CHANNELED_SPELL 显式判定，
+        // 杜绝长读条与引导被跟随/走位指令掐断。
+        if (me->HasUnitState(UNIT_STATE_CASTING) || me->GetCurrentSpell(CURRENT_CHANNELED_SPELL))
+            return;
+
+        // =====================================================================
+        // 1. 脱战业务维护
+        // =====================================================================
+        if (!me->IsInCombat())
+        {
+            if (TryEngageCombat())
+                return;
+
+            if (MaintainAspect())
+                return;
+
+            UpdateFollowMaster(diff);
+            return;
+        }
+
+        // =====================================================================
+        // 2. 战斗内 APL
+        // =====================================================================
+        Unit* victim = SelectAssistTarget();
+        if (!victim || !victim->IsAlive() || !victim->IsInWorld() ||
+            victim->GetMap() != me->GetMap() || !me->IsValidAttackTarget(victim))
+        {
+            MaintainAspect();
+            return;
+        }
+
+        // 远程随从仅锚定敌对目标维持进战姿态供射击链路使用，
+        // 第二参数传 false 绝不开启近战追击 (CONTEXT.md 铁律)。
+        if (me->GetVictim() != victim)
+            me->Attack(victim, false);
+
+        // ---- P0: 极限自保与仇恨控制 (维度 C 仇恨协同) ----
+        if (TrySurvivalAndThreat(victim)) return;
+
+        // ---- P1: 守护切换状态机 ----
+        if (MaintainAspect()) return;
+
+        // ---- P2: 爆发与打断 (Off-GCD，严禁 return true，必须当帧顺下) ----
+        TryBurstAndInterrupt(victim);
+
+        // ---- P3: 远程爆发与钉刺循环 ----
+        if (TryRangedRotation(victim)) return;
+
+        // ---- P4: 近战盲区垫刀 ----
+        if (TryMeleeDeadzone(victim)) return;
+
+        // ---- P5: 站位控制 ----
+        MaintainRangedPositioning(victim);
+    }
+
+private:
+    // 自管冷却登记
+    uint32 chimeraShotCooldown{ 0 };
+    uint32 aimedShotCooldown{ 0 };
+    uint32 killShotCooldown{ 0 };
+    uint32 arcaneShotCooldown{ 0 };
+    uint32 raptorStrikeCooldown{ 0 };
+    uint32 wingClipCooldown{ 0 };
+    uint32 disengageCooldown{ 0 };
+    uint32 deterrenceCooldown{ 0 };
+    uint32 feignDeathCooldown{ 0 };
+    uint32 misdirectionCooldown{ 0 };
+    uint32 rapidFireCooldown{ 0 };
+    uint32 readinessCooldown{ 0 };
+    uint32 silencingShotCooldown{ 0 };
+
+    // 近战盲区撤离姿态标记：处于该姿态时必须凭此标记主动重发走位指令，
+    // 否则会永久粘在坦克身后而无法恢复 15 ~ 30 码射击站位。
+    bool isRetreatingToTank{ false };
+
+    // =========================================================================
+    // 专精自管计时器维护
+    // =========================================================================
+    void UpdateHunterTimers(uint32 diff)
+    {
+        auto Tick = [diff](uint32& timer) { timer = (timer > diff) ? (timer - diff) : 0; };
+
+        Tick(chimeraShotCooldown);
+        Tick(aimedShotCooldown);
+        Tick(killShotCooldown);
+        Tick(arcaneShotCooldown);
+        Tick(raptorStrikeCooldown);
+        Tick(wingClipCooldown);
+        Tick(disengageCooldown);
+        Tick(deterrenceCooldown);
+        Tick(feignDeathCooldown);
+        Tick(misdirectionCooldown);
+        Tick(rapidFireCooldown);
+        Tick(readinessCooldown);
+        Tick(silencingShotCooldown);
+    }
+
+    void ResetHunterTimers()
+    {
+        chimeraShotCooldown = 0;
+        aimedShotCooldown = 0;
+        killShotCooldown = 0;
+        arcaneShotCooldown = 0;
+        raptorStrikeCooldown = 0;
+        wingClipCooldown = 0;
+        disengageCooldown = 0;
+        deterrenceCooldown = 0;
+        feignDeathCooldown = 0;
+        misdirectionCooldown = 0;
+        rapidFireCooldown = 0;
+        readinessCooldown = 0;
+        silencingShotCooldown = 0;
+
+        isRetreatingToTank = false;
+    }
+
+    // =========================================================================
+    // 战场态势判定器
+    // =========================================================================
+    bool IsUnderPhysicalMelee(Unit* unit) const
+    {
+        if (!unit)
+            return false;
+
+        for (Unit* attacker : unit->getAttackers())
+        {
+            if (attacker && attacker->IsAlive() && attacker->GetMap() == me->GetMap() && attacker->IsWithinMeleeRange(unit))
+                return true;
+        }
+
+        return false;
+    }
+
+    // 仇恨失控判定：敌对单位越过主坦直接盯防随从本人，即为 OT (维度 C 归因输入信号)
+    bool IsTopThreatTarget()
+    {
+        Unit* tank = GetGroupTank();
+        bool const hasLivingTank = (tank && tank != me && tank->IsAlive());
+
+        uint32 chasers = 0;
+        for (Unit* attacker : me->getAttackers())
+        {
+            if (!attacker || !attacker->IsAlive() || attacker->GetMap() != me->GetMap())
+                continue;
+
+            if (attacker->GetVictim() != me)
+                continue;
+
+            // 团队存在主坦却被敌对单位盯防：判定为随从抢走仇恨
+            if (hasLivingTank)
+                return true;
+
+            ++chasers;
+        }
+
+        // 无主坦兜底：被两只以上敌对单位同时盯防同样判定为仇恨失控
+        return chasers >= 2;
+    }
+
+    bool ShouldFeignDeath()
+    {
+        // 情形一：生命濒危且正承受物理近战压制
+        if (me->GetHealthPct() < FEIGN_DEATH_HP_PCT && IsUnderPhysicalMelee(me))
+            return true;
+
+        // 情形二：仇恨彻底失控，必须立即清仇恨脱困
+        return IsTopThreatTarget();
+    }
+
+    bool IsInterruptibleTarget(Unit* target) const
+    {
+        if (!target || !target->IsAlive())
+            return false;
+
+        if (target->HasUnitState(UNIT_STATE_CASTING))
+            return true;
+
+        // 引导类法术不置位 UNIT_STATE_CASTING，需按通道中断标记单独判定可打断性
+        if (Spell* channeled = target->GetCurrentSpell(CURRENT_CHANNELED_SPELL))
+            return channeled->GetSpellInfo()->ChannelInterruptFlags != 0;
+
+        return false;
+    }
+
+    bool IsEliteOrBossTarget(Unit* target) const
+    {
+        if (!target)
+            return false;
+
+        // PvP 场景直接视同精英
+        if (target->IsPlayer())
+            return true;
+
+        if (Creature* creature = target->ToCreature())
+            return creature->GetCreatureTemplate()->rank >= CREATURE_ELITE_ELITE;
+
+        return false;
+    }
+
+    // =========================================================================
+    // P0: 极限自保与仇恨控制
+    // =========================================================================
+    bool TrySurvivalAndThreat(Unit* victim)
+    {
+        // ---- 假死：生命濒危且被近战压制，或仇恨彻底失控 (OT) ----
+        if (feignDeathCooldown == 0 && ShouldFeignDeath())
+        {
+            uint32 const feignDeath = GetAppropriateRank(MarksmanshipHunterSpells::FEIGN_DEATH, true);
+            if (feignDeath && !me->HasAura(feignDeath) &&
+                CanCast(me, feignDeath, true) && ExecuteSpell(me, feignDeath, true))
+            {
+                feignDeathCooldown = CD_FEIGN_DEATH;
+                return true;
+            }
+        }
+
+        // ---- 威慑：假死冷却中，或假死当前并不适用时的应急免伤 ----
+        // 生命 < 25% 时若仍无任何自救手段可用，随从将直接阵亡，故此处补充
+        // 「假死 CD 中 或 假死不适用」的兜底判定，避免 20% 血线无牌可打的裸奔窗口。
+        if (deterrenceCooldown == 0 && me->GetHealthPct() < DETERRENCE_HP_PCT &&
+            (feignDeathCooldown > 0 || !ShouldFeignDeath()))
+        {
+            uint32 const deterrence = GetAppropriateRank(MarksmanshipHunterSpells::DETERRENCE, true);
+            if (deterrence && !me->HasAura(deterrence) &&
+                CanCast(me, deterrence, true) && ExecuteSpell(me, deterrence, true))
+            {
+                deterrenceCooldown = CD_DETERRENCE;
+                return true;
+            }
+        }
+
+        // ---- 逃脱：陷入 8 码近战盲区，向后腾跃拉开距离 ----
+        if (disengageCooldown == 0 && victim && me->GetDistance(victim) < MELEE_BLIND_DIST)
+        {
+            uint32 const disengage = GetAppropriateRank(MarksmanshipHunterSpells::DISENGAGE, false);
+            if (disengage && CanCast(me, disengage, true) && ExecuteSpell(me, disengage, true))
+            {
+                disengageCooldown = CD_DISENGAGE;
+
+                // 瞬发无弹道技：允许在跑位途中施放，严禁 StopMoving；
+                // 腾跃后立即标记撤离姿态，由 P5 接管后续站位回正。
+                isRetreatingToTank = true;
+                return true;
+            }
+        }
+
+        // ---- 误导：起手/冷却就绪时把仇恨预先转移给主坦 ----
+        if (TryMisdirection())
+            return true;
+
+        return false;
+    }
+
+    bool TryMisdirection()
+    {
+        if (misdirectionCooldown > 0)
+            return false;
+
+        uint32 const misdirection = GetAppropriateRank(MarksmanshipHunterSpells::MISDIRECTION, false);
+        if (!misdirection || me->HasAura(misdirection))
+            return false;
+
+        Unit* tank = GetGroupTank();
+        if (!tank || tank == me || !tank->IsAlive() || !tank->IsInWorld() || tank->GetMap() != me->GetMap())
+            return false;
+
+        // 误导只能作用于小队/团队玩家成员：随从坦克在底层不满足 TARGET_FLAG_UNIT_PARTY，
+        // 盲放会被引擎直接拒绝并白白空转一帧决策流。
+        if (!tank->ToPlayer())
+            return false;
+
+        if (!CanCast(tank, misdirection, true) || !ExecuteSpell(tank, misdirection, true))
+            return false;
+
+        misdirectionCooldown = CD_MISDIRECTION;
+        return true;
+    }
+
+    // =========================================================================
+    // P1: 守护切换状态机 (蝰蛇回蓝 <=> 龙鹰/雄鹰输出)
+    // =========================================================================
+    uint32 GetDpsAspect() const
+    {
+        // 80 级优先龙鹰守护；未达等级门槛时交由 GetAppropriateRank 降阶，
+        // 降阶失败则回落雄鹰守护，保证任何等级都有输出守护可挂。
+        uint32 const dragonhawk = GetAppropriateRank(MarksmanshipHunterSpells::ASPECT_OF_THE_DRAGONHAWK, false);
+        if (dragonhawk)
+            return dragonhawk;
+
+        return GetAppropriateRank(MarksmanshipHunterSpells::ASPECT_OF_THE_HAWK, false);
+    }
+
+    bool TrySwitchAspect(uint32 aspectSpellId)
+    {
+        if (!aspectSpellId || me->HasAura(aspectSpellId))
+            return false;
+
+        if (!CanCast(me, aspectSpellId, true))
+            return false;
+
+        return ExecuteSpell(me, aspectSpellId, true);
+    }
+
+    bool MaintainAspect()
+    {
+        // ---- 蝰蛇守护：战时法力枯竭，优先保续战能力 ----
+        if (me->IsInCombat() && me->getPowerType() == POWER_MANA &&
+            me->GetPowerPct(POWER_MANA) < VIPER_ASPECT_MANA_PCT)
+        {
+            if (TrySwitchAspect(MarksmanshipHunterSpells::ASPECT_OF_THE_VIPER))
+                return true;
+        }
+
+        uint32 const dpsAspect = GetDpsAspect();
+        if (!dpsAspect)
+            return false;
+
+        // ---- 蝰蛇守护挂着且法力已回升 / 已脱战：果断切回输出守护 ----
+        if (me->HasAura(MarksmanshipHunterSpells::ASPECT_OF_THE_VIPER))
+        {
+            // 战时法力未回到安全线前不切回，避免「切龙鹰 -> 空蓝 -> 切蝰蛇」的无尽抖动
+            if (me->IsInCombat() && me->GetPowerPct(POWER_MANA) <= HAWK_ASPECT_MANA_PCT)
+                return false;
+
+            return TrySwitchAspect(dpsAspect);
+        }
+
+        // ---- 输出守护常驻维护 ----
+        if (!me->HasAura(dpsAspect))
+            return TrySwitchAspect(dpsAspect);
+
+        return false;
+    }
+
+    // =========================================================================
+    // P2: 爆发与打断 (Off-GCD，当帧顺下绝不 return)
+    // =========================================================================
+    void TryBurstAndInterrupt(Unit* victim)
+    {
+        if (!victim)
+            return;
+
+        // ---- 沉默射击：打断敌方读条；无读条时作为爆发期免费额外伤害顺发 ----
+        if (silencingShotCooldown == 0)
+        {
+            uint32 const silencingShot = GetAppropriateRank(MarksmanshipHunterSpells::SILENCING_SHOT, true);
+            if (silencingShot)
+            {
+                bool const shouldSilence = IsInterruptibleTarget(victim) || me->HasAura(MarksmanshipHunterSpells::RAPID_FIRE);
+                if (shouldSilence && CanCast(victim, silencingShot, true) &&
+                    ExecuteSpell(victim, silencingShot, true))
+                {
+                    silencingShotCooldown = CD_SILENCING_SHOT;
+                }
+            }
+        }
+
+        // ---- 急速射击：首领/精英目标且仍处于 50% 以上血量(高血量窗口才值得交爆发) ----
+        if (rapidFireCooldown == 0 && !me->HasAura(MarksmanshipHunterSpells::RAPID_FIRE))
+        {
+            uint32 const rapidFire = GetAppropriateRank(MarksmanshipHunterSpells::RAPID_FIRE, false);
+            if (rapidFire && victim->GetHealthPct() > 50.0f && IsEliteOrBossTarget(victim))
+            {
+                if (CanCast(me, rapidFire, true) && ExecuteSpell(me, rapidFire, true))
+                    rapidFireCooldown = CD_RAPID_FIRE;
+            }
+        }
+
+        // ---- 准备就绪：奇美拉与急速射击双双进入 CD 时立即重置全部猎人技能 ----
+        if (readinessCooldown == 0 && chimeraShotCooldown > 0 && rapidFireCooldown > 0)
+        {
+            uint32 const readiness = GetAppropriateRank(MarksmanshipHunterSpells::READINESS, true);
+            if (readiness && CanCast(me, readiness, true) && ExecuteSpell(me, readiness, true))
+            {
+                readinessCooldown = CD_READINESS;
+
+                // 当帧立即把全技能 CD 归零，使奇美拉/急速射击能被后续梯队当帧复用
+                chimeraShotCooldown = 0;
+                aimedShotCooldown = 0;
+                killShotCooldown = 0;
+                disengageCooldown = 0;
+                deterrenceCooldown = 0;
+                feignDeathCooldown = 0;
+                misdirectionCooldown = 0;
+                rapidFireCooldown = 0;
+                silencingShotCooldown = 0;
+
+                // Off-GCD 铁律：严禁在此 return，必须允许当帧决策流顺下继续输出。
+            }
+        }
+    }
+
+    // =========================================================================
+    // P3: 远程爆发与钉刺循环
+    // =========================================================================
+    bool TryKillShot(Unit* victim)
+    {
+        if (killShotCooldown > 0 || !victim || victim->GetHealthPct() >= KILL_SHOT_HP_PCT)
+            return false;
+
+        uint32 const killShot = GetAppropriateRank(MarksmanshipHunterSpells::KILL_SHOT, false);
+        if (!killShot || !CanCast(victim, killShot, true))
+            return false;
+
+        if (ExecuteSpell(victim, killShot, true))
+        {
+            killShotCooldown = CD_KILL_SHOT;
+            return true;
+        }
+
+        return false;
+    }
+
+    bool TrySerpentSting(Unit* victim)
+    {
+        if (!victim)
+            return false;
+
+        uint32 const serpentSting = GetAppropriateRank(MarksmanshipHunterSpells::SERPENT_STING, false);
+        if (!serpentSting)
+            return false;
+
+        // 光环防顶守卫：目标已持有毒蛇钉刺时严禁重复刷新 (奇美拉射击会自行续期)，
+        // 否则会白白顶掉剩余跳数并浪费瞬发 GCD。
+        if (victim->HasAura(serpentSting))
+            return false;
+
+        if (!CanCast(victim, serpentSting, true))
+            return false;
+
+        return ExecuteSpell(victim, serpentSting, true);
+    }
+
+    bool TryChimeraShot(Unit* victim)
+    {
+        if (chimeraShotCooldown > 0 || !victim)
+            return false;
+
+        uint32 const chimeraShot = GetAppropriateRank(MarksmanshipHunterSpells::CHIMERA_SHOT, true);
+        if (!chimeraShot)
+            return false;
+
+        // 奇美拉射击的核心收益来自刷新毒蛇钉刺：无钉刺铺垫时严禁空放，
+        // 应回到铺垫梯队先补钉刺。
+        uint32 const serpentSting = GetAppropriateRank(MarksmanshipHunterSpells::SERPENT_STING, false);
+        if (!serpentSting || !victim->HasAura(serpentSting))
+            return false;
+
+        if (!CanCast(victim, chimeraShot, true))
+            return false;
+
+        if (ExecuteSpell(victim, chimeraShot, true))
+        {
+            chimeraShotCooldown = me->HasAura(MarksmanshipHunterSpells::GLYPH_OF_CHIMERA_SHOT)
+                                ? CD_CHIMERA_SHOT_GLYPHED
+                                : CD_CHIMERA_SHOT;
+            return true;
+        }
+
+        return false;
+    }
+
+    bool TryAimedShot(Unit* victim)
+    {
+        if (aimedShotCooldown > 0 || !victim)
+            return false;
+
+        uint32 const aimedShot = GetAppropriateRank(MarksmanshipHunterSpells::AIMED_SHOT, true);
+        if (!aimedShot || !CanCast(victim, aimedShot, true))
+            return false;
+
+        if (ExecuteSpell(victim, aimedShot, true))
+        {
+            aimedShotCooldown = CD_AIMED_SHOT;
+            return true;
+        }
+
+        return false;
+    }
+
+    bool TryArcaneShot(Unit* victim)
+    {
+        if (arcaneShotCooldown > 0 || !victim)
+            return false;
+
+        uint32 const arcaneShot = GetAppropriateRank(MarksmanshipHunterSpells::ARCANE_SHOT, false);
+        if (!arcaneShot || !CanCast(victim, arcaneShot, true))
+            return false;
+
+        // 瞬发射击：允许在跑位途中直接施放，严禁 StopMoving 破坏风筝机动性
+        if (ExecuteSpell(victim, arcaneShot, true))
+        {
+            arcaneShotCooldown = CD_ARCANE_SHOT;
+            return true;
+        }
+
+        return false;
+    }
+
+    bool TrySteadyShot(Unit* victim, uint32 steadyShot)
+    {
+        if (!steadyShot || !victim)
+            return false;
+
+        // 施法资格必须先通过校验再刹停：CanCast 失败 (GCD/超距/被控) 时提前立定，
+        // 会让随从在重构走位期间被 StopMoving 每帧拉扯成原地抽搐。
+        if (!CanCast(victim, steadyShot, true))
+            return false;
+
+        if (me->isMoving())
+            me->StopMoving();
+
+        return ExecuteSpell(victim, steadyShot, true);
+    }
+
+    bool TryRangedRotation(Unit* victim)
+    {
+        if (!victim)
+            return false;
+
+        float const dist = me->GetDistance(victim);
+
+        // 近战盲区与超远脱节一律交由 P0 / P4 / P5 接管，绝不在此硬读条
+        if (dist < MELEE_BLIND_DIST || dist > MAX_ENGAGE_DIST)
+            return false;
+
+        // ---- 斩杀期：目标 20% 以下无条件优先杀戮射击 ----
+        if (TryKillShot(victim))
+            return true;
+
+        // ---- 毒蛇钉刺铺垫 → 奇美拉射击刷新爆发 ----
+        if (TrySerpentSting(victim))
+            return true;
+
+        if (TryChimeraShot(victim))
+            return true;
+
+        // ---- 瞄准射击：物理致死打击 ----
+        if (TryAimedShot(victim))
+            return true;
+
+        // ---- 移动中或尚未习得稳固射击：瞬发奥术射击填充 ----
+        uint32 const steadyShot = GetAppropriateRank(MarksmanshipHunterSpells::STEADY_SHOT, false);
+        if (me->isMoving() || !steadyShot)
+            return TryArcaneShot(victim);
+
+        // ---- 站桩读条填充：稳固射击 ----
+        if (TrySteadyShot(victim, steadyShot))
+            return true;
+
+        return TryArcaneShot(victim);
+    }
+
+    // =========================================================================
+    // P4: 近战盲区垫刀 (逃脱冷却期内的兜底输出来源)
+    // =========================================================================
+    bool TryMeleeDeadzone(Unit* victim)
+    {
+        if (!victim)
+            return false;
+
+        if (me->GetDistance(victim) >= MELEE_BLIND_DIST)
+            return false;
+
+        // 注意：即使陷入盲区，也严禁 me->Attack(victim, true) 开启近战追击，
+        // 远程随从恒以 Attack(victim, false) 锚定目标，仅靠技能垫刀过渡。
+
+        // ---- 摔绊：先减速敌人，为逃脱 CD 争取脱身窗口 ----
+        if (wingClipCooldown == 0)
+        {
+            uint32 const wingClip = GetAppropriateRank(MarksmanshipHunterSpells::WING_CLIP, false);
+            if (wingClip && !victim->HasAura(wingClip) &&
+                CanCast(victim, wingClip, true) && ExecuteSpell(victim, wingClip, true))
+            {
+                wingClipCooldown = CD_WING_CLIP;
+                return true;
+            }
+        }
+
+        // ---- 猛禽一击：近战 GCD 间隙垫刀，绝不发呆 ----
+        if (raptorStrikeCooldown == 0)
+        {
+            uint32 const raptorStrike = GetAppropriateRank(MarksmanshipHunterSpells::RAPTOR_STRIKE, false);
+            if (raptorStrike && CanCast(victim, raptorStrike, true) && ExecuteSpell(victim, raptorStrike, true))
+            {
+                raptorStrikeCooldown = CD_RAPTOR_STRIKE;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // =========================================================================
+    // P5: 站位控制 (风筝与拉开状态机，维持 15 ~ 30 码理想射击站位)
+    // =========================================================================
+    void MaintainRangedPositioning(Unit* victim)
+    {
+        if (!victim || !victim->IsAlive() || !victim->IsInWorld() || victim->GetMap() != me->GetMap())
+            return;
+
+        if (me->HasUnitState(UNIT_STATE_CASTING))
+            return;
+
+        me->SetFacingToObject(victim);
+
+        float const dist = me->GetDistance(victim);
+        MovementGeneratorType const moveType = me->GetMotionMaster()->GetCurrentMovementGeneratorType();
+
+        // ---- A. 脱节过远 (> 35 码)：主动压进至理想射击站位 ----
+        if (dist > MAX_ENGAGE_DIST)
+        {
+            isRetreatingToTank = false;
+
+            if (moveType != CHASE_MOTION_TYPE)
+                me->GetMotionMaster()->MoveChase(victim, IDEAL_SHOT_DIST);
+            return;
+        }
+
+        // ---- B. 近战盲区 (< 8 码)：向坦克背身位撤离，借坦克 AoE 仇恨把小怪拉走 ----
+        if (dist < MELEE_BLIND_DIST)
+        {
+            Unit* tank = GetGroupTank();
+            bool const canAnchorTank = (tank && tank != me && tank != victim && tank->IsAlive() &&
+                                        tank->IsInWorld() && tank->GetMap() == me->GetMap());
+
+            if (canAnchorTank)
+            {
+                if (!isRetreatingToTank || moveType != FOLLOW_MOTION_TYPE)
+                {
+                    isRetreatingToTank = true;
+                    // angle 必须传正后方：传 0.0f 会贴在坦克脸前，被顺劈斩与正面吐息一并打死。
+                    // 严禁自行叠加 tank->GetOrientation()，引擎内部已按目标朝向结算偏移。
+                    me->GetMotionMaster()->MoveFollow(tank, TANK_RETREAT_DIST, BEHIND_ANGLE);
+                }
+                return;
+            }
+
+            // 无坦克可依：退而求其次，直接向目标外侧拉开至理想射击距离
+            if (!isRetreatingToTank || moveType != CHASE_MOTION_TYPE)
+            {
+                isRetreatingToTank = true;
+                me->GetMotionMaster()->MoveChase(victim, IDEAL_SHOT_DIST);
+            }
+            return;
+        }
+
+        // ---- C. 已回到有效射程：立定射击，清空遗留走位发生器 ----
+        // 严禁放任 chase / follow 发生器常驻：残余走位会持续拉扯随从，
+        // 使稳固射击的 2 秒读条与站位反复互相打断，表现为原地抽搐。
+        if (moveType == CHASE_MOTION_TYPE || moveType == FOLLOW_MOTION_TYPE)
+        {
+            isRetreatingToTank = false;
+            me->GetMotionMaster()->Clear();
+            me->GetMotionMaster()->MoveIdle();
+            me->StopMoving();
+        }
+    }
+
+    // =========================================================================
+    // 射击天赋被动光环补偿 (弥补 NPC 缺天赋树缺陷)
+    // =========================================================================
+    void ApplyPassiveTalents()
+    {
+        uint8 const level = me->GetLevel();
+
+        auto SyncPassive = [this, level](uint8 minLevel, uint32 spellId)
+        {
+            if (level >= minLevel)
+            {
+                if (!me->HasAura(spellId))
+                    me->AddAura(spellId, me);
+            }
+            else
+            {
+                me->RemoveAurasDueToSpell(spellId);
+            }
+        };
+
+        SyncPassive(20, MarksmanshipHunterSpells::MORTAL_SHOTS);          // 致死射击：暴击伤害 +30%
+        SyncPassive(20, MarksmanshipHunterSpells::GLYPH_OF_CHIMERA_SHOT); // 奇美拉射击雕文：奇美拉 CD -1s
+        SyncPassive(20, MarksmanshipHunterSpells::GLYPH_OF_SERPENT_STING);// 毒蛇钉刺雕文：毒蛇持续 +6s
+        SyncPassive(20, MarksmanshipHunterSpells::GLYPH_OF_KILL_SHOT);    // 杀戮射击雕文：斩杀目标未死重置 CD
+        SyncPassive(30, MarksmanshipHunterSpells::PIERCING_SHOTS);        // 穿刺射击：暴击附带 30% 流血
+        SyncPassive(30, MarksmanshipHunterSpells::MASTER_MARKSMAN);       // 射击大师：暴击 +5%，稳固耗蓝 -25%
+        SyncPassive(40, MarksmanshipHunterSpells::TRUESHOT_AURA);         // 强击光环：全队 AP +10%
+    }
+};
+
+void AddSC_bot_marksmanship_hunter()
+{
+    new AdaptiveBotScript<BotMarksmanshipHunterAI>("bot_marksmanship_hunter");
+}
