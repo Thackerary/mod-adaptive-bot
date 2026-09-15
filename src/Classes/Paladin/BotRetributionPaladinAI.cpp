@@ -778,6 +778,7 @@ private:
         SyncPassive(20, RetributionPaladinSpells::GLYPH_OF_EXORCISM);     // 驱邪雕文：驱邪伤害 +20%
         SyncPassive(30, RetributionPaladinSpells::FANATICISM);            // 狂热：审判暴击率 +18%
         SyncPassive(40, RetributionPaladinSpells::SHEATH_OF_LIGHT);       // 圣光之鞘：AP 转化为 SP
+        SyncPassive(40, RetributionPaladinSpells::THE_ART_OF_WAR);        // 战争艺术：暴击后施加 59578 触发光环 (驱邪术唯一解锁通道)
         SyncPassive(45, RetributionPaladinSpells::RIGHTEOUS_VENGEANCE);   // 正义复仇：暴击附带 30% 流血 DoT
         SyncPassive(50, RetributionPaladinSpells::JUDGEMENTS_OF_THE_WISE);// 睿智审判：审判回蓝与全团补蓝
     }

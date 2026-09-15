@@ -48,6 +48,7 @@ namespace RetributionPaladinSpells
     // 核心状态与被动光环补偿 (以光环形式注入，弥补 NPC 无天赋树缺陷)
     // -------------------------------------------------------------------------
     constexpr uint32 FORBEARANCE          = 25771;  // 自律 Debuff (阻止无敌/圣疗)
+    constexpr uint32 THE_ART_OF_WAR       = 53488;  // 战争艺术 Rank 2 (40 级被动天赋，暴击后施加 59578 触发光环)
     constexpr uint32 AURA_THE_ART_OF_WAR  = 59578;  // 战争艺术触发光环 (使驱邪术瞬发且不读条)
     constexpr uint32 JUDGEMENTS_OF_THE_WISE = 31878; // 睿智审判 Rank 3 (审判提供全团回蓝与自身即时回蓝)
     constexpr uint32 SHEATH_OF_LIGHT      = 53503;  // 圣光之鞘 Rank 3 (AP 转化为 SP)
