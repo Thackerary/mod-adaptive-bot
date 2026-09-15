@@ -29,6 +29,12 @@ class BotMarksmanshipHunterAI : public AdaptiveBotAI
     // 会持续反复触发逃脱与垫刀，永远无法恢复 15 ~ 30 码射击站位。
     static constexpr float TANK_RETREAT_DIST = 15.0f;  // 近战盲区撤离时贴附坦克的距离 (确保脱离 8 码盲区)
 
+    // 撤退迟滞退出线：必须严格大于 MELEE_BLIND_DIST。
+    // 若进退撤退姿态共用 8 码单一阈值，会出现「刚被拉出 8 码即退出撤退并立定，
+    // 下一帧又被 Boss 追进 8 码内重新触发撤退」的高频抽搐死锁，
+    // 随从全程在原地抖动且一发子弹都打不出去。
+    static constexpr float RETREAT_EXIT_DIST  = 15.0f;  // 撤退姿态的退出安全线
+
     // FollowMovementGenerator 的 angle 为「相对目标朝向的偏移」，引擎内部已叠加目标朝向。
     // 严禁自行叠加 tank->GetOrientation()，否则站位会随坦克转向持续漂移。
     // M_PI 即锚点正后方：坦克背身位，可规避顺劈斩与正面吐息。
@@ -149,7 +155,14 @@ public:
         // =====================================================================
         if (me->HasAura(MarksmanshipHunterSpells::FEIGN_DEATH))
         {
-            if (!IsUnderPhysicalMelee(me) && !IsTopThreatTarget())
+            // 躺地时长由自管冷却反算：施放成功时 feignDeathCooldown 被置为 CD_FEIGN_DEATH，
+            // 故 (CD_FEIGN_DEATH - feignDeathCooldown) 即已卧地毫秒数。
+            // 硬性 1.5 秒超时兜底必不可少：无主坦、被抗性抵抗或威胁判定未命中时，
+            // 解除条件可能永远无法满足，随从会在地上躺满 6 分钟假死光环时限，
+            // 期间被小怪白白围殴致死。超时站起后由 P0 顺畅接续威慑/逃脱自保链。
+            bool const fdTimeout = (CD_FEIGN_DEATH - feignDeathCooldown >= 1500);
+
+            if (fdTimeout || (!IsUnderPhysicalMelee(me) && !IsTopThreatTarget()))
                 me->RemoveAurasDueToSpell(MarksmanshipHunterSpells::FEIGN_DEATH);
 
             return;
@@ -185,6 +198,21 @@ public:
         // 第二参数传 false 绝不开启近战追击 (CONTEXT.md 铁律)。
         if (me->GetVictim() != victim)
             me->Attack(victim, false);
+
+        // ---- 自动射击通道维持 (远程白字与蝰蛇守护回蓝的唯一来源) ----
+        // 自动射击属 CURRENT_AUTOREPEAT_SPELL 循环通道，不占公共冷却，
+        // 故 CanCast 必须传 checkGcd = false，否则会被 GCD 门禁整轮拦截。
+        // 生效区间与射击循环一致：仅 8 ~ 35 码内维持，近战盲区交由 P4 垫刀处理。
+        {
+            float const autoShotDist = me->GetDistance(victim);
+            if (autoShotDist >= MELEE_BLIND_DIST && autoShotDist <= MAX_ENGAGE_DIST &&
+                !me->GetCurrentSpell(CURRENT_AUTOREPEAT_SPELL))
+            {
+                uint32 const autoShot = GetAppropriateRank(MarksmanshipHunterSpells::AUTO_SHOT, false);
+                if (autoShot && CanCast(victim, autoShot, false))
+                    me->CastSpell(victim, autoShot, false);
+            }
+        }
 
         // ---- P0: 极限自保与仇恨控制 (维度 C 仇恨协同) ----
         if (TrySurvivalAndThreat(victim)) return;
@@ -784,8 +812,15 @@ private:
             return;
         }
 
-        // ---- B. 近战盲区 (< 8 码)：向坦克背身位撤离，借坦克 AoE 仇恨把小怪拉走 ----
-        if (dist < MELEE_BLIND_DIST)
+        // ---- 撤退迟滞门禁 ----
+        // 进入撤退沿用 MELEE_BLIND_DIST (8 码)，退出撤退必须恢复到 RETREAT_EXIT_DIST (15 码)。
+        // 严禁拆除 isRetreatingToTank 这一自我粘滞条件：它是迟滞状态的载体，
+        // 一旦在脱离 8 码的瞬间就被清空，撤退姿态会与立定分支每帧交替触发，
+        // 表现为随从在原地反复起步/刹停的抽搐，且永远无法进入稳定射击窗口。
+        bool const needsRetreat = (dist < MELEE_BLIND_DIST) || (isRetreatingToTank && dist < RETREAT_EXIT_DIST);
+
+        // ---- B. 近战盲区 / 尚未拉足安全距离：向坦克背身位撤离，借坦克 AoE 仇恨把小怪拉走 ----
+        if (needsRetreat)
         {
             Unit* tank = GetGroupTank();
             bool const canAnchorTank = (tank && tank != me && tank != victim && tank->IsAlive() &&
