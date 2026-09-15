@@ -782,20 +782,34 @@ private:
 
     bool TryMutilate(Unit* victim)
     {
-        // 主力产星：毁伤 (40 级天赋，双持匕首双段打击，命中 +2 星)
-        uint32 const mutilate = GetAppropriateRank(AssassinationRogueSpells::MUTILATE, true);
-        if (mutilate && CanCast(victim, mutilate, true) && ExecuteSpell(victim, mutilate, true))
-        {
-            // 毁伤为双持双段打击，命中即产 2 星 (上限 5 星由基类状态机钳制)
-            AddComboPoints(victim, 2);
+        // 毁伤属天赋技能，DBC 中 SpellLevel 恒为 0，GetAppropriateRank 不会因等级而降阶，
+        // 低等级下依旧会返回最高 Rank 的 ID。故必须显式按天赋契约等级门禁判定是否已习得，
+        // 否则 40 级以下会误判为「已习得毁伤」，永久 CanCast 失败而彻底不产星。
+        bool const hasMutilate = (me->GetLevel() >= GetTalentSpellMinLevel(AssassinationRogueSpells::MUTILATE));
+        uint32 const mutilate = hasMutilate ? GetAppropriateRank(AssassinationRogueSpells::MUTILATE, true) : 0;
 
-            // 双持打击同样触发武器毒药结算
-            ProcPoisons(victim);
-            return true;
+        if (mutilate)
+        {
+            // 40 级及以上已习得毁伤：唯一指定产星技，能量不足时原地等待回能，
+            // 绝不降级施放邪恶攻击 —— 降级会以低效填充偷跑本该留给毒伤终结技的能量，
+            // 使 4~5 星挂起攒能机制形同虚设。
+            if (!CanCast(victim, mutilate, true))
+                return false;
+
+            if (ExecuteSpell(victim, mutilate, true))
+            {
+                // 毁伤为双持双段打击，命中即产 2 星 (上限 5 星由基类状态机钳制)
+                AddComboPoints(victim, 2);
+
+                // 双持打击同样触发武器毒药结算
+                ProcPoisons(victim);
+                return true;
+            }
+
+            return false;
         }
 
-        // 40 级前未习得毁伤 (或被底层拒绝)：降级邪恶攻击产星，
-        // 保证任何等级段的连击点循环都不出现断层。
+        // 仅在 40 级前未习得毁伤（mutilate 为 0）时，才允许使用邪恶攻击过渡产星
         uint32 const sinisterStrike = GetAppropriateRank(AssassinationRogueSpells::SINISTER_STRIKE, false);
         if (!sinisterStrike || !CanCast(victim, sinisterStrike, true))
             return false;
