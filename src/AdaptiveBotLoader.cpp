@@ -20,6 +20,7 @@ void AddSC_bot_arcane_mage();
 void AddSC_bot_retribution_paladin();
 void AddSC_bot_fury_warrior();
 void AddSC_bot_affliction_warlock();
+void AddSC_bot_balance_druid();
 
 // 模块总入口：函数名必须严格匹配 "Add" + 模块目录名(连字符变下划线) + "Scripts"
 void Addmod_adaptive_botScripts()
@@ -39,4 +40,5 @@ void Addmod_adaptive_botScripts()
     AddSC_bot_retribution_paladin();
     AddSC_bot_fury_warrior();
     AddSC_bot_affliction_warlock();
+    AddSC_bot_balance_druid();
 }
