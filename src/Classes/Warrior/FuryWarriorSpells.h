@@ -14,7 +14,7 @@
 // 供 BotFuryWarriorAI.cpp 以 FuryWarriorSpells::XXX 形式引用。
 //
 // 等级门禁约定（配合 AdaptiveBotAI::GetTalentSpellMinLevel / GetAppropriateRank）：
-//   - 纯天赋技能（血之狂热、乱舞、无尽怒气、泰坦之握、暴怒）DBC SpellLevel 恒为 0，
+//   - 纯天赋技能（血之狂热、重伤、乱舞、无尽怒气、泰坦之握、暴怒）DBC SpellLevel 恒为 0，
 //     必须在 GetTalentSpellMinLevel 注册并由 GetTalentRank 解析，否则低等级随从会
 //     持续尝试施放最高 Rank 而空转烧 GCD。
 //   - 训练师基础技能（嗜血、旋风斩、斩杀、英勇打击、顺劈斩、鲁莽、死亡之愿、
@@ -67,6 +67,7 @@ namespace FuryWarriorSpells
     constexpr uint32 AURA_BLOODSURGE         = 46916;   // 血涌触发光环：下一次猛击瞬发
     constexpr uint32 BLOODSURGE              = 46915;   // 血涌天赋 (Rank 3)：暴击触发的被动根源
     constexpr uint32 FLURRY                  = 16282;   // 乱舞：暴击后叠加 5 层攻速提升
+    constexpr uint32 DEEP_WOUNDS             = 12867;   // 重伤 Rank 3：暴击附带 48% 武器伤害流血 DoT
     constexpr uint32 RAMPAGE                 = 29801;   // 暴怒：击杀后叠加 AP 增益
     constexpr uint32 UNENDING_FURY           = 29632;   // 无尽怒气：击杀后回怒
     constexpr uint32 TITANS_GRIP             = 46917;   // 泰坦之握：双持双手武器

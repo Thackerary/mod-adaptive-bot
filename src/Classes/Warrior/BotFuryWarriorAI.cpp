@@ -64,7 +64,7 @@ class BotFuryWarriorAI : public AdaptiveBotAI
     // 血线与阶段阈值
     // =========================================================================
     static constexpr float ENRAGED_REGENERATION_HP_PCT = 30.0f;  // 狂暴回复自救血线
-    static constexpr float BURST_TARGET_HP_PCT         = 50.0f;  // 目标高血量爆发窗口
+    static constexpr float BURST_TARGET_HP_PCT         = 20.0f;  // 目标爆发窗口下限
     static constexpr float EXECUTE_PHASE_HP_PCT        = 20.0f;  // 斩杀期血线
 
     // 狂暴姿态解锁等级：低于该等级无狂暴姿态可用，回退战斗姿态
@@ -199,7 +199,7 @@ public:
         // ---- P2: 双爆发与拳击打断 (Off-GCD，顺下不 return) ----
         TryBurstAndInterrupt(victim);
 
-        // ---- P3: 狂暴 FCFS 打击循环 (斩杀 > 嗜血 > 旋风斩 > 血涌瞬发猛击) ----
+        // ---- P3: 狂暴 FCFS 打击循环 (嗜血 > 旋风斩 > 血涌瞬发猛击 > 斩杀填充) ----
         TryFuryRotation(victim);
 
         // ---- P3.5: 平砍队列控怒 (50 怒气门禁，on-next-swing 不占 GCD) ----
@@ -390,16 +390,13 @@ private:
             return false;
 
         // 激怒门禁前置：狂暴回复要求存在激怒状态，否则底层直接拒绝施法。
-        // 旧实现在施法失败后才补激怒，等于每帧都先空烧一次被拒绝的施法请求，
-        // 且与血性狂暴的当帧产怒互相挤占，既浪费诊断日志又拖慢急救响应。
-        // 故必须先判定激怒，缺失时只补前置并立即让出本帧决策流。
+        // 缺失激怒时当帧立刻补前置，并在同一帧内完成后续判定——
+        // 若在此 return false 让出决策流，当帧 P3 打击循环会立即把怒气压低，
+        // 下一帧狂暴回复便会因怒气不足 15 点被底层拒绝，随从当场被卡死在濒死血线。
         bool const hasEnrage = me->HasAura(FuryWarriorSpells::BERSERKER_RAGE) ||
                                me->HasAura(FuryWarriorSpells::BLOODRAGE);
-        if (!hasEnrage)
-        {
-            TryTriggerEnrage();
-            return false; // 等待激怒光环就绪，下一帧再吃狂暴回复
-        }
+        if (!hasEnrage && !TryTriggerEnrage())
+            return false;
 
         uint32 const enragedRegeneration = GetAppropriateRank(FuryWarriorSpells::ENRAGED_REGENERATION, false);
         if (enragedRegeneration && !me->HasAura(enragedRegeneration) &&
@@ -475,8 +472,10 @@ private:
         if (!battleShout)
             return false;
 
-        // 怒吼光环与施法法术共用同一 Rank ID，直接按该 Rank 判定存在性即可
-        if (me->HasAura(battleShout))
+        // 分阶光环判定：等级同步或团队中其他战士已挂低阶怒吼时，
+        // 若只按当前 Rank ID 精确匹配会判定为缺失并重复顶替，白白烧掉一次 GCD，
+        // 故按法术链全阶查询，任意 Rank 的同名怒吼均视为已覆盖。
+        if (me->GetAuraOfRankedSpell(FuryWarriorSpells::BATTLE_SHOUT))
             return false;
 
         if (!CanCast(me, battleShout, true))
@@ -766,6 +765,7 @@ private:
         SyncPassive(20, FuryWarriorSpells::GLYPH_OF_WHIRLWIND);     // 旋风斩雕文：旋风斩伤害 +10%
         SyncPassive(20, FuryWarriorSpells::GLYPH_OF_HEROIC_STRIKE); // 英勇打击雕文：英勇打击暴击率 +5%
         SyncPassive(30, FuryWarriorSpells::FLURRY);                 // 乱舞：暴击后叠加攻速
+        SyncPassive(30, FuryWarriorSpells::DEEP_WOUNDS);            // 重伤：暴击附带武器流血 DoT
         SyncPassive(40, FuryWarriorSpells::BLOODSURGE);             // 血涌：保障 46916 触发 (瞬发猛击解锁通道)
         SyncPassive(45, FuryWarriorSpells::UNENDING_FURY);          // 无尽怒气：击杀后回怒
         SyncPassive(50, FuryWarriorSpells::RAMPAGE);                // 暴怒：击杀后叠加 AP 增益
