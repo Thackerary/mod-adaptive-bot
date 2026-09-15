@@ -49,4 +49,5 @@ namespace BalanceDruidSpells
     constexpr uint32 GLYPH_OF_STARFIRE       = 54844;  // 星火雕文 (星火术延长月火持续时间 3s，最多叠加 9s)
     constexpr uint32 GLYPH_OF_STARFALL       = 54828;  // 星辰坠落雕文 (冷却缩短 30s)
     constexpr uint32 GLYPH_OF_INSECT_SWARM   = 54830;  // 虫群雕文 (虫群伤害 +30%，但不再降低目标命中)
+    constexpr uint32 IMPROVED_INSECT_SWARM   = 57849;  // 强化虫群 Rank 3 (目标有虫群时愤怒伤害 +3%，有月火时星火暴击 +3%)
 }

@@ -163,8 +163,10 @@ public:
         if (TryTyphoon(victim))
             return;
 
-        // 激活为纯回蓝大招，成功当帧顺下继续输出 (若占 GCD 由 gcdTimer 自然阻断后续施法)
-        TryInnervate();
+        // 激活占用 GCD：施放成功后必须交还决策流，由 gcdTimer 阻断本帧后续施法，
+        // 否则本帧会继续下发读条指令，造成「激活尚未落地就被读条顶替」的 GCD 空转。
+        if (TryInnervate())
+            return;
 
         // ---- P1: 形态维持 ----
         if (MaintainMoonkinForm())
@@ -179,11 +181,26 @@ public:
     }
 
 private:
+    // =========================================================================
+    // 日月蚀相位状态机
+    // -------------------------------------------------------------------------
+    // 双蚀空窗期必须沿用上一次退出的相位继续压制：若空窗期无脑切回愤怒读条，
+    // 星火术的暴击触发源将被永久掐断，日蚀终生无法触发，循环退化为纯愤怒填充。
+    // =========================================================================
+    enum EclipsePhase
+    {
+        PHASE_SEEKING_LUNAR,  // 以愤怒压制，等待愤怒暴击触发月蚀
+        PHASE_SEEKING_SOLAR   // 以星火术压制，等待星火暴击触发日蚀
+    };
+
     // 自管冷却登记
     uint32 starfallCooldown{ 0 };
     uint32 typhoonCooldown{ 0 };
     uint32 barkskinCooldown{ 0 };
     uint32 innervateCooldown{ 0 };
+
+    // 当前所处相位：驱动双蚀空窗期的填充技选择，Reset 时回落至月蚀搜索相位
+    EclipsePhase eclipsePhase{ PHASE_SEEKING_LUNAR };
 
     // 贴身撤离姿态标记：处于该姿态时必须凭此标记主动重发走位指令，
     // 否则会永久粘在坦克身后而无法恢复 25 码稳定施法窗口。
@@ -210,6 +227,7 @@ private:
         innervateCooldown = 0;
 
         isRetreatingToTank = false;
+        eclipsePhase = PHASE_SEEKING_LUNAR;
     }
 
     // =========================================================================
@@ -381,6 +399,11 @@ private:
         if (!typhoon)
             return false;
 
+        // 台风为正面锥形击退：起手前必须先把自身朝向锁定到威胁目标，
+        // 否则背身施放会出现「施法成功但锥形落空」的隐形浪费。
+        if (victim)
+            me->SetFacingToObject(victim);
+
         // 台风为以自身为原点的正面锥形击退光环，施法目标必须是自己，
         // 传 victim 会导致目标判定落空而静默失败。
         if (!CanCast(me, typhoon, true))
@@ -469,9 +492,10 @@ private:
         bool const hasSolar = me->HasAura(BalanceDruidSpells::AURA_ECLIPSE_SOLAR);
 
         // ---- 爆发底牌：星辰坠落 ----
-        // 瞬发自我光环增益，施放成功后必须当帧顺下继续读条输出，
-        // 绝不 return 抢占决策流，也绝不打断走位或等待通道。
-        TryUseStarfall(victim);
+        // 星辰坠落占用 GCD：施放成功后必须当帧交还决策流，
+        // 否则本帧会立刻下发读条指令，把刚起步的星落光环节奏直接顶掉。
+        if (TryUseStarfall(victim))
+            return true;
 
         // ---- DoT 维持 ----
         if (TryMaintainDots(victim, hasLunar, hasSolar))
@@ -544,16 +568,37 @@ private:
 
     bool TryEclipseArbitration(Unit* victim, bool hasLunar, bool hasSolar)
     {
-        // a) 月蚀生效：绝对优先读条星火术，吃满 +40% 星火暴击率
+        // a) 月蚀生效：绝对优先读条星火术，吃满 +40% 星火暴击率。
+        //    同时把相位切到「搜索日蚀」：月蚀结束后必须继续用星火术压制，
+        //    才能让星火暴击持续喂养日蚀触发源。
         if (hasLunar)
         {
+            eclipsePhase = PHASE_SEEKING_SOLAR;
+
             uint32 const starfire = GetAppropriateRank(BalanceDruidSpells::STARFIRE, false);
-            return TryCastSpell(victim, starfire, false);
+            uint32 const filler = starfire ? starfire : GetAppropriateRank(BalanceDruidSpells::WRATH, false);
+            return TryCastSpell(victim, filler, false);
         }
 
-        // b/c) 日蚀生效或双蚀皆无：以愤怒读条为主 ——
-        //     日蚀下吃满 +40% 愤怒增伤；平稳期则以愤怒暴击拉扯月蚀，
-        //     一旦月蚀触发，下一帧立即由上文分支切入星火术。
+        // b) 日蚀生效：全力读条愤怒吃满 +40% 增伤，并把相位切回「搜索月蚀」。
+        if (hasSolar)
+        {
+            eclipsePhase = PHASE_SEEKING_LUNAR;
+
+            uint32 const wrath = GetAppropriateRank(BalanceDruidSpells::WRATH, false);
+            return TryCastSpell(victim, wrath, false);
+        }
+
+        // c) 双蚀空窗期：必须严格沿用上一次退出的相位继续压制，严禁无脑切回愤怒。
+        //    若空窗期永远打愤怒，星火术的暴击触发源被彻底掐断，
+        //    【日月蚀】被动将终生只触发月蚀一侧，日蚀形同虚设。
+        if (eclipsePhase == PHASE_SEEKING_SOLAR)
+        {
+            uint32 const starfire = GetAppropriateRank(BalanceDruidSpells::STARFIRE, false);
+            if (starfire)
+                return TryCastSpell(victim, starfire, false);
+        }
+
         uint32 const wrath = GetAppropriateRank(BalanceDruidSpells::WRATH, false);
         return TryCastSpell(victim, wrath, false);
     }
@@ -671,6 +716,7 @@ private:
         SyncPassive(20, BalanceDruidSpells::GLYPH_OF_STARFIRE);     // 星火雕文：星火术延长月火 3s (最多 9s)
         SyncPassive(20, BalanceDruidSpells::GLYPH_OF_STARFALL);     // 星辰坠落雕文：冷却缩短 30s
         SyncPassive(20, BalanceDruidSpells::GLYPH_OF_INSECT_SWARM); // 虫群雕文：虫群伤害 +30%
+        SyncPassive(20, BalanceDruidSpells::IMPROVED_INSECT_SWARM); // 强化虫群：目标带虫群时愤怒增伤 / 带月火时星火暴击提升
     }
 };
 
