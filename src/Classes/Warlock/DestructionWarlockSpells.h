@@ -49,13 +49,13 @@ namespace DestructionWarlockSpells
     // 满阶被动天赋根源 (铁律 33: 严禁注入 DBC 默认 Rank 1 根源)
     // =========================================================================
     constexpr uint32 BACKDRAFT             = 47260;  // 爆燃 Rank 3 天赋根源 (燃烧触发极速施法)
-    constexpr uint32 FIRE_AND_BRIMSTONE    = 47249;  // 硫磺与烈火 Rank 5 天赋根源 (献祭使烧尽伤害 +10%, 混乱之箭暴击 +25%)
+    constexpr uint32 FIRE_AND_BRIMSTONE    = 47252;  // 硫磺与烈火 Rank 5 天赋根源 (献祭使烧尽伤害 +10%, 混乱之箭暴击 +25%, 47249 仅为 Rank 2)
     constexpr uint32 RUIN                  = 17959;  // 毁灭 Rank 5 (毁灭系法术暴击伤害 +100%)
     constexpr uint32 SHADOW_AND_FLAME      = 30293;  // 暗影与烈焰 Rank 5 (暗影箭/烧尽法伤加成 +20%, 目标暴击易伤)
     constexpr uint32 IMPROVED_IMMOLATE     = 17834;  // 强化献祭 Rank 3 (献祭伤害 +30%)
     constexpr uint32 EMBERSTORM            = 17958;  // 灰烬风暴 Rank 5 (火焰伤害 +10%, 烧尽读条时间缩短 10%)
     constexpr uint32 DESTRUCTIVE_REACH     = 17918;  // 毁灭延伸 Rank 2 (毁灭法术射程 +20%, 仇恨 -10%)
-    constexpr uint32 BANE                  = 17789;  // 灾祸 Rank 5 (暗影箭/混乱之箭/献祭读条缩短 0.5s)
+    constexpr uint32 BANE                  = 17792;  // 灾祸 Rank 5 (暗影箭/混乱之箭/献祭读条缩短 0.5s, 17789 仅为 Rank 2)
     constexpr uint32 BACKLASH              = 34939;  // 反冲 Rank 3 (暴击率 +3%)
     constexpr uint32 DEMONIC_AEGIS         = 30146;  // 恶魔庇护 Rank 3 (邪甲术效果提高 30%)
 

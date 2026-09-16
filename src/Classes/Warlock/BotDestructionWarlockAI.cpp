@@ -270,6 +270,20 @@ private:
     // =========================================================================
     // 战场态势判定器
     // =========================================================================
+    bool IsUnderPhysicalMelee(Unit* unit) const
+    {
+        if (!unit)
+            return false;
+
+        for (Unit* attacker : unit->getAttackers())
+        {
+            if (attacker && attacker->IsAlive() && attacker->GetMap() == me->GetMap() && attacker->IsWithinMeleeRange(unit))
+                return true;
+        }
+
+        return false;
+    }
+
     // 仇恨失控判定: 敌对单位越过主坦直接盯防随从本人, 即为 OT (维度 C 归因输入信号)
     bool IsTopThreatTarget()
     {
@@ -377,8 +391,11 @@ private:
     // =========================================================================
     bool TrySurvival(Unit* victim)
     {
-        // ---- 死亡缠绕: 濒死时瞬发惊骇拉开距离并回血 ----
-        if (deathCoilCooldown == 0 && victim && me->GetHealthPct() < DEATH_COIL_HP_PCT)
+        // ---- 死亡缠绕: 濒死或被物理近战压制时瞬发惊骇拉开距离并回血 ----
+        // 近战压制判定必不可少: 远程随从被贴身时血线往往仍高于 30%,
+        // 仅看血线会让死亡缠绕在真正需要脱身的那一刻被门禁挡下。
+        if (deathCoilCooldown == 0 && victim &&
+            (me->GetHealthPct() < DEATH_COIL_HP_PCT || IsUnderPhysicalMelee(me)))
         {
             uint32 const deathCoil = GetAppropriateRank(DestructionWarlockSpells::DEATH_COIL, false);
             if (deathCoil && CanCast(victim, deathCoil, true) && ExecuteSpell(victim, deathCoil, true))
@@ -471,16 +488,19 @@ private:
         if (!victim)
             return false;
 
-        // ---- 1. 诅咒分配 (curse 类别互斥, 只维持一种) ----
+        // ---- 1. 献祭: 燃烧 (Conflagrate) 的硬性机制前置与全技能增伤基石 (绝对第一优先级) ----
+        // 献祭同时承担三重职责: 燃烧的施放前置、爆燃 (Backdraft) 的触发源、
+        // 以及硫磺与烈火对烧尽/混乱之箭的增伤条件。任何一次断档都会让后续
+        // 整个核心循环链路失效, 故其补挂优先级必须高于诅咒与腐蚀术。
+        if (TryImmolate(victim))
+            return true;
+
+        // ---- 2. 诅咒分配 (curse 类别互斥, 只维持一种) ----
         if (TryCurse(victim))
             return true;
 
-        // ---- 2. 腐蚀术: 瞬发核心暗影 DoT ----
+        // ---- 3. 腐蚀术: 瞬发暗影 DoT 补充 ----
         if (TryCorruption(victim))
-            return true;
-
-        // ---- 3. 献祭: 燃烧 (Conflagrate) 的硬性机制前置 ----
-        if (TryImmolate(victim))
             return true;
 
         return false;
