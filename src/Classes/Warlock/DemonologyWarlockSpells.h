@@ -46,7 +46,7 @@ namespace DemonologyWarlockSpells
     constexpr uint32 SHADOW_AND_FLAME      = 30293;  // 暗影与烈焰 Rank 5 (暗影箭/烧尽法伤加成+20%, 目标暴击易伤)
     constexpr uint32 RUIN                  = 17959;  // 毁灭 Rank 5 (毁灭系法术暴击伤害 +100%)
     constexpr uint32 IMPROVED_IMMOLATE     = 17834;  // 强化献祭 Rank 3 (献祭伤害 +30%)
-    constexpr uint32 GLYPH_OF_LIFE_TAP     = 63321;  // 生命分流雕文 (生命分流激活法强)
+    constexpr uint32 GLYPH_OF_LIFE_TAP     = 56226;  // 生命分流雕文 (被动法术根源, 分流时触发 63321 法强光环)
     constexpr uint32 GLYPH_OF_METAMORPHOSIS = 56247; // 恶魔变形雕文 (变形持续时间延长 6s)
     constexpr uint32 GLYPH_OF_QUICK_DECAY  = 70669;  // 急速凋零雕文 (急速使腐蚀术周期缩短)
 }

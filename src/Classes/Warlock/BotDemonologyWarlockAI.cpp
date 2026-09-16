@@ -460,7 +460,9 @@ private:
         // 会对该非法能量索引执行 GetPower 读取, 存在读到邻域字段垃圾值并误判
         // 「能量不足」从而把分流永久阻断的风险。故此处彻底绕开通用施法通道,
         // 直接以引擎底层 CastSpell 直放, 并以自管蓝线/血线/GCD 三重门禁替代资源校验。
-        if (me->CastSpell(me, lifeTap, false) != SPELL_CAST_OK)
+        // 必须传 triggered = true: 非触发式通道仍会在底层执行 CheckPower 校验并越界读取
+        // POWER_HEALTH 字段, 只有触发式直放才能 100% 绕过能量与目标类型门禁。
+        if (me->CastSpell(me, lifeTap, true) != SPELL_CAST_OK)
             return false;
 
         gcdTimer = 1500;
@@ -486,6 +488,18 @@ private:
                 metamorphosisCooldown = CD_METAMORPHOSIS;
                 // 雕文适配: 基础 30s, 持【恶魔变形雕文】延长 6s, 用于形态有效性兜底结算
                 metamorphosisActiveTimer = GetMetamorphosisDurationMs();
+
+                // Creature 随从缺少雕文对底层光环时限的自动修饰: 雕文注入后变形光环
+                // 仍会按基础 30s 到期, 必须手工把持续时间与最大持续时间同步至 36s,
+                // 否则白白损失 6 秒爆发窗口与献祭光环的可用期。
+                if (Aura* meta = me->GetAura(DemonologyWarlockSpells::AURA_METAMORPHOSIS))
+                {
+                    if (me->HasAura(DemonologyWarlockSpells::GLYPH_OF_METAMORPHOSIS))
+                    {
+                        meta->SetDuration(36000);
+                        meta->SetMaxDuration(36000);
+                    }
+                }
             }
         }
 
@@ -506,8 +520,11 @@ private:
         if (immolationAuraCooldown == 0 && IsInMetamorphosis() &&
             me->GetDistance(victim) <= IMMOLATION_AURA_DIST)
         {
-            uint32 const immolationAura = GetAppropriateRank(DemonologyWarlockSpells::IMMOLATION_AURA, false);
-            if (immolationAura && CanCast(me, immolationAura, true) && ExecuteSpell(me, immolationAura, true))
+            // 献祭光环为变身期专属固定法术, 严禁走 GetAppropriateRank 降阶通道 ——
+            // 降阶会带回非变身期的低 Rank ID, 底层因形态/前置光环门禁直接拒放,
+            // 造成每帧空转重入且永远打不出近身反制伤害。
+            uint32 const immolationAura = DemonologyWarlockSpells::IMMOLATION_AURA;
+            if (CanCast(me, immolationAura, true) && ExecuteSpell(me, immolationAura, true))
                 immolationAuraCooldown = CD_IMMOLATION_AURA;
         }
     }
@@ -566,19 +583,24 @@ private:
         if (!victim)
             return false;
 
-        bool const useCurseOfDoom = IsEliteOrBossTarget(victim) && victim->GetHealthPct() > EXECUTE_HP_PCT;
+        // 若目标身上已有未爆炸的末日灾祸, 严禁覆盖 (防止末跳巨大伤害被吞)。
+        // 该门禁必须置于最前: 任何后续的末日/痛苦分支都会顶掉已累计的整段跳数,
+        // 且痛苦诅咒与末日灾祸同属 curse 类别, 互相施加必定覆盖。
+        if (GetOwnDotRemaining(victim, DemonologyWarlockSpells::CURSE_OF_DOOM) > 0)
+            return false;
 
+        uint32 const curseOfDoom = GetAppropriateRank(DemonologyWarlockSpells::CURSE_OF_DOOM, false);
+
+        // 等级自适应: 末日灾祸未习得 (未满 60 级) 时严禁进入该分支,
+        // 否则会取到非法/空法术 ID 造成每帧空转, 并让低等级随从彻底裸奔无诅咒。
+        bool const useCurseOfDoom = (curseOfDoom != 0) && IsEliteOrBossTarget(victim) &&
+                                    victim->GetHealthPct() > EXECUTE_HP_PCT;
+
+        // 末日灾祸为瞬发诅咒, 允许风筝跑动途中直接挂上, 严禁刹停丢机动性
         if (useCurseOfDoom)
-        {
-            // 防剪切门禁: 目标身上已存在自身施加的末日灾祸 (剩余 > 0) 时一律严禁补挂
-            if (GetOwnDotRemaining(victim, DemonologyWarlockSpells::CURSE_OF_DOOM) > 0)
-                return false;
+            return TryCastSpell(victim, curseOfDoom, true);
 
-            uint32 const curseOfDoom = GetAppropriateRank(DemonologyWarlockSpells::CURSE_OF_DOOM, false);
-            return TryCastSpell(victim, curseOfDoom, false);
-        }
-
-        // 痛苦诅咒为瞬发 DoT, 允许风筝跑动途中直接补挂, 严禁刹停丢机动性
+        // 痛苦诅咒为瞬发 DoT, 同样允许跑动中直接补挂
         uint32 const curseOfAgony = GetAppropriateRank(DemonologyWarlockSpells::CURSE_OF_AGONY, false);
         return TryMaintainDot(victim, DemonologyWarlockSpells::CURSE_OF_AGONY, curseOfAgony, CURSE_REFRESH_MS, true);
     }
@@ -603,7 +625,12 @@ private:
     // -------------------------------------------------------------------------
     bool TryImmolate(Unit* victim)
     {
-        if (isRetreating)
+        if (isRetreating || !victim)
+            return false;
+
+        // 斩杀期主动让路: 目标进入 35% 以下且【灭杀】光环在身时, 灵魂之火的单位时间伤害
+        // 与读条效率全面碾压献祭, 任何补献祭的读条窗口都是在偷跑斩杀伤害。
+        if (victim->GetHealthPct() <= EXECUTE_HP_PCT && me->HasAura(DemonologyWarlockSpells::AURA_DECIMATION))
             return false;
 
         uint32 const immolate = GetAppropriateRank(DemonologyWarlockSpells::IMMOLATE, false);
@@ -646,17 +673,20 @@ private:
     // -------------------------------------------------------------------------
     bool TryMoltenCoreIncinerate(Unit* victim)
     {
-        if (!victim)
-            return false;
-
-        if (!me->HasAura(DemonologyWarlockSpells::AURA_MOLTEN_CORE))
-            return false;
-
-        if (isRetreating)
+        if (!victim || !me->HasAura(DemonologyWarlockSpells::AURA_MOLTEN_CORE) || isRetreating)
             return false;
 
         uint32 const incinerate = GetAppropriateRank(DemonologyWarlockSpells::INCINERATE, false);
-        return TryCastSpell(victim, incinerate, false);
+        if (!TryCastSpell(victim, incinerate, false))
+            return false;
+
+        // 随从缺乏 Player 的 SpellModOwner 机制: 烧尽消费熔火之心充能的逻辑
+        // 由玩家的法术修饰器在施法成功时自动扣除, Creature 实体不会触发该回调。
+        // 若不手工剥层, 3 层充能会永久挂身, 使烧尽退化为无消耗的无限加速通道。
+        if (Aura* mc = me->GetAura(DemonologyWarlockSpells::AURA_MOLTEN_CORE))
+            mc->DropCharge();
+
+        return true;
     }
 
     // -------------------------------------------------------------------------
