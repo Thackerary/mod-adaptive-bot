@@ -549,11 +549,13 @@ private:
             return false;
 
         // ---- 召唤石像鬼: 3 分钟大招, 需 60 符能蓄水完成后一次性交出 ----
+        // 召唤石像鬼在 3.3.5a 为敌对目标法术 (TARGET_UNIT_TARGET_ENEMY, 30 码),
+        // 施法目标必须传 victim, 传入 me 会被底层目标类型校验 100% 拒绝
         if (summonGargoyleCooldown == 0 && HasTalent(UnholyDeathKnightSpells::SUMMON_GARGOYLE) &&
             me->GetPower(POWER_RUNIC_POWER) >= GARGOYLE_RUNIC_POWER_REQUIRED)
         {
-            if (CanCast(me, UnholyDeathKnightSpells::SUMMON_GARGOYLE, true) &&
-                ExecuteSpell(me, UnholyDeathKnightSpells::SUMMON_GARGOYLE, true))
+            if (CanCast(victim, UnholyDeathKnightSpells::SUMMON_GARGOYLE, true) &&
+                ExecuteSpell(victim, UnholyDeathKnightSpells::SUMMON_GARGOYLE, true))
             {
                 summonGargoyleCooldown = CD_SUMMON_GARGOYLE;
                 return true;
@@ -699,15 +701,9 @@ private:
         if (!deathCoil)
             return false;
 
-        // ---- 末日突降: 免费且零符能消耗, 绝对最高优先级消费 ----
-        if (me->HasAura(UnholyDeathKnightSpells::AURA_SUDDEN_DOOM))
-        {
-            if (CanCast(victim, deathCoil, true))
-                return ExecuteSpell(victim, deathCoil, true);
-
-            return false;
-        }
-
+        // 注: 严禁在此对 AURA_SUDDEN_DOOM (49530) 做 HasAura 门禁。该 ID 与天赋根源
+        // SUDDEN_DOOM 相同, 一旦被注入即为常驻光环, HasAura 恒真会让后续全部泄能
+        // 分支沦为空转死代码, 并造成符能只进不出的永久溢出死锁。
         uint32 const runicPower = me->GetPower(POWER_RUNIC_POWER);
 
         // ---- 防溢能硬阈值: 无论石像鬼是否临近都必须泄能, 严禁符能溢出浪费 ----
@@ -719,9 +715,10 @@ private:
             return false;
         }
 
-        // ---- 符能蓄水: 石像鬼即将就绪 (<=10s) 且不足以支付 60 符能时封锁常规泄能 ----
+        // ---- 符能蓄水: 石像鬼已就绪或即将就绪 (<=10s) 且不足以支付 60 符能时封锁常规泄能 ----
+        // 必须覆盖冷却已完毕 (== 0) 的状态: 此时蓄水尚未完成, 若放行常规缠绕
+        // 会把符能持续抽干, 导致石像鬼永远无法在 60 符能门槛下顺利交出。
         bool const gargoyleImminent = HasTalent(UnholyDeathKnightSpells::SUMMON_GARGOYLE) &&
-                                      summonGargoyleCooldown > 0 &&
                                       summonGargoyleCooldown <= GARGOYLE_STOCKPILE_WINDOW_MS;
 
         if (gargoyleImminent && runicPower < GARGOYLE_RUNIC_POWER_REQUIRED)
@@ -797,6 +794,11 @@ private:
         {
             bloodStrikeCooldown = BLOOD_STRIKE_COOLDOWN_MS;
 
+            // 随从无玩家天赋事件链, 底层不会自动结算荒芜的触发判定,
+            // 必须在鲜血打击命中后手工补挂 20 秒荒芜增益 (+5% 全伤害)。
+            if (me->GetLevel() >= LEVEL_DESOLATION)
+                me->AddAura(UnholyDeathKnightSpells::AURA_DESOLATION, me);
+
             // 鲜血打击消耗鲜血符文, 命中即产出 10 符能
             me->ModifyPower(POWER_RUNIC_POWER, RUNIC_POWER_PER_RUNE_STRIKE);
             return true;
@@ -865,14 +867,15 @@ private:
         };
 
         // ---- 满阶被动天赋根源注入 (严禁注入 Rank 1 导致触发率/数值缩水) ----
-        SyncPassive(LEVEL_DESOLATION, UnholyDeathKnightSpells::DESOLATION);
+        // 注: 严禁注入 DESOLATION (66803) 与 SUDDEN_DOOM (49530)。
+        // 二者均为 15~20 秒的触发型临时光环, 注入后会退化为永久常驻,
+        // 污染 HasAura 判定并让相关的 Proc 触发逻辑彻底失效。
         SyncPassive(LEVEL_EBON_PLAGUEBRINGER, UnholyDeathKnightSpells::EBON_PLAGUEBRINGER);
         SyncPassive(LEVEL_RAGE_OF_RIVENDARE, UnholyDeathKnightSpells::RAGE_OF_RIVENDARE);
         SyncPassive(LEVEL_IMPURITY, UnholyDeathKnightSpells::IMPURITY);
         SyncPassive(LEVEL_REAPING, UnholyDeathKnightSpells::REAPING);
         SyncPassive(LEVEL_NECROSIS, UnholyDeathKnightSpells::NECROSIS);
         SyncPassive(LEVEL_BLOOD_CAKED_BLADE, UnholyDeathKnightSpells::BLOOD_CAKED_BLADE);
-        SyncPassive(LEVEL_SUDDEN_DOOM, UnholyDeathKnightSpells::SUDDEN_DOOM);
         SyncPassive(LEVEL_MASTER_OF_GHOULS, UnholyDeathKnightSpells::MASTER_OF_GHOULS);
 
         // ---- 雕文补偿 ----

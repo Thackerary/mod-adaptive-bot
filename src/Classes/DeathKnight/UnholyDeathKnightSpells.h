@@ -50,7 +50,6 @@ namespace UnholyDeathKnightSpells
     // =========================================================================
     // 满阶被动天赋根源 (严禁注入 Rank 1, 铁律 33)
     // =========================================================================
-    constexpr uint32 DESOLATION          = 66803; // 荒芜 Rank 5 (鲜血打击 100% 触发荒芜增益光环)
     constexpr uint32 EBON_PLAGUEBRINGER  = 51161; // 黑色热疫使者 Rank 3 (疫病附加黑色热疫: +13% 受法伤, +30% 疾病伤害)
     constexpr uint32 RAGE_OF_RIVENDARE   = 50125; // 瑞文戴尔之怒 Rank 5 (对带病目标法术/技能伤害 +10%)
     constexpr uint32 IMPURITY            = 49638; // 不纯 Rank 5 (攻击强度对法术伤害加成提高 20%)
@@ -58,7 +57,6 @@ namespace UnholyDeathKnightSpells
     constexpr uint32 NECROSIS            = 51465; // 坏死 Rank 5 (普通攻击附加 20% 暗影伤害)
     constexpr uint32 BLOOD_CAKED_BLADE   = 51460; // 鲜血染红之刃 Rank 3 (近战命中 30% 几率触发血刃副攻击)
     constexpr uint32 MASTER_OF_GHOULS    = 52143; // 食尸鬼主宰 (使召唤物成为常驻随从)
-    constexpr uint32 SUDDEN_DOOM         = 49530; // 末日突降 Rank 3 天赋根源 (普攻/鲜血打击 15% 触发免费缠绕)
 
     // =========================================================================
     // 雕文补偿
