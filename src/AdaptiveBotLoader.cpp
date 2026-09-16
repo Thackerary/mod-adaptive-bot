@@ -11,6 +11,7 @@ void AddSC_bot_blood_death_knight();
 void AddSC_bot_frost_death_knight();
 void AddSC_bot_unholy_death_knight();
 void AddSC_bot_bear_druid();
+void AddSC_bot_feral_cat_druid();
 void AddSC_bot_holy_paladin();
 void AddSC_bot_discipline_priest();
 void AddSC_bot_holy_priest();
@@ -38,6 +39,7 @@ void Addmod_adaptive_botScripts()
     AddSC_bot_frost_death_knight();
     AddSC_bot_unholy_death_knight();
     AddSC_bot_bear_druid();
+    AddSC_bot_feral_cat_druid();
     AddSC_bot_holy_paladin();
     AddSC_bot_discipline_priest();
     AddSC_bot_holy_priest();
