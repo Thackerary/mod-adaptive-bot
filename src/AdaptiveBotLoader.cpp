@@ -19,6 +19,7 @@ void AddSC_bot_restoration_druid();
 void AddSC_bot_marksmanship_hunter();
 void AddSC_bot_assassination_rogue();
 void AddSC_bot_subtlety_rogue();
+void AddSC_bot_combat_rogue();
 void AddSC_bot_arcane_mage();
 void AddSC_bot_retribution_paladin();
 void AddSC_bot_fury_warrior();
@@ -44,6 +45,7 @@ void Addmod_adaptive_botScripts()
     AddSC_bot_marksmanship_hunter();
     AddSC_bot_assassination_rogue();
     AddSC_bot_subtlety_rogue();
+    AddSC_bot_combat_rogue();
     AddSC_bot_arcane_mage();
     AddSC_bot_retribution_paladin();
     AddSC_bot_fury_warrior();
