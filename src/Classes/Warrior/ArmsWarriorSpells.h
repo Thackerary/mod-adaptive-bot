@@ -15,7 +15,7 @@ namespace ArmsWarriorSpells
     constexpr uint32 MORTAL_STRIKE          = 47486;  // 致死打击 Rank 8 (40级纯天赋, 6s CD, -50%受疗)
     constexpr uint32 BLADESTORM             = 46924;  // 利刃风暴 (60级纯天赋, 6s持续旋风, 1.5m CD)
     constexpr uint32 SWEEPING_STRIKES       = 12292;  // 横扫攻击 (30级纯天赋, 下5次近战攻击伤害溅射, 30s CD)
-    constexpr uint32 OVERPOWER              = 7384;   // 压制 (血之气息触发或目标招架闪避后可用, 5怒气)
+    constexpr uint32 OVERPOWER              = 11585;  // 压制 Rank 4 (60级最高Rank, 附加35伤害)
     constexpr uint32 REND                   = 47465;  // 撕裂 Rank 10 (核心物理流血 DoT, 维持血之气息)
     constexpr uint32 EXECUTE                = 47471;  // 斩杀 Rank 9 (猝死触发或 <20% 核心打击)
     constexpr uint32 SLAM                   = 47475;  // 猛击 Rank 8 (强化猛击后 0.5s 读条填充)
