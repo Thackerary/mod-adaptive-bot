@@ -43,11 +43,12 @@ namespace ShadowPriestSpells
     // =========================================================================
     constexpr uint32 AURA_WEAKENED_SOUL  = 6788;   // 虚弱灵魂光环
     constexpr uint32 AURA_SHADOW_WEAVING = 15258;  // 暗影交织触发光环 (最高叠 5 层, 每层 +2% 暗伤)
-    constexpr uint32 SHADOW_WEAVING      = 15258;  // 暗影交织天赋 Rank 3 (100% 几率叠加, 被动根源注入用)
+    constexpr uint32 SHADOW_WEAVING      = 15332;  // 暗影交织 Rank 3 天赋根源 (100% 几率叠加暗影交织光环 15258)
     constexpr uint32 PAIN_AND_SUFFERING  = 47582;  // 苦修与磨难 Rank 3 (精神鞭笞 100% 刷新目标身上的暗言术：痛)
-    constexpr uint32 DARKNESS            = 15308;  // 黑暗 Rank 5 (暗影法术伤害 +10%)
-    constexpr uint32 SHADOW_POWER        = 33220;  // 暗影能量 Rank 5 (暗影法术暴击伤害加成 +100%)
-    constexpr uint32 MISERY              = 33195;  // 悲惨 Rank 3 (命中后目标受法术命中 +3%, 提高自身法强收益)
+    constexpr uint32 DARKNESS            = 15310;  // 黑暗 Rank 5 (暗影法术伤害 +10%)
+    constexpr uint32 SHADOW_POWER        = 33225;  // 暗影能量 Rank 5 (暗影法术暴击伤害加成 +100%)
+    constexpr uint32 MISERY              = 33193;  // 悲惨 Rank 3 天赋根源 (暗影法术使目标受到法术命中 +3%)
+    constexpr uint32 SHADOW_REACH        = 17325;  // 暗影延伸 Rank 2 (暗影射程 +20%，鞭笞由 20 码增至 24 码)
     constexpr uint32 GLYPH_OF_SHADOW     = 55689;  // 暗影雕文 (暗影形态下非持续性暗影暴击提升精神 30% 法强)
     constexpr uint32 GLYPH_OF_MIND_FLAY  = 55687;  // 精神鞭笞雕文 (目标有暗言术：痛时鞭笞伤害 +10%)
     constexpr uint32 GLYPH_OF_DISPERSION = 63229;  // 消散雕文 (消散冷却缩短 45s)

@@ -24,9 +24,9 @@ class BotShadowPriestAI : public AdaptiveBotAI
     static constexpr float MELEE_BLIND_DIST   = 8.0f;   // 近战盲区阈值：进入即触发贴身避难后撤
     static constexpr float RETREAT_EXIT_DIST  = 15.0f;  // 撤退迟滞退出线：必须严格大于 MELEE_BLIND_DIST
     static constexpr float TANK_RETREAT_DIST  = 15.0f;  // 锚定坦克背身位时的跟随距离 (必须 >= 迟滞退出线)
-    static constexpr float IDEAL_SHOT_DIST    = 20.0f;  // 理想施法站位：锚定精神鞭笞 20 码引导上限
-    static constexpr float MAX_ENGAGE_DIST    = 30.0f;  // 脱节上限：与触/震爆/痛 30 码射程严格对齐
-    static constexpr float MIND_FLAY_MAX_DIST = 20.0f;  // 精神鞭笞引导射程
+    static constexpr float IDEAL_SHOT_DIST    = 20.0f;  // 理想施法站位 (20 码)
+    static constexpr float MAX_ENGAGE_DIST    = 24.0f;  // 脱节上限：收敛至鞭笞射程 24 码，彻底根除发呆盲区
+    static constexpr float MIND_FLAY_MAX_DIST = 24.0f;  // 精神鞭笞作用上限 (24 码)
 
     // FollowMovementGenerator 的 angle 为「相对目标朝向的偏移」，引擎内部已叠加目标朝向。
     // 严禁自行叠加 victim->GetOrientation()，否则站位会随目标转向持续漂移。
@@ -718,6 +718,7 @@ private:
             }
         };
 
+        SyncPassive(PASSIVE_MIN_LEVEL,    ShadowPriestSpells::SHADOW_REACH);        // 暗影延伸：射程 +20%，鞭笞收敛上限与站位对齐
         SyncPassive(PASSIVE_MIN_LEVEL,    ShadowPriestSpells::SHADOW_WEAVING);      // 暗影交织：暗影增伤叠层来源
         SyncPassive(PAIN_SUFFERING_LEVEL, ShadowPriestSpells::PAIN_AND_SUFFERING);  // 苦修与磨难：鞭笞 100% 续订痛
         SyncPassive(PASSIVE_MIN_LEVEL,    ShadowPriestSpells::DARKNESS);            // 黑暗：暗影法术伤害提升
