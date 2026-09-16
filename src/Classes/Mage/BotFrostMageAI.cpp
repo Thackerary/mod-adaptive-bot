@@ -417,15 +417,19 @@ private:
         return false;
     }
 
-    // 目标冻结判定: 冰霜新星定身是深度冻结的唯一合法非触发前置。
-    // 必须使用分阶查询, 低 Rank 冰霜新星施加的定身同样要被识别,
-    // 否则低等级段深度冻结门禁恒假, 核心爆发直伤永久缺席。
+    // 全域冻结判定: 深度冻结的合法前置是「目标处于任何冻结/定身状态」,
+    // 因此必须覆盖团队与随从集群可产出的全部冻结来源, 而不仅限于自身冰霜新星。
+    // 自身冰霜新星使用分阶查询 (低 Rank 定身同样要被识别, 否则低等级段门禁恒假);
+    // 水元素冰冻 / 冰冻陷阱 / 冰霜新星 Rank 1 等由队友或环境施加的冻结需按原始 ID 直查。
     bool IsTargetFrozen(Unit* victim) const
     {
         if (!victim)
             return false;
 
-        return victim->GetAuraOfRankedSpell(FrostMageSpells::AURA_FROST_NOVA) != nullptr;
+        return (victim->GetAuraOfRankedSpell(FrostMageSpells::AURA_FROST_NOVA) != nullptr) ||
+               victim->HasAura(33395) ||   // 水元素: 冰冻 (Freeze)
+               victim->HasAura(3355)  ||   // 猎人: 冰冻陷阱 (Freezing Trap)
+               victim->HasAura(122);       // 冰霜新星 Rank 1 (低级/队友施加)
     }
 
     // =========================================================================
@@ -753,14 +757,27 @@ private:
         if (!hasFingersOfFrost && !IsTargetFrozen(victim))
             return false;
 
-        uint32 const deepFreeze = GetTalentRank(FrostMageSpells::DEEP_FREEZE);
-        if (!deepFreeze || !CanCast(victim, deepFreeze, true))
+        // 深度冻结对首领木桩 / Boss 拥有「免疫昏迷但照常结算伤害」的原生机制,
+        // 常规 CanCast 通道会依据免昏迷免疫判定把施法请求预阻断,
+        // 造成对首领战核心爆发直伤永久哑火。故在此以距离 + 视线预检替代 CanCast,
+        // 直接走 triggered = true 触发式直放, 绕过底层的免疫阻塞。
+        if (!me->IsWithinDist(victim, MAX_ENGAGE_DIST) || !me->IsWithinLOSInMap(victim))
             return false;
 
-        if (!ExecuteSpell(victim, deepFreeze, true))
+        uint32 const deepFreeze = GetTalentRank(FrostMageSpells::DEEP_FREEZE);
+        if (!deepFreeze)
+            return false;
+
+        me->SetFacingToObject(victim);
+
+        if (me->CastSpell(victim, deepFreeze, true) != SPELL_CAST_OK)
             return false;
 
         deepFreezeCooldown = CD_DEEP_FREEZE;
+
+        // 触发式直放不参与引擎 GCD 结算, 必须手工置位 1.5 秒公共冷却,
+        // 防止同一帧决策流顺下重复打卡与后续读条指令冲突。
+        gcdTimer = 1500;
 
         // 依赖寒冰指触发的场合必须显式消耗充能, 防止同一层光环被后续冰枪术重复白嫖
         if (hasFingersOfFrost)
@@ -1009,6 +1026,7 @@ private:
         SyncPassive(LEVEL_ARCTIC_WINDS, FrostMageSpells::ARCTIC_WINDS);                // 极寒之风 Rank 5: 冰霜法术伤害 +5%
         SyncPassive(LEVEL_WINTERS_CHILL, FrostMageSpells::WINTERS_CHILL);              // 深冬之寒 Rank 3: 冰系暴击易伤根源
         SyncPassive(LEVEL_PRECISION, FrostMageSpells::PRECISION);                      // 法术精准 Rank 3: 法术命中 +3%, 耗蓝 -3%
+        SyncPassive(25, FrostMageSpells::FROST_CHANNELING);                            // 冰霜导能 Rank 3: 冰霜法术耗蓝 -10%, 仇恨 -10%
 
         // ---- 雕文补偿 ----
         SyncPassive(LEVEL_GLYPH, FrostMageSpells::GLYPH_OF_FROSTBOLT);                 // 寒冰箭雕文: 寒冰箭伤害 +5%

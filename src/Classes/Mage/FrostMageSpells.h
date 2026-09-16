@@ -54,6 +54,7 @@ namespace FrostMageSpells
     constexpr uint32 EMPOWERED_FROSTBOLT     = 31683;  // 强化寒冰箭 Rank 2 (读条 -0.2s)
     constexpr uint32 WINTERS_CHILL           = 28595;  // 深冬之寒 Rank 3 天赋根源 (冰系暴击易伤)
     constexpr uint32 PRECISION               = 29440;  // 法术精准 Rank 3 (法术命中 +3%, 耗蓝 -3%)
+    constexpr uint32 FROST_CHANNELING        = 12531;  // 冰霜导能 Rank 3 (冰霜法术耗蓝 -10%, 仇恨 -10%)
     constexpr uint32 GLYPH_OF_FROSTBOLT      = 56370;  // 寒冰箭雕文 (寒冰箭伤害 +5%)
     constexpr uint32 GLYPH_OF_ICE_LANCE      = 56377;  // 冰枪术雕文 (对高等级目标伤害 +30%)
     constexpr uint32 GLYPH_OF_ETERNAL_WATER  = 70937;  // 永恒之水雕文 (备用, 当前阶段不下发)
