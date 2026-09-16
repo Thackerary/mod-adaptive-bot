@@ -746,13 +746,16 @@ private:
         return false;
     }
 
-    // 统计当前处于冷却中的核心自保技能数量
+    // 统计当前处于冷却中、可被伺机待发重置的核心技能数量
+    // 3.3.5a 伺机待发只重置：消失 / 闪避 / 暗影步 / 预谋
+    // (暗影斗篷不在重置列表内，统计时严禁计入，否则会因斗篷 CD 触发无效重置)
     uint32 CountActiveSurvivalCooldowns() const
     {
         uint32 count = 0;
-        if (vanishCooldown > 0)   ++count;
-        if (evasionCooldown > 0)  ++count;
-        if (cloakCooldown > 0)    ++count;
+        if (vanishCooldown > 0)        ++count;
+        if (evasionCooldown > 0)       ++count;
+        if (shadowstepCooldown > 0)    ++count;
+        if (premeditationCooldown > 0) ++count;
         return count;
     }
 
@@ -761,6 +764,12 @@ private:
     // =========================================================================
     void TryShadowDanceBurst(Unit* victim)
     {
+        // 潜行保护：起手潜行态下严禁误开影舞。
+        // 影舞本身提供 6/8 秒的「伪潜行」伏击窗口，而真实潜行已能施放伏击，
+        // 若在潜行中先开影舞，会白烧 1 分钟冷却且与起手窗口互相顶替，得不偿失。
+        if (IsStealthed())
+            return;
+
         if (!victim || !victim->IsAlive())
             return;
 
