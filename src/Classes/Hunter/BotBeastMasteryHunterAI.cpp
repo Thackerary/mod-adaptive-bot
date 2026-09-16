@@ -513,14 +513,19 @@ private:
             return;
 
         // ---- 胁迫: 目标正在读条/引导时的战术昏迷与压秒打断 (铁律 52) ----
+        // 注: 19577 仅为宠物突进触发层, 真正落到敌对目标身上的是昏迷效果 24394,
+        //     目标必须传 victim; 若对 victim 施放 19577 会被底层目标类型校验 100% 拒放,
+        //     导致打断链路永久空转死锁。
         if (intimidationCooldown == 0 && HasTalent(BeastMasteryHunterSpells::INTIMIDATION) &&
             IsInterruptibleTarget(victim))
         {
-            uint32 const intimidation = GetAppropriateRank(BeastMasteryHunterSpells::INTIMIDATION, true);
-            if (intimidation && CanCast(victim, intimidation, true) &&
-                ExecuteSpell(victim, intimidation, true))
+            if (CanCast(victim, BeastMasteryHunterSpells::INTIMIDATION_STUN, true) &&
+                ExecuteSpell(victim, BeastMasteryHunterSpells::INTIMIDATION_STUN, true))
             {
-                intimidationCooldown = CD_INTIMIDATION;
+                // 长寿 Rank 3 缩短 30% 冷却 (60s -> 42s)
+                intimidationCooldown = me->HasAura(BeastMasteryHunterSpells::LONGEVITY)
+                                     ? (CD_INTIMIDATION * 70 / 100)
+                                     : CD_INTIMIDATION;
             }
         }
 

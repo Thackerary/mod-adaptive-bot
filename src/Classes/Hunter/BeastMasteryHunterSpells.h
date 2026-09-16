@@ -30,7 +30,8 @@ namespace BeastMasteryHunterSpells
     constexpr uint32 BESTIAL_WRATH            = 19574;  // 狂野怒火 (纯天赋, 40级解锁, 基础120s CD)
     constexpr uint32 RAPID_FIRE               = 3045;   // 急速射击 (3m CD, +40%远程急速, Off-GCD)
     constexpr uint32 KILL_COMMAND             = 34026;  // 杀戮命令 (1m CD, 战术增伤)
-    constexpr uint32 INTIMIDATION             = 19577;  // 胁迫 (纯天赋, 30级解锁, 1m/42s CD, 战术昏迷/打断)
+    constexpr uint32 INTIMIDATION             = 19577;  // 胁迫 (纯天赋, 30级解锁, 1m/42s CD, 宠物突进并昏迷目标)
+    constexpr uint32 INTIMIDATION_STUN        = 24394;  // 胁迫昏迷效果 (对敌对目标生效, 3s 昏迷打断)
     constexpr uint32 MISDIRECTION             = 34477;  // 误导 (30s CD, 仇恨转移给主坦)
     constexpr uint32 FEIGN_DEATH              = 5384;   // 假死 (30s CD, 脱困清仇恨)
     constexpr uint32 DETERRENCE               = 19263;  // 威慑 (90s CD, 100%招架/偏斜硬减伤)
@@ -53,7 +54,7 @@ namespace BeastMasteryHunterSpells
     constexpr uint32 UNLEASHED_FURY           = 19620;  // 狂怒释放 Rank 5 (伤害加成)
     constexpr uint32 THE_BEAST_WITHIN         = 34692;  // 野兽之心天赋根源
     constexpr uint32 BEAST_MASTERY            = 53270;  // 野兽主宰 51点天赋根源
-    constexpr uint32 CAREFUL_AIM              = 34483;  // 仔细瞄准 Rank 3 (智力 100% 转化为攻强)
+    constexpr uint32 CAREFUL_AIM              = 34484;  // 仔细瞄准 Rank 3 (智力 100% 转化为攻强)
     constexpr uint32 MORTAL_SHOTS             = 53248;  // 致死射击 Rank 5 (远程技能暴击伤害 +30%)
     constexpr uint32 THRILL_OF_THE_HUNT       = 34499;  // 狩猎刺激 Rank 3 (技能暴击返还 40% 法力)
 
