@@ -672,10 +672,25 @@ private:
             return false;
 
         uint32 const pyroblast = GetAppropriateRank(FireMageSpells::PYROBLAST, false);
-        if (!pyroblast || !CanCast(victim, pyroblast, true))
+        if (!pyroblast)
             return false;
 
-        return ExecuteSpell(victim, pyroblast, true);
+        // Creature 缺乏玩家 SpellModOwner 机制: 【法术连击】的「瞬发且不耗蓝」修饰
+        // 无法被底层自动施加, 若走常规 CanCast / ExecuteSpell 通道,
+        // 引擎仍会按炎爆术的 5 秒基础读条与蓝耗进行校验, 造成持有光环却搓不出来的死锁。
+        // 故必须以 triggered = true 触发式直放, 彻底旁路读条与法力门禁。
+        me->SetFacingToObject(victim);
+        if (me->CastSpell(victim, pyroblast, true) != SPELL_CAST_OK)
+            return false;
+
+        // 底层同样不会因触发式施法自动剥离充能光环, 必须手工移除,
+        // 否则法术连击会永久挂身, 使炎爆退化为无限免读条连发并吞掉常规输出节奏。
+        me->RemoveAurasDueToSpell(FireMageSpells::AURA_HOT_STREAK);
+
+        // 触发式直放不参与引擎 GCD 结算, 必须手工置位 1.5 秒公共冷却,
+        // 防止同一帧决策流顺下重复打卡与后续读条指令冲突。
+        gcdTimer = 1500;
+        return true;
     }
 
     // -------------------------------------------------------------------------
@@ -719,19 +734,20 @@ private:
         if (!victim || !IsEliteOrBossTarget(victim))
             return false;
 
-        uint32 const scorch = GetAppropriateRank(FireMageSpells::SCORCH, false);
-        if (!scorch)
+        // 团队易伤去重 (团队共享同类法术命中/暴击易伤 Debuff, 不得按施法者归属切分):
+        // - 强化灼烧 (22959): 法师自身或队友法师的 5% 法术暴击易伤
+        // - 暗影与烈焰 (17800): 痛苦/恶魔术士的同类 5% 法术暴击易伤
+        // - 深冬之寒 (28595): 冰法的同类 5% 法术暴击易伤
+        // 任一存在即视为易伤已覆盖, 严禁再烧站桩读条窗口补挂。
+        if (victim->HasAura(FireMageSpells::AURA_IMPROVED_SCORCH) ||
+            victim->HasAura(17800) || victim->HasAura(28595))
             return false;
 
-        // 施法者归属鉴别: 必须确认目标身上挂的是「本随从自己施放」的灼烧易伤,
-        // 队友法师的易伤会被误认为已挂, 导致本随从终生不再补易伤, 增伤链路彻底失效。
-        Aura* const debuff = victim->GetAura(FireMageSpells::AURA_IMPROVED_SCORCH, me->GetGUID());
-        if (debuff && debuff->GetDuration() > SCORCH_REFRESH_WINDOW)
-            return false;
+        uint32 const scorch = GetAppropriateRank(FireMageSpells::SCORCH, false);
 
         // 施法资格必须先通过校验再刹停: CanCast 失败时提前立定,
         // 会让随从在重构走位期间被 StopMoving 每帧拉扯成原地抽搐。
-        if (!CanCast(victim, scorch, true))
+        if (!scorch || !CanCast(victim, scorch, true))
             return false;
 
         if (me->isMoving())
@@ -746,6 +762,8 @@ private:
     // 3.3.5a 龙息术为正面锥形判定, 完全依赖施法者当前朝向结算范围。
     // 随从在风筝撤离或贴坦避难时通常背对敌对目标, 若直接施放会导致锥形落空;
     // 必须在施放判定通过后显式调用 SetFacingToObject(victim) 锁定朝向再执行施法 (铁律 35)。
+    // 注: 龙息术是以施法者为原点的自身锥形法术 (TARGET_UNIT_CASTER),
+    //     目标类型校验会直接拒绝以 victim 为目标的施法请求, 故 CanCast/ExecuteSpell 必须传 me。
     // -------------------------------------------------------------------------
     bool TryDragonsBreath(Unit* victim)
     {
@@ -759,12 +777,12 @@ private:
             return false;
 
         uint32 const dragonsBreath = GetTalentRank(FireMageSpells::DRAGONS_BREATH);
-        if (!dragonsBreath || !CanCast(victim, dragonsBreath, true))
+        if (!dragonsBreath || !CanCast(me, dragonsBreath, true))
             return false;
 
         me->SetFacingToObject(victim);
 
-        if (ExecuteSpell(victim, dragonsBreath, true))
+        if (ExecuteSpell(me, dragonsBreath, true))
         {
             dragonsBreathCooldown = CD_DRAGONS_BREATH;
             return true;
@@ -804,7 +822,9 @@ private:
     // 火球术 (核心读条填充技)
     // -------------------------------------------------------------------------
     // 撤离途中严禁站桩读条: 走位与读条会互相打断形成原地抽搐。
-    // 距离低于安全站桩下限 (15 码) 时改以瞬发链路过渡, 等待站位回正。
+    // 注: 火球术射程为 0 ~ 35 码全域技能, 严禁在此叠加 MIN_ENGAGE_DIST 下限门禁 ——
+    //     8 ~ 15 码区间会让火球与火焰冲击 (仅撤离/斩杀放行) 双双失效,
+    //     形成「既不读条也不前压」的人造盲区呆滞死锁。
     // -------------------------------------------------------------------------
     bool TryFireball(Unit* victim)
     {
@@ -814,15 +834,10 @@ private:
         if (isRetreating)
             return false;
 
-        if (me->GetDistance(victim) < MIN_ENGAGE_DIST)
-            return false;
-
         uint32 const fireball = GetAppropriateRank(FireMageSpells::FIREBALL, false);
-        if (!fireball)
-            return false;
 
         // 施法资格必须先通过校验再刹停, 避免 CanCast 失败时被每帧 StopMoving 拉扯成抽搐
-        if (!CanCast(victim, fireball, true))
+        if (!fireball || !CanCast(victim, fireball, true))
             return false;
 
         if (me->isMoving())
