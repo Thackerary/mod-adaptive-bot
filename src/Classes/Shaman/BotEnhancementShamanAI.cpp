@@ -149,6 +149,12 @@ public:
         // =====================================================================
         MaintainMeleeBehindPositioning(victim);
         DoMeleeAttackIfReady();
+
+        // 漩涡武器白字叠层模拟必须紧随平砍结算之后, 且严格限定近战位:
+        // Creature 无武器临时附魔与 ProcFlag 事件回调, 且只有贴身时才真实产生
+        // 白字挥砍判定, 否则会退化为脱离近战也能叠层的伪实现。
+        if (me->IsWithinMeleeRange(victim))
+            SimulateMaelstromWeaponOnWhiteHit();
     }
 
 private:
@@ -256,6 +262,12 @@ private:
     uint32 totemRefreshTimer{ 0 };
     uint32 fireTotemTimer{ 0 };     // 火焰图腾存活模拟 (火焰新星与灼热/熔岩 DPS 依赖)
 
+    // 火焰图腾实际落点快照: 火焰新星以火焰图腾为原点结算 10 码范围爆破,
+    // 缺少落点会导致「随从在 A 点插图腾, 随后跑到 B 点对着空气放新星」的空爆抽搐。
+    float lastFireTotemX{ 0.0f };
+    float lastFireTotemY{ 0.0f };
+    float lastFireTotemZ{ 0.0f };
+
     // =========================================================================
     // 巡检计时器推进器
     // 返回 true 表示本轮周期已到并完成重置
@@ -294,9 +306,9 @@ private:
         Tick(totemRefreshTimer);
         Tick(fireTotemTimer);
 
-        // 漩涡武器白字命中模拟 (Creature 无武器附魔与 ProcFlag 事件回调)
-        if (me->IsInCombat())
-            SimulateMaelstromWeaponOnWhiteHit();
+        // 漩涡武器叠层模拟严禁挂载于此后台计时器: 白字挥砍只发生在近战位,
+        // 在远程撤离/风筝阶段凭空叠层会制造不存在的 5 层核弹。
+        // 该模拟必须下沉至 UpdateAI 末帧 DoMeleeAttackIfReady() 之后的近战位判定中。
     }
 
     void ResetEnhancementTimers()
@@ -358,7 +370,13 @@ private:
         if (!victim)
             return false;
 
+        // 压秒打断必须同时覆盖普通读条与长引导两类通道:
+        // 仅检测 CURRENT_GENERIC_SPELL 会漏断吸血/精神鞭笞/火雨等引导类灭团技,
+        // 造成风剪在 CD 内被白白浪费而敌方引导照常释放。
         Spell* casting = victim->GetCurrentSpell(CURRENT_GENERIC_SPELL);
+        if (!casting)
+            casting = victim->GetCurrentSpell(CURRENT_CHANNELED_SPELL);
+
         if (!casting)
             return false;
 
@@ -625,7 +643,12 @@ private:
             totemCastCooldown = TOTEM_CAST_INTERVAL;
 
             if (casted)
+            {
                 fireTotemTimer = multiTarget ? FIRE_TOTEM_DURATION_MAGMA : FIRE_TOTEM_DURATION_SEARING;
+                lastFireTotemX = me->GetPositionX();
+                lastFireTotemY = me->GetPositionY();
+                lastFireTotemZ = me->GetPositionZ();
+            }
 
             return casted;
         }
@@ -685,6 +708,9 @@ private:
         {
             fireTotemTimer = IsMultiTargetFireTotem() ? FIRE_TOTEM_DURATION_MAGMA
                                                       : FIRE_TOTEM_DURATION_SEARING;
+            lastFireTotemX = me->GetPositionX();
+            lastFireTotemY = me->GetPositionY();
+            lastFireTotemZ = me->GetPositionZ();
         }
 
         // 无论成败均推进游标并压上节流: 施法失败 (缺法力/被控) 时若原地重试,
@@ -791,10 +817,21 @@ private:
         if (!maelstrom || maelstrom->GetStackAmount() < MAX_MAELSTROM_STACKS)
             return false;
 
-        // 周围敌人 >= 2 打闪电链, 单体打闪电箭
-        uint32 const nukeSpellId = GetAppropriateRank(IsMultiTargetFireTotem()
-                                                          ? EnhancementShamanSpells::CHAIN_LIGHTNING
-                                                          : EnhancementShamanSpells::LIGHTNING_BOLT, false);
+        // 周围敌人 >= 2 优先闪电链 (多目标收益), 但必须做降级兜底:
+        // 低等级尚未习得闪电链, 或多个萨满随从共享同一法术 CD 时,
+        // 若因多目标判定而硬走闪电链通道, CanCast 失败会让随从满 5 层原地发呆,
+        // 核弹通道被彻底堵死。必须平滑回退至单体闪电箭。
+        uint32 nukeSpellId = 0;
+        if (IsMultiTargetFireTotem())
+        {
+            uint32 const chainLightning = GetAppropriateRank(EnhancementShamanSpells::CHAIN_LIGHTNING, false);
+            if (chainLightning && CanCast(victim, chainLightning, true))
+                nukeSpellId = chainLightning;
+        }
+
+        if (!nukeSpellId)
+            nukeSpellId = GetAppropriateRank(EnhancementShamanSpells::LIGHTNING_BOLT, false);
+
         if (!nukeSpellId || !CanCast(victim, nukeSpellId, true))
             return false;
 
@@ -881,6 +918,12 @@ private:
             return false;
 
         if (!HasActiveFireTotem())
+            return false;
+
+        // 火焰新星以火焰图腾为原点结算 10 码范围爆破, 必须校验目标是否仍处于
+        // 图腾爆炸半径内: 随从插完图腾后追击跑远时, 目标已被甩出爆破圈,
+        // 此时施放纯属空烧 10 秒 CD 且白占一个 GCD。
+        if (victim->GetDistance(lastFireTotemX, lastFireTotemY, lastFireTotemZ) > 10.0f)
             return false;
 
         uint32 const fireNova = GetAppropriateRank(EnhancementShamanSpells::FIRE_NOVA, false);
