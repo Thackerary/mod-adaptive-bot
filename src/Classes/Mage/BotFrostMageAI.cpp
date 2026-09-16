@@ -435,8 +435,12 @@ private:
     // =========================================================================
     // 寒冰指充能扣减器 (铁律 10: 充能型 Buff 必须按剩余层数结算, 严禁整层移除)
     // -------------------------------------------------------------------------
-    // 寒冰指为 2 层充能型光环, 每次消费必须只扣一层并重挂剩余层数。
-    // 若整层移除, 每次消耗都会把第二发冰枪术/深度冻结的触发资格一并白扔。
+    // 寒冰指为 2 层充能型光环, 每次消费必须只扣一层并保留原生剩余时间。
+    //
+    // 严禁采用「RemoveAurasDueToSpell 彻底移除 + SetAuraStack 重挂」的实现:
+    // 重挂等于重新施加一次全新光环, 光环持续时间会被无条件刷新回满额 15 秒,
+    // 使寒冰指实际覆盖时长被成倍拉长, 触发链路的资源与暴击期望全面失真。
+    // 必须直接在既有 Aura 对象上原地削减层数, 光环 tick 计时器保持不动。
     // =========================================================================
     void ConsumeFingersOfFrostCharge()
     {
@@ -444,13 +448,16 @@ private:
         if (!aura)
             return;
 
-        uint32 const currentStacks = aura->GetStackAmount();
-        uint32 const remaining = (currentStacks > 1) ? (currentStacks - 1) : 0;
-
-        me->RemoveAurasDueToSpell(FrostMageSpells::AURA_FINGERS_OF_FROST);
-
-        if (remaining > 0)
-            me->SetAuraStack(FrostMageSpells::AURA_FINGERS_OF_FROST, me, remaining);
+        if (aura->GetStackAmount() > 1)
+        {
+            // 原地扣层: 仅削减 StackAmount, 不触碰光环持续时间与 tick 计时
+            aura->SetStackAmount(aura->GetStackAmount() - 1);
+        }
+        else
+        {
+            // 最后一层才整层摘除, 此时本就不存在需要保留的剩余时间
+            me->RemoveAurasDueToSpell(FrostMageSpells::AURA_FINGERS_OF_FROST);
+        }
     }
 
     // =========================================================================
@@ -693,8 +700,18 @@ private:
     }
 
     // 急速冷却门禁统计器: 统计项必须与 TryBurstCooldowns 中的清零列表完全一致 (铁律 41)
+    // -------------------------------------------------------------------------
+    // 冰脉爆发期硬性封锁 (铁律 8 时序对齐): 随从起手时冰冷血脉与急速冷却往往同帧全部就绪,
+    // 若放行急速冷却, 它会在冰脉光环刚亮起的当帧把 icyVeinsCooldown 直接清零,
+    // 使这张 8 分钟底牌被起手秒吞, 且重置收益为零 (冰脉 20 秒窗口内 CD 本就不会自然走完)。
+    // 必须等冰脉光环完整结束后再交急速冷却, 才能实打实白嫖一整轮冰脉爆发窗口。
+    // -------------------------------------------------------------------------
     bool HasResettableFrostCooldown() const
     {
+        // 身上仍在冰脉爆发期严禁重置, 必须等冰脉光环结束后再交急速冷却
+        if (me->HasAura(FrostMageSpells::AURA_ICY_VEINS))
+            return false;
+
         return icyVeinsCooldown > 0 || deepFreezeCooldown > 0 ||
                frostNovaCooldown > 0 || iceBlockCooldown > 0;
     }
