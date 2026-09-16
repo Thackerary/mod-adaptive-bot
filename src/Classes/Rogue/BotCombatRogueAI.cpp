@@ -184,8 +184,12 @@ public:
         if (TryTricksOfTheTrade())
             return;
 
-        // ---- P2: 爆发大招时序 (Off-GCD，严禁 return true，必须当帧顺下) ----
+        // ---- P2: 爆发大招时序 (Off-GCD，当帧顺下) ----
         TryBurstCooldowns(victim);
+
+        // ---- P2.5: 杀戮盛宴 (大招飞斩，成功施放当帧 return 杜绝走位打断) ----
+        if (TryKillingSpree(victim))
+            return;
 
         // ---- P3: 核心打击与终结技优先级 ----
         if (TryCoreRotation(victim))
@@ -582,27 +586,48 @@ private:
             }
         }
 
-        // ---- 杀戮盛宴：飞斩无敌期，开启门禁极其严苛 ----
-        // 1) 必须已进入近战攻击与贴身 4 码；
-        // 2) 能量 <= 35：飞斩期间随从无法主动施法，若满能量交出会把整段回能全部浪费溢出；
-        // 3) 严禁与冲动光环并存：两者回能叠加会瞬间击穿能量上限，且飞斩期间冲动时长被白白烧掉。
-        if (killingSpreeCooldown == 0 &&
-            !me->HasAura(CombatRogueSpells::AURA_KILLING_SPREE) &&
-            !me->HasAura(CombatRogueSpells::AURA_ADRENALINE_RUSH) &&
-            me->GetVictim() == victim &&
-            me->GetDistance(victim) <= KILLING_SPREE_DIST &&
-            me->GetPower(POWER_ENERGY) <= KS_MAX_ENERGY)
-        {
-            uint32 const killingSpree = GetAppropriateRank(CombatRogueSpells::KILLING_SPREE, true);
-            if (killingSpree && CanCast(victim, killingSpree, true) && ExecuteSpell(victim, killingSpree, true))
-                killingSpreeCooldown = GetKillingSpreeCooldown();
-        }
     }
 
     // 杀戮盛宴冷却动态结算：插有雕文时由 120s 缩短至 75s
     uint32 GetKillingSpreeCooldown() const
     {
         return me->HasAura(CombatRogueSpells::GLYPH_OF_KILLING_SPREE) ? CD_KILLING_SPREE_GLYPH : CD_KILLING_SPREE;
+    }
+
+    // =========================================================================
+    // P2.5: 杀戮盛宴 (飞斩无敌大招)
+    // -------------------------------------------------------------------------
+    // 必须独立于爆发时序处理：飞斩期间随从进入引擎托管位移状态，
+    // 若与冲动/剑刃乱舞的 Off-GCD 顺下混在同一帧，极易在飞斩起手同帧下发
+    // MoveFollow 或平砍指令，造成大招被打断或位移互相污染。
+    // 因此施放成功必须当帧 return，由调用方独占整帧控制权。
+    // =========================================================================
+    bool TryKillingSpree(Unit* victim)
+    {
+        if (killingSpreeCooldown > 0 || !victim || !victim->IsAlive())
+            return false;
+
+        if (me->HasAura(CombatRogueSpells::AURA_KILLING_SPREE) ||
+            me->HasAura(CombatRogueSpells::AURA_ADRENALINE_RUSH))
+            return false;
+
+        // 能量 <= 35 防溢能：飞斩期间随从无法主动施法，满能量交出会把整段回能全部浪费溢出。
+        // 严禁与冲动光环并存：两者回能叠加会瞬间击穿能量上限，且飞斩期间冲动时长被白白烧掉。
+        if (me->GetVictim() != victim || me->GetDistance(victim) > KILLING_SPREE_DIST ||
+            me->GetPower(POWER_ENERGY) > KS_MAX_ENERGY)
+            return false;
+
+        uint32 const killingSpree = GetAppropriateRank(CombatRogueSpells::KILLING_SPREE, true);
+        if (!killingSpree || !CanCast(victim, killingSpree, true))
+            return false;
+
+        if (ExecuteSpell(victim, killingSpree, true))
+        {
+            killingSpreeCooldown = GetKillingSpreeCooldown();
+            return true;
+        }
+
+        return false;
     }
 
     // =========================================================================
@@ -637,8 +662,10 @@ private:
             if (me->GetPower(POWER_ENERGY) < FINISHER_ENERGY)
                 return false;
 
-            if (TryFinisher(victim))
-                return true;
+            // 产星通道彻底锁死：达到 4 星门禁后必须无条件交由终结技处置，
+            // 严禁 fall through 到下方邪恶攻击分支，否则会出现「4 星还在搓星」的
+            // 连击点溢出与终结技被推迟一整轮回能的塌方事故。
+            return TryFinisher(victim);
         }
 
         // ---- 3. 产星填充 ----
@@ -752,6 +779,16 @@ private:
             uint32 const instantPoison = GetAppropriateRank(CombatRogueSpells::INSTANT_POISON, false);
             if (instantPoison)
                 me->CastSpell(victim, instantPoison, true);
+        }
+
+        // ---- C. 战斗潜能：副手白字命中几率回复 15 能量 ----
+        // Creature 无玩家副手武器与 ProcFlag 事件通道，底层天赋永不触发，
+        // 必须与毒药共用同一节流窗口手工补偿回能，否则能量循环持续性塌陷，
+        // 4~5 星终结技攒能挂起会被无限拉长。
+        if (me->HasAura(CombatRogueSpells::COMBAT_POTENCY) && urand(0, 99) < 20)
+        {
+            if (me->GetPower(POWER_ENERGY) < me->GetMaxPower(POWER_ENERGY))
+                me->ModifyPower(POWER_ENERGY, 15);
         }
     }
 
