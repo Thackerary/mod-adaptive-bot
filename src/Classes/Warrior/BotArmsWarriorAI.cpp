@@ -163,8 +163,17 @@ public:
         if (me->HasAura(ArmsWarriorSpells::BLADESTORM))
         {
             Unit* spinTarget = me->GetVictim();
-            if (spinTarget && spinTarget->IsAlive() && spinTarget->IsInWorld() &&
-                spinTarget->GetMap() == me->GetMap() &&
+
+            // 转火纠正：若原目标在自转期内死亡/离场，必须当帧检索新目标切入，
+            // 否则 6 秒大招会全程对着尸体空转，整段爆发伤害归零。
+            if (!spinTarget || !spinTarget->IsAlive() || !spinTarget->IsInWorld() || spinTarget->GetMap() != me->GetMap())
+            {
+                spinTarget = SelectAssistTarget();
+                if (spinTarget && me->IsValidAttackTarget(spinTarget))
+                    me->Attack(spinTarget, true);
+            }
+
+            if (spinTarget && spinTarget->IsAlive() &&
                 me->GetMotionMaster()->GetCurrentMovementGeneratorType() != CHASE_MOTION_TYPE)
             {
                 me->GetMotionMaster()->MoveChase(spinTarget, MELEE_FOLLOW_DIST);
@@ -233,14 +242,23 @@ public:
         if (TryCharge(victim))
             return;
 
-        TryShatteringThrow(victim);
-        TrySweepingStrikes(victim);
+        if (TryShatteringThrow(victim))
+            return;
+
+        if (TrySweepingStrikes(victim))
+            return;
 
         if (TryBladestorm(victim))
             return;
 
         // ---- P3: 武器战核心打击 FCFS 循环 ----
-        TryArmsRotation(victim);
+        // 猛击为 0.5s 读条，命中后必须当帧交还决策流 (return)，
+        // 防止后续平砍队列与走位指令在同帧掐断读条。
+        if (TryArmsRotation(victim))
+        {
+            if (me->HasUnitState(UNIT_STATE_CASTING))
+                return;
+        }
 
         // ---- P3.5: 平砍队列控怒 (65 怒气门禁，on-next-swing 不占 GCD) ----
         TryRageDumpQueue(victim);
@@ -567,46 +585,63 @@ private:
     //   b) 首领目标尚未被我方护甲削弱易伤覆盖 (以其尚未携带任何 MOD_RESISTANCE_PCT
     //      护甲 Debuff 判定)，此时投掷可提供 20% 破甲爆发窗口。
     // =========================================================================
-    void TryShatteringThrow(Unit* victim)
+    bool TryShatteringThrow(Unit* victim)
     {
         if (shatteringThrowCooldown > 0 || !victim)
-            return;
+            return false;
 
         bool const breakImmunity = HasImmunityAura(victim);
         bool const bossNotVulnerable = IsBossTarget(victim) &&
                                        !victim->HasAuraTypeWithMiscvalue(SPELL_AURA_MOD_RESISTANCE_PCT, SPELL_SCHOOL_NORMAL);
 
         if (!breakImmunity && !bossNotVulnerable)
-            return;
+            return false;
 
         // 碎裂投掷为战斗姿态专属技能
         if (!me->HasAura(ArmsWarriorSpells::BATTLE_STANCE))
-            return;
+            return false;
 
         uint32 const shatteringThrow = GetAppropriateRank(ArmsWarriorSpells::SHATTERING_THROW, false);
-        if (shatteringThrow && CanCast(victim, shatteringThrow, true) &&
-            ExecuteSpell(victim, shatteringThrow, true))
-            shatteringThrowCooldown = CD_SHATTERING_THROW;
+        if (!shatteringThrow || !CanCast(victim, shatteringThrow, true))
+            return false;
+
+        // 非瞬发读条：CanCast 通过后才刹停立定 (铁律 7)，
+        // 严禁在 CanCast 之前 StopMoving，否则走位重构期会被每帧拉扯成原地抽搐。
+        if (me->isMoving())
+            me->StopMoving();
+
+        if (!ExecuteSpell(victim, shatteringThrow, true))
+            return false;
+
+        shatteringThrowCooldown = CD_SHATTERING_THROW;
+        return true;
     }
 
     // =========================================================================
     // P2: 横扫攻击 (多目标溅射增益)
     // =========================================================================
-    void TrySweepingStrikes(Unit* victim)
+    bool TrySweepingStrikes(Unit* victim)
     {
         if (sweepingStrikesCooldown > 0 || !victim)
-            return;
+            return false;
 
         if (CountNearbyEnemies(CLEAVE_RADIUS) < SWEEPING_MIN_TARGETS)
-            return;
+            return false;
 
         if (!me->HasAura(ArmsWarriorSpells::BATTLE_STANCE))
-            return;
+            return false;
 
         uint32 const sweepingStrikes = GetTalentRank(ArmsWarriorSpells::SWEEPING_STRIKES);
-        if (sweepingStrikes && !me->HasAura(sweepingStrikes) &&
-            CanCast(me, sweepingStrikes, true) && ExecuteSpell(me, sweepingStrikes, true))
-            sweepingStrikesCooldown = CD_SWEEPING_STRIKES;
+        if (!sweepingStrikes || me->HasAura(sweepingStrikes) || !CanCast(me, sweepingStrikes, true))
+            return false;
+
+        if (!ExecuteSpell(me, sweepingStrikes, true))
+            return false;
+
+        // 横扫攻击为瞬发增益技能，占 1.5s GCD：施放成功必须当帧交还决策流 (return true)，
+        // 交由 gcdTimer 阻断后续施法，严禁同帧顺下与读条指令冲突导致动作丢帧。
+        sweepingStrikesCooldown = CD_SWEEPING_STRIKES;
+        return true;
     }
 
     // =========================================================================
@@ -652,29 +687,29 @@ private:
     // =========================================================================
     // P3: 武器战核心打击 FCFS 循环 (First Come, First Served)
     // =========================================================================
-    void TryArmsRotation(Unit* victim)
+    bool TryArmsRotation(Unit* victim)
     {
         if (!victim)
-            return;
+            return false;
 
         // ---- 1. 撕裂：维持血之气息底座 (100% 触发压制可用) ----
         if (TryRend(victim))
-            return;
+            return true;
 
         // ---- 2. 致死打击：主力打击 + 创伤联动 (-50% 受疗) ----
         if (TryMortalStrike(victim))
-            return;
+            return true;
 
         // ---- 3. 压制：血之气息触发时立即打出 (极高暴击，低怒耗) ----
         if (TryOverpower(victim))
-            return;
+            return true;
 
         // ---- 4. 斩杀：猝死触发或目标低血线的核弹填充 ----
         if (TryExecute(victim))
-            return;
+            return true;
 
         // ---- 5. 猛击：核心打击双 CD 期间的读条填充 ----
-        TrySlam(victim);
+        return TrySlam(victim);
     }
 
     bool TryRend(Unit* victim)
@@ -903,6 +938,12 @@ private:
     void MaintainMeleeBehindPositioning(Unit* victim)
     {
         if (!victim || !victim->IsAlive() || !victim->IsInWorld() || victim->GetMap() != me->GetMap())
+            return;
+
+        // 读条守卫 (铁律 1)：猛击/碎裂投掷等读条期间严禁下发任何走位指令，
+        // 否则同帧的 MoveFollow/MoveChase 会把刚起手的读条当帧掐断，
+        // 表现为技能反复起手却永不落地、白烧 GCD 与怒气。
+        if (me->HasUnitState(UNIT_STATE_CASTING))
             return;
 
         me->SetFacingToObject(victim);
