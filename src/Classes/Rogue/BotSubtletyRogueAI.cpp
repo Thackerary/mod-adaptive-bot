@@ -57,9 +57,12 @@ class BotSubtletyRogueAI : public AdaptiveBotAI
     // 能量与连击点门禁
     static constexpr uint8  FINISHER_MIN_CP       = 4;      // 终结技最低连击点
     static constexpr uint32 FINISHER_ENERGY       = 35;     // 终结技支付门槛 (不足则原地挂起等能量)
-    static constexpr uint32 HEMORRHAGE_ENERGY     = 35;     // 出血耗能
-    static constexpr uint32 BACKSTAB_ENERGY       = 60;     // 背刺耗能
-    static constexpr uint32 SHADOW_DANCE_ENERGY   = 60;     // 影舞开启最低能量
+    // 耗能常量必须对齐满阶【暗影杀手】(背刺/伏击 -20, 出血 -5)：
+    // 否则能量门禁高于实际耗能，随从在能量已经足够时仍被判为「不足」而白白挂起。
+    static constexpr uint32 HEMORRHAGE_ENERGY     = 30;     // 出血耗能 (暗影杀手 -5)
+    static constexpr uint32 BACKSTAB_ENERGY       = 40;     // 背刺耗能 (暗影杀手 -20)
+    static constexpr uint32 AMBUSH_ENERGY         = 40;     // 伏击耗能 (暗影杀手 -20)
+    static constexpr uint32 SHADOW_DANCE_ENERGY   = 40;     // 影舞开启最低能量门槛
     static constexpr float  SHADOW_DANCE_MELEE    = 4.0f;   // 影舞开启所需近战距离
 
     // 刷新窗口
@@ -190,7 +193,9 @@ public:
         // ---- 盗贼的尊严 (Honor Among Thieves) 被动连击点模拟 ----
         // 底层 EffectAddComboPoints 仅对 Player 生效，随从必须自管回星，
         // 按 1000ms 节流稳定 +1 星，复现「团队暴击时每秒获取 1 连击点」的被动收益。
-        if (KnowsTalent(SubtletyRogueSpells::HONOR_AMONG_THIEVES) && honorAmongThievesTimer == 0)
+        // 直接按光环存在性判定：ApplyPassiveTalents 仅在 60 级注入该被动，
+        // 而 51701 的 DBC SpellLevel 恒为 0，走 KnowsTalent 会永远判定失败形成死代码。
+        if (me->HasAura(SubtletyRogueSpells::HONOR_AMONG_THIEVES) && honorAmongThievesTimer == 0)
         {
             honorAmongThievesTimer = 1000;
             AddComboPoints(victim, 1);
@@ -226,7 +231,14 @@ public:
         if (me->HasAura(SubtletyRogueSpells::AURA_SHADOW_DANCE))
         {
             if (TryShadowDanceRotation(victim))
+            {
+                // 影舞控能挂起 (return true) 会跳过帧末平砍驱动，而引擎不会自动驱动
+                // Creature 白字，攻击计时器负向累积将永久丢失该次挥砍与毒药结算。
+                // 故此处统一补驱动，保证「锁帧控能」与「白字不断档」二者兼得。
+                DoMeleeAttackIfReady();
+                ProcPoisons(victim);
                 return;
+            }
         }
 
         // ---- P3: 关键增幅终结技常驻维持 (切割) ----
@@ -724,9 +736,15 @@ private:
         }
 
         // ---- 伺机待发：脱困后一次性重置全部核心自保冷却 ----
+        // emergencyPrep：极度濒死且消失仍在冷却时立即重置消失救命。
+        // 若只保留 regularPrep 的安全血线门禁 (HP >= 50%)，濒死随从会因血线不达标
+        // 永远无法重置消失，形成「消失刚用完 -> 伺机待发放不出 -> 暴毙」的自保死锁。
+        bool const emergencyPrep = (me->GetHealthPct() < VANISH_HP_PCT && vanishCooldown > 0);
+        bool const regularPrep = (me->GetHealthPct() >= SAFE_HP_PCT && CountMeleeAttackers() <= 1 &&
+                                  CountActiveSurvivalCooldowns() >= 2);
+
         if (preparationCooldown == 0 && KnowsTalent(SubtletyRogueSpells::PREPARATION) &&
-            me->GetHealthPct() >= SAFE_HP_PCT && CountMeleeAttackers() <= 1 &&
-            CountActiveSurvivalCooldowns() >= 2)
+            (emergencyPrep || regularPrep))
         {
             uint32 const preparation = GetAppropriateRank(SubtletyRogueSpells::PREPARATION, true);
             if (preparation && !me->HasAura(preparation) && CanCast(me, preparation, true) && ExecuteSpell(me, preparation, true))
@@ -805,6 +823,17 @@ private:
         {
             shadowDanceCooldown = CD_SHADOW_DANCE;
 
+            // 暗影之舞雕文：原生仅作用于玩家法术修饰，随从必须手工把姿态时限延长至 8 秒，
+            // 否则爆发窗口比预期短 2 秒，白烧 1 分钟冷却却少打一轮伏击。
+            if (Aura* danceAura = me->GetAura(SubtletyRogueSpells::AURA_SHADOW_DANCE))
+            {
+                if (me->HasAura(SubtletyRogueSpells::GLYPH_OF_SHADOW_DANCE))
+                {
+                    danceAura->SetDuration(8000);
+                    danceAura->SetMaxDuration(8000);
+                }
+            }
+
             // 影舞为持续 6/8 秒的增益姿态，施放成功严禁 return true：
             // 必须允许当帧顺下，由 P2.5 立即消费预谋与伏击窗口。
         }
@@ -823,17 +852,27 @@ private:
         // 星数已达 4~5 星：立即刺骨消费连击点，防止溢星浪费伏击收益
         if (cp >= FINISHER_MIN_CP)
         {
-            // 能量不足则原地挂起等待回能，绝不用低效技能偷跑
+            // 能量不足则锁帧挂起等待回能。
+            // 此处必须 return true (而非 P3 常规循环的 return false)：
+            // 影舞分支之下紧接切割维持与 TryComboPointRotation，返回 false 会让决策流
+            // 顺下用出血/背刺把仅剩的能量抽干，直接偷跑掉本轮伏击窗口。
             if (me->GetPower(POWER_ENERGY) < FINISHER_ENERGY)
-                return false;
+                return true;
 
             if (TryEviscerate(victim))
                 return true;
         }
 
         // 背身位优先伏击：吃满敏锐大师与机遇的独立增伤乘数
-        if (IsBehindVictim(victim, MELEE_REACH_DIST) && TryAmbush(victim))
-            return true;
+        if (IsBehindVictim(victim, MELEE_REACH_DIST))
+        {
+            // 控能挂起：能量不足以支付伏击时坚决原地等待，
+            // 严禁降级打出血/背刺把能量泄空，导致整段影舞只打出一发低效产星技。
+            if (me->GetPower(POWER_ENERGY) < AMBUSH_ENERGY)
+                return true;
+
+            return TryAmbush(victim);
+        }
 
         // 未占住背后时交由 P4 走位找背，本帧交还控制权
         return false;
@@ -1033,6 +1072,17 @@ private:
         if (behind && TryBackstab(victim))
             return true;
 
+        // ---- 邪恶攻击兜底 (1~19 级 / 正面无出血 / 全局不可用) ----
+        // 20 级前尚未习得出血，且野外单刷时怪常盯防随从本人导致拿不到背身位，
+        // 若缺少本兜底，随从会全程站在正面发呆零产星，连击点循环永久瘫痪。
+        uint32 const ss = GetAppropriateRank(SubtletyRogueSpells::SINISTER_STRIKE, false);
+        if (ss && CanCast(victim, ss, true) && ExecuteSpell(victim, ss, true))
+        {
+            AddComboPoints(victim, 1);
+            ProcPoisons(victim);
+            return true;
+        }
+
         return false;
     }
 
@@ -1157,6 +1207,7 @@ private:
         SyncPassive(40, SubtletyRogueSpells::MASTER_OF_SUBTLETY);       // 敏锐大师 Rank 3：潜行及破潜后 6s 增伤 10%
         SyncPassive(45, SubtletyRogueSpells::FIND_WEAKNESS);            // 寻找弱点 Rank 3：终结技提升物理伤害 10%
         SyncPassive(50, SubtletyRogueSpells::SINISTER_CALLING);         // 险恶召唤 Rank 5：敏捷 +15%
+        SyncPassive(50, SubtletyRogueSpells::SLAUGHTER_FROM_THE_SHADOWS); // 暗影杀手 Rank 5：背刺/伏击耗能 -20，出血耗能 -5
         SyncPassive(60, SubtletyRogueSpells::HONOR_AMONG_THIEVES);      // 盗贼的尊严 Rank 3：团队暴击时 +1 星
         SyncPassive(60, SubtletyRogueSpells::GLYPH_OF_SHADOW_DANCE);    // 暗影之舞雕文：持续时间延长 2s
     }
