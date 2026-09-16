@@ -187,6 +187,15 @@ public:
             return;
         }
 
+        // ---- 盗贼的尊严 (Honor Among Thieves) 被动连击点模拟 ----
+        // 底层 EffectAddComboPoints 仅对 Player 生效，随从必须自管回星，
+        // 按 1000ms 节流稳定 +1 星，复现「团队暴击时每秒获取 1 连击点」的被动收益。
+        if (KnowsTalent(SubtletyRogueSpells::HONOR_AMONG_THIEVES) && honorAmongThievesTimer == 0)
+        {
+            honorAmongThievesTimer = 1000;
+            AddComboPoints(victim, 1);
+        }
+
         // 潜行起手窗口：破潜前不得开启近战追击与白字平砍，否则第一刀白字会提前破潜、
         // 直接吞掉伏击起手与敏锐大师增伤窗口；窗口最多持续 2 秒，超时强制转入常规近战。
         // 影舞期间严禁判定为潜行起手：暗影之舞是输出爆发姿态，必须放行平砍与技能顺下。
@@ -204,6 +213,10 @@ public:
 
         // ---- P0: 濒死自保与解控 (维度 C 协同) ----
         if (TrySurvivalAndUtility(victim))
+            return;
+
+        // ---- P1.5: 战时暗影步突进贴身 ----
+        if (TryCombatShadowstep(victim))
             return;
 
         // ---- P2: 爆发 (暗影之舞开启，Off-GCD 顺下) ----
@@ -256,6 +269,9 @@ private:
     // 毒药模拟巡检节流计时器
     uint32 poisonProcTimer{ 0 };
 
+    // 盗贼的尊严 (Honor Among Thieves) 模拟回星节流计时器
+    uint32 honorAmongThievesTimer{ 0 };
+
     // =========================================================================
     // 专精自管计时器维护
     // =========================================================================
@@ -271,6 +287,7 @@ private:
         Tick(cloakCooldown);
         Tick(preparationCooldown);
         Tick(poisonProcTimer);
+        Tick(honorAmongThievesTimer);
 
         // 潜行起手窗口：仅当「已潜行 且 已贴近起手距离」时才开始倒计时。
         // 若在赶路途中等比扣减，随从尚未走到目标背后窗口就已耗尽，
@@ -304,6 +321,7 @@ private:
 
         stealthOpenTimer = STEALTH_OPEN_WINDOW;
         poisonProcTimer = 0;
+        honorAmongThievesTimer = 0;
     }
 
     // =========================================================================
@@ -601,11 +619,12 @@ private:
         if (!IsStealthed() && !me->HasAura(SubtletyRogueSpells::AURA_SHADOW_DANCE))
             return false;
 
+        // 预谋的施法目标是 30 码内的敌对单位 (对自己施放会被底层直接拒绝)
         uint32 const premeditation = GetAppropriateRank(SubtletyRogueSpells::PREMEDITATION, true);
-        if (!premeditation || !CanCast(me, premeditation, true))
+        if (!premeditation || !victim || !CanCast(victim, premeditation, true))
             return false;
 
-        if (!ExecuteSpell(me, premeditation, true))
+        if (!ExecuteSpell(victim, premeditation, true))
             return false;
 
         premeditationCooldown = CD_PREMEDITATION;
@@ -643,6 +662,20 @@ private:
 
         // 瞬移落位需等待一帧位置同步，故本帧交还控制权，下一帧由伏击接管背身起手
         return true;
+    }
+
+    // 战时暗影步：战斗中目标处于 8~25 码时主动闪现贴身，
+    // 既补足远程脱离后的贴背速度，也避免长时间脱手白字损失。
+    bool TryCombatShadowstep(Unit* victim)
+    {
+        if (shadowstepCooldown > 0 || !victim)
+            return false;
+
+        float const dist = me->GetDistance(victim);
+        if (dist < SHADOWSTEP_MIN_DIST || dist > SHADOWSTEP_MAX_DIST)
+            return false;
+
+        return TryShadowstep(victim);
     }
 
     // =========================================================================
@@ -743,6 +776,13 @@ private:
         bool const worthIt = IsEliteOrBossTarget(victim) || CountNearbyHostileEnemies() >= 2;
 
         if (!inMelee || !energyReady || !worthIt)
+            return;
+
+        // 背身门禁：怪盯防主坦时必须先占住背身位再开影舞，
+        // 否则伏击会因正面站位被底层拒绝，白白空烧一轮爆发 (影舞 CD 1 分钟)。
+        // 怪盯防随从本人时无背身可言，交由 P4 的 MoveChase 贴身硬刚逻辑处理，放行开启。
+        bool const behind = IsBehindVictim(victim, MELEE_REACH_DIST);
+        if (!behind && victim->GetVictim() != me)
             return;
 
         uint32 const dance = GetAppropriateRank(SubtletyRogueSpells::SHADOW_DANCE, true);
@@ -945,7 +985,8 @@ private:
 
         if (ExecuteSpell(victim, ambush, true))
         {
-            AddComboPoints(victim, 1);
+            // 3.3.5a 伏击奖励 2 个连击点
+            AddComboPoints(victim, 2);
 
             // 技能命中同样触发武器毒药结算
             ProcPoisons(victim);
