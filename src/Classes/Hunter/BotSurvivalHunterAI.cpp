@@ -352,7 +352,10 @@ private:
         if (!victim)
             return false;
 
-        Aura* dot = victim->GetAura(SurvivalHunterSpells::AURA_EXPLOSIVE_SHOT, me->GetGUID());
+        // 必须使用 GetAuraOfRankedSpell: 施法入口传入的是满阶 60053 (Rank 4),
+        // 而 DoT 落地的 Rank 1 光环 53301 与满阶 ID 不同, 用精确 ID 查验会在
+        // 80 级恒返回 nullptr, 导致荷枪实弹防吞跳仲裁彻底失效 (DoT 被无脑顶掉)。
+        Aura* dot = victim->GetAuraOfRankedSpell(SurvivalHunterSpells::EXPLOSIVE_SHOT, me->GetGUID());
         return dot && dot->GetDuration() > LOCK_AND_LOAD_DOT_WINDOW;
     }
 
@@ -620,7 +623,17 @@ private:
             return false;
 
         if (!isFreeCast)
+        {
             explosiveShotCooldown = CD_EXPLOSIVE_SHOT;
+        }
+        else
+        {
+            // Creature 缺乏玩家 SpellModOwner/充能扣除机制, 荷枪实弹被消费后
+            // 底层不会自动剥层, 若不在免费通道显式扣减充能, 光环会永久挂身,
+            // 使爆炸射击退化为无限免 CD 连发并彻底吞掉常规射击节奏。
+            if (Aura* lnl = me->GetAura(SurvivalHunterSpells::AURA_LOCK_AND_LOAD))
+                lnl->DropCharge();
+        }
 
         return true;
     }
@@ -658,7 +671,10 @@ private:
         // 施法者归属鉴别: 必须确认目标身上挂的是「本随从自己施放」的毒蛇钉刺。
         // 若仅用 HasAura, 队友猎人的钉刺会被误认为已挂, 导致本随从终生不再补钉刺,
         // 毒性钉刺 3% 独立增伤链路彻底失效。
-        Aura* sting = victim->GetAura(SurvivalHunterSpells::AURA_SERPENT_STING, me->GetGUID());
+        // 必须使用 GetAuraOfRankedSpell: 1~79 级经 GetAppropriateRank 降阶后施放的
+        // 是低阶毒蛇钉刺 ID, 与满阶 49001 不匹配, 用精确 ID 查验会恒返回 nullptr,
+        // 造成随从每一帧都判定「未挂钉刺」并无限连发, 形成法力抽空死锁。
+        Aura* sting = victim->GetAuraOfRankedSpell(SurvivalHunterSpells::SERPENT_STING, me->GetGUID());
         if (sting && sting->GetDuration() > SERPENT_STING_REFRESH_WINDOW)
             return false;
 
@@ -831,6 +847,7 @@ private:
         SyncPassive(LEVEL_NOXIOUS_STINGS, SurvivalHunterSpells::NOXIOUS_STINGS);           // 毒性钉刺 Rank 3: 目标带钉刺全伤害 +3%
         SyncPassive(LEVEL_HUNTING_PARTY, SurvivalHunterSpells::HUNTING_PARTY);             // 狩猎小队 Rank 3: 暴击回蓝
         SyncPassive(LEVEL_LOCK_AND_LOAD, SurvivalHunterSpells::LOCK_AND_LOAD);             // 荷枪实弹 Rank 3: 黑箭/陷阱触发免费爆炸射击
+        SyncPassive(25, SurvivalHunterSpells::RESOURCEFULNESS);                            // 足智多谋 Rank 3: 黑箭与陷阱 CD 缩短 6s
 
         // ---- 雕文补偿 ----
         SyncPassive(LEVEL_GLYPH, SurvivalHunterSpells::GLYPH_OF_EXPLOSIVE_SHOT);  // 爆炸射击雕文: 暴击率 +4%

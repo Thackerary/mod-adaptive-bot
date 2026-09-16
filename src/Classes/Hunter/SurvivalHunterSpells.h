@@ -35,6 +35,7 @@ namespace SurvivalHunterSpells
     constexpr uint32 AURA_SERPENT_STING       = 49001;  // 毒蛇钉刺 Debuff
     constexpr uint32 AURA_BLACK_ARROW         = 63670;  // 黑箭 Debuff
     constexpr uint32 LOCK_AND_LOAD            = 56344;  // 荷枪实弹 Rank 3 天赋根源 (黑箭/陷阱触发)
+    constexpr uint32 RESOURCEFULNESS          = 34493;  // 足智多谋 Rank 3 (黑箭与陷阱冷却缩短 6s, 耗能降低 60%)
     constexpr uint32 SNIPER_TRAINING          = 53304;  // 狙击训练 Rank 3 (暴击与伤害提高 6%)
     constexpr uint32 HUNTING_PARTY            = 53292;  // 狩猎小队 Rank 3 (暴击使全团回蓝)
     constexpr uint32 NOXIOUS_STINGS           = 53243;  // 毒性钉刺 Rank 3 (目标带钉刺时全伤害 +3%)
