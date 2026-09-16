@@ -343,6 +343,12 @@ private:
 
     bool NeedsSavageRoarRefresh() const
     {
+        // 野性咆哮为 75 级天赋，低等级随从未习得该技能。
+        // 若不做等级门禁，咆哮光环将永远缺失，NeedsSavageRoarRefresh 恒为 true，
+        // 使决策流在「补咆哮」分支中因 CanCast 永久失败而陷入虚假挂起发呆死锁。
+        if (me->GetLevel() < 75)
+            return false;
+
         return GetSavageRoarRemainingMs() <= SND_REFRESH_MS;
     }
 
@@ -373,14 +379,18 @@ private:
         return GetOwnDebuffRemainingMs(victim, FeralCatDruidSpells::AURA_RAKE) <= RAKE_REFRESH_MS;
     }
 
-    // 流血易伤：自身裂伤 或 武器战创伤均可为割裂提供 +30% 增伤跳板
+    // 流血易伤：猎豹裂伤 / 熊裂伤 / 武器战创伤 均可为割裂提供 +30% 增伤跳板。
+    // 裂伤与创伤均为分阶法术，且低阶 Debuff 的 ID 与最高阶不同，
+    // 直接 HasAura(最高阶) 会漏检低阶 Debuff，导致「已挂易伤却判定缺失」，
+    // 决策流每帧重打裂伤形成 100% 死锁吞能事故。必须走 GetAuraOfRankedSpell 全分阶查验。
     bool HasBleedVulnerability(Unit* victim) const
     {
         if (!victim)
             return false;
 
-        return victim->HasAura(FeralCatDruidSpells::AURA_MANGLE) ||
-               victim->HasAura(FeralCatDruidSpells::AURA_TRAUMA);
+        return (victim->GetAuraOfRankedSpell(FeralCatDruidSpells::MANGLE_CAT) != nullptr) ||
+               (victim->GetAuraOfRankedSpell(33878) != nullptr) || // 熊裂伤全分阶
+               (victim->GetAuraOfRankedSpell(46856) != nullptr);   // 武器战创伤全分阶
     }
 
     // 判断随从是否已占住目标背身位：目标正面 180° 锥形之外即视为背后。
@@ -479,9 +489,11 @@ private:
         if (faerieFireCooldown > 0)
             return false;
 
-        // 野性精灵之火与平衡系精灵之火共享破甲效果，任一存在即无需重挂
-        if (victim->HasAura(FeralCatDruidSpells::AURA_FAERIE_FIRE) ||
-            victim->HasAura(FeralCatDruidSpells::FAERIE_FIRE_FERAL))
+        // 野性精灵之火与平衡系精灵之火共享破甲效果，任一存在即无需重挂。
+        // 精灵之火同为分阶法术，低阶 Debuff ID 与最高阶不同，
+        // 必须走 GetAuraOfRankedSpell 全分阶查验，否则每 6 秒白烧一个 GCD 重复破甲。
+        if (victim->GetAuraOfRankedSpell(FeralCatDruidSpells::FAERIE_FIRE_FERAL) ||
+            victim->GetAuraOfRankedSpell(FeralCatDruidSpells::AURA_FAERIE_FIRE))
             return false;
 
         uint32 const faerieFire = GetAppropriateRank(FeralCatDruidSpells::FAERIE_FIRE_FERAL, true);
@@ -545,17 +557,32 @@ private:
         return TryBuilder(victim);
     }
 
-    // 5 星终结技决策：割裂保底 -> 凶猛撕咬泄能 -> 兜底续订割裂
+    // =========================================================================
+    // 5 星终结技精准仲裁
+    // -------------------------------------------------------------------------
+    // 核心原则：连击点是最稀缺资源，5 星必须打在「真正需要它」的技能上。
+    // 严禁用低星咆哮 / 低星割裂去顶替 5 星窗口 (会白白损失 4 星的持续时间收益)，
+    // 也严禁在割裂进入刷新窗口前用凶猛撕咬提前顶掉主力流血。
+    // 割裂处于 4~8 秒的中间区间时，唯一正确动作是原地挂起等待其进入
+    // 最终刷新窗口，而不是把 5 星浪费在咆哮或撕咬上。
+    // =========================================================================
     bool TryFinisher(Unit* victim)
     {
-        // 主力物理流血：割裂缺失或剩余 <= 2000ms 必须优先补齐
-        if (NeedsRipRefresh(victim))
+        // ---- 1. 咆哮剩余 <= 9s：优先以 5 星续订满额 34s 咆哮 ----
+        if (me->GetLevel() >= 75 && GetSavageRoarRemainingMs() <= 9000)
+        {
+            if (TrySavageRoar(victim))
+                return true;
+        }
+
+        // ---- 2. 割裂剩余 <= 4s (或完全缺失)：以 5 星打出满额割裂 ----
+        if (NeedsRipRefresh(victim, 4000))
         {
             if (TryRip(victim))
                 return true;
         }
 
-        // 咆哮与割裂剩余时间均充裕 (> 8000ms)：凶猛撕咬强力泄能
+        // ---- 3. 咆哮与割裂均充裕 (> 8s)：凶猛撕咬强力泄能 ----
         if (GetSavageRoarRemainingMs() > BITE_MIN_MARGIN_MS &&
             GetOwnDebuffRemainingMs(victim, FeralCatDruidSpells::AURA_RIP) > BITE_MIN_MARGIN_MS)
         {
@@ -563,11 +590,10 @@ private:
                 return true;
         }
 
-        // 兜底：至少保住割裂覆盖，绝不让 5 星连击点空转溢出
-        if (TryRip(victim))
-            return true;
-
-        return TryFerociousBite(victim);
+        // ---- 4. 割裂处于 4~8s 的待刷新区间且咆哮充足：原地挂起控星 ----
+        // 此区间打出凶猛撕咬会让割裂在数秒后彻底断档，丢失整段主力流血伤害；
+        // 以挂起等待割裂滑入 4s 刷新窗口，届时当帧以 5 星补齐，收益最大。
+        return false;
     }
 
     // =========================================================================
@@ -582,8 +608,14 @@ private:
         // 交由下方裂伤分支正面产星，杜绝围绕目标无限对转的贴背空转。
         if (IsBehindVictim(victim, MELEE_REACH_DIST))
         {
-            if (me->GetPower(POWER_ENERGY) >= SHRED_ENERGY && TryShred(victim))
-                return true;
+            // 已占住背后位：坚决控能等待撕碎。
+            // 撕碎是唯一具备完整伤害系数的产星技 (裂伤仅为易伤铺垫的正面填充)，
+            // 在 35~41 能量区间偷跑一记裂伤会同时踩两个坑：吃掉本该留给撕碎的能量，
+            // 并把连击点推高导致下一发撕碎被 5 星上限浪费，产星效率反而下降。
+            if (me->GetPower(POWER_ENERGY) < SHRED_ENERGY)
+                return false;
+
+            return TryShred(victim);
         }
 
         return TryMangle(victim);
@@ -718,21 +750,17 @@ private:
         if (!shred)
             return false;
 
-        // 能量充足时走标准通道，保留完整的 GCD 与射程/视线仲裁
-        if (me->GetPower(POWER_ENERGY) >= SHRED_ENERGY)
-        {
-            if (!CanCast(victim, shred, true) || !ExecuteSpell(victim, shred, true))
-                return false;
-
-            AddComboPoints(victim, 1);
-            return true;
-        }
-
-        // 能量不足：节能施法已清零消耗，底层直放并手工置位能量职业的 1000ms GCD
+        // 强制 triggered = true 直放：
+        // triggerFlags 会旁路底层 CheckPower 能量校验，真正兑现「节能施法 0 消耗」。
+        // 若走普通 CastSpell，引擎仍按 DBC 基础消耗 (42 能量) 校验，
+        // 低能量时免费撕碎会被直接拒放，清晰预兆光环被白白遗留过期。
         me->SetFacingToObject(victim);
-        if (me->CastSpell(victim, shred, false) != SPELL_CAST_OK)
+        if (me->CastSpell(victim, shred, true) != SPELL_CAST_OK)
             return false;
 
+        // 手工消费节能施法光环并置位能量职业的 1000ms 公共冷却
+        // (triggered 施法不会自动扣减光环，也不会自行占 GCD)
+        me->RemoveAurasDueToSpell(FeralCatDruidSpells::AURA_CLEARCASTING);
         gcdTimer = 1000;
         AddComboPoints(victim, 1);
         return true;

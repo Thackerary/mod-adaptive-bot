@@ -38,11 +38,11 @@ namespace FeralCatDruidSpells
     constexpr uint32 AURA_RAKE                    = 48574;  // 斜掠 Debuff
     constexpr uint32 AURA_FAERIE_FIRE             = 770;    // 精灵之火破甲 Debuff
     constexpr uint32 OMEN_OF_CLARITY              = 16864;  // 清晰预兆天赋根源 (近战平砍几率触发节能施法)
-    constexpr uint32 KING_OF_THE_JUNGLE           = 48494;  // 丛林之王 Rank 3 (猛虎之怒立即回复 60 能量)
-    constexpr uint32 REND_AND_TEAR                = 48434;  // 撕扯 Rank 5 (流血目标撕碎 +20%, 凶猛撕咬暴击 +25%)
+    constexpr uint32 KING_OF_THE_JUNGLE           = 48495;  // 丛林之王 Rank 3 (猛虎之怒立即回复 60 能量)
+    constexpr uint32 REND_AND_TEAR                = 48438;  // 撕扯 Rank 5 (流血目标撕碎 +20%, 凶猛撕咬暴击 +25%)
     constexpr uint32 PRIMAL_GORE                  = 63504;  // 原始血腥 (割裂每跳均可暴击)
     constexpr uint32 FERAL_AGGRESSION             = 16862;  // 野性侵略 Rank 5 (凶猛撕咬伤害 +15%)
-    constexpr uint32 PREDATORY_STRIKES            = 16975;  // 猛兽攻击 Rank 3 (近战攻击强度加成)
+    constexpr uint32 PREDATORY_STRIKES            = 16979;  // 猛兽攻击 Rank 3 (近战攻击强度加成)
     constexpr uint32 SHREDDING_ATTACKS            = 16972;  // 撕碎攻击 Rank 2 (撕碎能量消耗 -18)
     constexpr uint32 FEROCITY                     = 16938;  // 凶暴 Rank 5 (裂伤 / 斜掠 / 撕咬能量消耗 -5)
     constexpr uint32 HEART_OF_THE_WILD            = 24894;  // 野性之心 Rank 5 (力量 / 智力属性加成)
