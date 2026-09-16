@@ -480,11 +480,9 @@ private:
                 return false;
         }
 
-        if (!CanCast(me, FrostDeathKnightSpells::HORN_OF_WINTER, true))
-            return false;
-
         // 寒冬号角为分阶法术: 必须走 GetAppropriateRank 做基础法术降阶,
-        // 直接硬放最高 Rank 会在低等级被底层以「法术等级超限」拒绝, 造成增益永久断档
+        // 直接硬放最高 Rank 会在低等级被底层以「法术等级超限」拒绝, 造成增益永久断档。
+        // 降阶解析必须先于 CanCast, 严禁再对最高 Rank ID 做一次预检, 否则两处口径不一致。
         uint32 const hornOfWinter = GetAppropriateRank(FrostDeathKnightSpells::HORN_OF_WINTER, false);
         if (!hornOfWinter || !CanCast(me, hornOfWinter, true))
             return false;
