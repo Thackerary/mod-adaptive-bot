@@ -25,6 +25,7 @@ void AddSC_bot_assassination_rogue();
 void AddSC_bot_subtlety_rogue();
 void AddSC_bot_combat_rogue();
 void AddSC_bot_arcane_mage();
+void AddSC_bot_fire_mage();
 void AddSC_bot_retribution_paladin();
 void AddSC_bot_fury_warrior();
 void AddSC_bot_arms_warrior();
@@ -55,6 +56,7 @@ void Addmod_adaptive_botScripts()
     AddSC_bot_subtlety_rogue();
     AddSC_bot_combat_rogue();
     AddSC_bot_arcane_mage();
+    AddSC_bot_fire_mage();
     AddSC_bot_retribution_paladin();
     AddSC_bot_fury_warrior();
     AddSC_bot_arms_warrior();
