@@ -15,6 +15,7 @@ void AddSC_bot_holy_paladin();
 void AddSC_bot_discipline_priest();
 void AddSC_bot_holy_priest();
 void AddSC_bot_restoration_shaman();
+void AddSC_bot_enhancement_shaman();
 void AddSC_bot_restoration_druid();
 void AddSC_bot_marksmanship_hunter();
 void AddSC_bot_assassination_rogue();
@@ -41,6 +42,7 @@ void Addmod_adaptive_botScripts()
     AddSC_bot_discipline_priest();
     AddSC_bot_holy_priest();
     AddSC_bot_restoration_shaman();
+    AddSC_bot_enhancement_shaman();
     AddSC_bot_restoration_druid();
     AddSC_bot_marksmanship_hunter();
     AddSC_bot_assassination_rogue();
