@@ -19,6 +19,7 @@ void AddSC_bot_assassination_rogue();
 void AddSC_bot_arcane_mage();
 void AddSC_bot_retribution_paladin();
 void AddSC_bot_fury_warrior();
+void AddSC_bot_arms_warrior();
 void AddSC_bot_affliction_warlock();
 void AddSC_bot_balance_druid();
 void AddSC_bot_shadow_priest();
@@ -40,6 +41,7 @@ void Addmod_adaptive_botScripts()
     AddSC_bot_arcane_mage();
     AddSC_bot_retribution_paladin();
     AddSC_bot_fury_warrior();
+    AddSC_bot_arms_warrior();
     AddSC_bot_affliction_warlock();
     AddSC_bot_balance_druid();
     AddSC_bot_shadow_priest();
