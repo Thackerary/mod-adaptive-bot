@@ -483,9 +483,18 @@ private:
         if (!CanCast(me, FrostDeathKnightSpells::HORN_OF_WINTER, true))
             return false;
 
-        if (ExecuteSpell(me, FrostDeathKnightSpells::HORN_OF_WINTER, true))
+        // 寒冬号角为分阶法术: 必须走 GetAppropriateRank 做基础法术降阶,
+        // 直接硬放最高 Rank 会在低等级被底层以「法术等级超限」拒绝, 造成增益永久断档
+        uint32 const hornOfWinter = GetAppropriateRank(FrostDeathKnightSpells::HORN_OF_WINTER, false);
+        if (!hornOfWinter || !CanCast(me, hornOfWinter, true))
+            return false;
+
+        if (ExecuteSpell(me, hornOfWinter, true))
         {
             hornOfWinterCooldown = CD_HORN_OF_WINTER;
+
+            // 3.3.5a 寒冬号角施放成功附带产出 10 符能
+            me->ModifyPower(POWER_RUNIC_POWER, 100);
             return true;
         }
 
@@ -528,6 +537,9 @@ private:
                 // 大招附带效果模拟: 立即重置全部符文, 解除打击技的自管节流
                 obliterateCooldown = 0;
                 bloodStrikeCooldown = 0;
+
+                // 3.3.5a 符文武器增效施放成功立即产出 25 符能
+                me->ModifyPower(POWER_RUNIC_POWER, 250);
                 return true;
             }
         }
@@ -593,6 +605,9 @@ private:
                 ExecuteSpell(victim, FrostDeathKnightSpells::PESTILENCE, true))
             {
                 pestilenceCooldown = PESTILENCE_COOLDOWN_MS;
+
+                // 符文消耗产出 10 符能
+                me->ModifyPower(POWER_RUNIC_POWER, 100);
                 return true;
             }
         }
@@ -600,14 +615,22 @@ private:
         // ---- 步骤二: 缺失冰霜疫病 ----
         if (!frostFever)
         {
-            // 白霜触发在身时让路给 P3 冻结之雾分支的免费凛风冲击 (凛风冲击自带冰霜疫病)
-            if (me->HasAura(FrostDeathKnightSpells::AURA_FREEZING_FOG))
+            // 白霜触发在身时让路给 P3 冻结之雾分支的免费凛风冲击 (凛风冲击自带冰霜疫病)。
+            // 必须追加凛风天赋前置: 55~59 级尚未习得凛风冲击时, 白霜光环虽然照常触发,
+            // 但 P3 的 ConsumeFreezingFog 会因天赋门禁直接拒绝消费,
+            // 若此处仍无条件让路, 冰霜疫病将永久无法补挂, 形成断病死锁。
+            if (me->HasAura(FrostDeathKnightSpells::AURA_FREEZING_FOG) &&
+                HasTalent(FrostDeathKnightSpells::HOWLING_BLAST))
                 return false;
 
             uint32 const icyTouch = GetAppropriateRank(FrostDeathKnightSpells::ICY_TOUCH, false);
             if (icyTouch && CanCast(victim, icyTouch, true) &&
                 ExecuteSpell(victim, icyTouch, true))
+            {
+                // 符文消耗产出 10 符能
+                me->ModifyPower(POWER_RUNIC_POWER, 100);
                 return true;
+            }
         }
 
         // ---- 步骤三: 缺失血之疫病, 近战位读打暗影打击 ----
@@ -616,7 +639,11 @@ private:
             uint32 const plagueStrike = GetAppropriateRank(FrostDeathKnightSpells::PLAGUE_STRIKE, false);
             if (plagueStrike && CanCast(victim, plagueStrike, true) &&
                 ExecuteSpell(victim, plagueStrike, true))
+            {
+                // 符文消耗产出 10 符能
+                me->ModifyPower(POWER_RUNIC_POWER, 100);
                 return true;
+            }
         }
 
         return false;
@@ -664,6 +691,9 @@ private:
         if (ExecuteSpell(victim, obliterate, true))
         {
             obliterateCooldown = OBLITERATE_COOLDOWN_MS;
+
+            // 湮灭消耗冰霜/邪恶符文, 命中即产出 20 符能
+            me->ModifyPower(POWER_RUNIC_POWER, 200);
             return true;
         }
 
@@ -706,6 +736,9 @@ private:
         if (ExecuteSpell(victim, bloodStrike, true))
         {
             bloodStrikeCooldown = BLOOD_STRIKE_COOLDOWN_MS;
+
+            // 鲜血打击消耗鲜血符文, 命中即产出 10 符能
+            me->ModifyPower(POWER_RUNIC_POWER, 100);
             return true;
         }
 

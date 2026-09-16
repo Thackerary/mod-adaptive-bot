@@ -42,12 +42,12 @@ namespace FrostDeathKnightSpells
     constexpr uint32 THREAT_OF_THASSARIAN = 66192; // Rank 3 双持打击核心被动
     constexpr uint32 DUAL_WIELD_SPEC      = 50370; // Rank 3 副手武器伤害 +25%
     constexpr uint32 KILLING_MACHINE      = 51130; // Rank 5 杀戮机器触发源
-    constexpr uint32 RIME                 = 49188; // Rank 3 白霜触发源
-    constexpr uint32 GLACIER_ROT          = 49471; // Rank 3 带病目标受冰霜伤害 +20%
-    constexpr uint32 BLACK_ICE            = 49143; // Rank 5 冰霜与暗影伤害 +10%
-    constexpr uint32 BLOOD_OF_THE_NORTH   = 54639; // Rank 3 鲜血符文转死亡符文
-    constexpr uint32 NERVES_OF_COLD_STEEL = 49008; // Rank 3 双持命中 +3% 与近战急速
-    constexpr uint32 MIGHT_OF_MOGRAINE    = 49028; // Rank 3 湮灭/冰霜打击暴击伤害 +45%
+    constexpr uint32 RIME                 = 56836; // Rank 3 白霜触发源 (湮灭 15% 触发冻结之雾)
+    constexpr uint32 GLACIER_ROT          = 49478; // Rank 3 带病目标受冰霜伤害 +20%
+    constexpr uint32 BLACK_ICE            = 49149; // Rank 5 冰霜与暗影伤害 +10%
+    constexpr uint32 BLOOD_OF_THE_NORTH   = 54643; // Rank 3 鲜血符文转死亡符文 (100% 几率)
+    constexpr uint32 NERVES_OF_COLD_STEEL = 49011; // Rank 3 双持命中 +3% 与近战急速
+    constexpr uint32 MIGHT_OF_MOGRAINE    = 49031; // Rank 3 湮灭/冰霜打击暴击伤害 +45%
 
     // =====================================================================
     // 雕文补偿
