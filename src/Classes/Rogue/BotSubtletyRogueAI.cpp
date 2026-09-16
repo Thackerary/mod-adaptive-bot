@@ -733,10 +733,13 @@ private:
             {
                 preparationCooldown = CD_PREPARATION;
 
-                // 伺机待发重置：急跑(无状态自管)/消失/闪避/暗影步
+                // 伺机待发重置 (3.3.5a 机制对齐)：消失 / 闪避 / 暗影步 / 预谋
+                // 重置项必须与 CountActiveSurvivalCooldowns() 的统计口径严格一致，
+                // 否则会出现「计入统计却未清零」的空重置，导致伺机待发白烧 5 分钟冷却。
                 vanishCooldown = 0;
                 evasionCooldown = 0;
                 shadowstepCooldown = 0;
+                premeditationCooldown = 0;
 
                 // Off-GCD 铁律：伺机待发为瞬发重置技，施放成功严禁 return true，
                 // 必须允许当帧决策流顺下，让重置后的消失/闪避理论就绪状态立即被后续逻辑消费。
