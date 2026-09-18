@@ -96,6 +96,24 @@ void BotGuardianAI::Reset()
     // 被动反应状态：底层引擎不再自主指派仇恨目标，杜绝随从擅自警戒引怪
     me->SetReactState(REACT_PASSIVE);
 
+    // 宿主属性镜像同步：阵营 / 位面 / 等级 / 移速
+    // 随从仅供 AdaptiveBotAI 机器人搭配，属性投影必须与宿主严格一致，
+    // 否则会出现「能打却打不到」「同队却互相不可见」等投影错位问题。
+    if (Unit* owner = me->GetCharmerOrOwner())
+    {
+        me->SetFaction(owner->GetFaction());
+        me->SetPhaseMask(owner->GetPhaseMask(), true);
+
+        if (me->GetLevel() != owner->GetLevel())
+        {
+            me->SetLevel(owner->GetLevel());
+            me->SetHealth(me->GetMaxHealth());
+        }
+
+        me->SetSpeed(MOVE_RUN, owner->GetSpeedRate(MOVE_RUN));
+        me->SetSpeed(MOVE_WALK, owner->GetSpeedRate(MOVE_WALK));
+    }
+
     // 未显式指定外观池时，依据主人职业自动推断，避免全职业沦为猎人野兽
     if (!_visualTypeExplicit)
         _visualType = ResolveVisualTypeFromMaster();
@@ -128,10 +146,13 @@ void BotGuardianAI::UpdateAI(uint32 diff)
         return;
 
     Unit* owner = me->GetCharmerOrOwner();
-    if (!owner || !owner->IsAlive())
+
+    // 宿主阵亡 / 离开世界 / 不存在：随从连带销毁。
+    // 随从仅供机器人搭配，宿主失效后自身毫无存在意义，绝不允许作为
+    // 无主孤儿木桩留在原地（同时避免其被野怪视作独立仇恨实体反复攻击）。
+    if (!owner || !owner->IsAlive() || !owner->IsInWorld())
     {
-        if (me->IsInCombat())
-            EnterEvadeMode();
+        me->DespawnOrUnsummon();
         return;
     }
 
@@ -142,6 +163,11 @@ void BotGuardianAI::UpdateAI(uint32 diff)
         me->DespawnOrUnsummon();
         return;
     }
+
+    // 实时位面同步：宿主切换位面（进本 / 相位任务）时随从必须同帧对齐，
+    // 否则会在宿主视野中凭空消失。
+    if (me->GetPhaseMask() != owner->GetPhaseMask())
+        me->SetPhaseMask(owner->GetPhaseMask(), true);
 
     // 50 码超距防走失拉回：放行猎人等 41 码极限射程开怪，避免在 40 码边界反复瞬移抽搐
     if (me->GetDistance(owner) > 50.0f)
@@ -182,10 +208,14 @@ void BotGuardianAI::UpdateAI(uint32 diff)
         return;
     }
 
-    // 3. 转火严格同步：目标与主人不一致时立即切换并贴身追击
+    // 3. 转火严格同步：唯一攻击目标源即宿主当前目标（宿主为机器人，无需
+    //    任何玩家专用的选中目标/协助目标探测逻辑），切换后双向绑定进战状态，
+    //    确保随从与目标互相进入战斗列表，平砍与仇恨链路完整成立。
     if (me->GetVictim() != masterTarget)
     {
         AttackStart(masterTarget);
+        me->SetInCombatWith(masterTarget);
+        masterTarget->SetInCombatWith(me);
     }
 
     // 白字平砍循环
