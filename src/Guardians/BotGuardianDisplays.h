@@ -1,9 +1,9 @@
 #pragma once
 
+#include <cstdint>
 #include <vector>
-#include "Define.h"
 
-enum GuardianVisualType : uint8
+enum GuardianVisualType : uint8_t
 {
     GUARDIAN_VISUAL_HUNTER_BEAST = 0,
     GUARDIAN_VISUAL_DK_UNDEAD    = 1,
@@ -14,12 +14,12 @@ enum GuardianVisualType : uint8
 
 struct GuardianDisplayEntry
 {
-    uint32 displayId;
+    uint32_t displayId;
     float scale;
 };
 
 // 1. 猎人陆生野兽池（机制内核：座狼模板）
-static const std::vector<GuardianDisplayEntry> HunterBeastDisplays = {
+inline std::vector<GuardianDisplayEntry> const HunterBeastDisplays = {
     // 经典狼与恐狼
     { 165, 1.0f }, { 161, 1.0f }, { 644, 1.0f }, { 776, 1.0f }, { 4124, 1.0f },
     { 73, 1.0f }, { 720, 1.0f }, { 9369, 1.0f },
@@ -46,7 +46,7 @@ static const std::vector<GuardianDisplayEntry> HunterBeastDisplays = {
 };
 
 // 2. 死亡骑士天灾军团池（机制内核：食尸鬼模板）
-static const std::vector<GuardianDisplayEntry> DkUndeadDisplays = {
+inline std::vector<GuardianDisplayEntry> const DkUndeadDisplays = {
     // 经典食尸鬼
     { 137, 1.0f }, { 414, 1.0f }, { 519, 1.0f }, { 547, 1.0f },
     // 诺森德高精食尸鬼
@@ -60,15 +60,15 @@ static const std::vector<GuardianDisplayEntry> DkUndeadDisplays = {
 };
 
 // 3. 术士三大恶魔独立池
-static const std::vector<GuardianDisplayEntry> WarlockImpDisplays = {
+inline std::vector<GuardianDisplayEntry> const WarlockImpDisplays = {
     { 4449, 0.5f }, { 7552, 0.5f }, { 10811, 0.5f },
     { 16888, 0.5f }, { 16889, 0.5f }, { 16890, 0.5f }, { 16891, 0.5f }
 };
 
-static const std::vector<GuardianDisplayEntry> WarlockFelhoundDisplays = {
+inline std::vector<GuardianDisplayEntry> const WarlockFelhoundDisplays = {
     { 850, 1.0f }, { 1913, 1.0f }, { 6172, 1.0f }, { 7949, 1.0f }, { 10950, 1.0f }
 };
 
-static const std::vector<GuardianDisplayEntry> WarlockFelguardDisplays = {
+inline std::vector<GuardianDisplayEntry> const WarlockFelguardDisplays = {
     { 5048, 1.0f }, { 5049, 1.0f }, { 21365, 1.0f }, { 18342, 1.0f }, { 19901, 1.0f }
 };
