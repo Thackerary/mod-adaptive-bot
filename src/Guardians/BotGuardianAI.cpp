@@ -231,9 +231,21 @@ void BotGuardianAI::UpdateAI(uint32 diff)
     if (me->GetPhaseMask() != owner->GetPhaseMask())
         me->SetPhaseMask(owner->GetPhaseMask(), true);
 
-    // 座狼内核【狂怒之嚎】40s 周期刷新：
-    // 原始主动增益 CD 40s / 持续 20s，此处以触发式施法绕过 CD 独立计时，
-    // 保证脱战归途与战时窗口内全程无缝覆盖，杜绝随从 AP 增益断档。
+    // 1. 50 码超距防走失拉回：放行猎人等 41 码极限射程开怪，避免在 40 码边界反复瞬移抽搐。
+    //    必须先于技能结算执行，确保随从归位到主人身边后，后续光环才生效于主人。
+    if (me->GetDistance(owner) > 50.0f)
+    {
+        me->CombatStop(true);
+        me->GetMotionMaster()->Clear();
+        me->NearTeleportTo(owner->GetPositionX(), owner->GetPositionY(), owner->GetPositionZ(), owner->GetOrientation());
+        me->GetMotionMaster()->MoveFollow(owner, PET_FOLLOW_DIST, PET_FOLLOW_ANGLE);
+        return;
+    }
+
+    // 2. 座狼内核【狂怒之嚎】40s 周期刷新：
+    //    原始主动增益 CD 40s / 持续 20s，此处以触发式施法绕过 CD 独立计时，
+    //    保证脱战归途与战时窗口内全程无缝覆盖，杜绝随从 AP 增益断档。
+    //    放在超距拉回之后结算，保证嚎叫必然在 50 码内释放，主人 100% 吃到增益。
     if (_visualType == GUARDIAN_VISUAL_HUNTER_BEAST && me->IsAlive())
     {
         if (_furiousHowlTimer <= diff)
@@ -253,17 +265,7 @@ void BotGuardianAI::UpdateAI(uint32 diff)
         }
     }
 
-    // 50 码超距防走失拉回：放行猎人等 41 码极限射程开怪，避免在 40 码边界反复瞬移抽搐
-    if (me->GetDistance(owner) > 50.0f)
-    {
-        me->CombatStop(true);
-        me->GetMotionMaster()->Clear();
-        me->NearTeleportTo(owner->GetPositionX(), owner->GetPositionY(), owner->GetPositionZ(), owner->GetOrientation());
-        me->GetMotionMaster()->MoveFollow(owner, PET_FOLLOW_DIST, PET_FOLLOW_ANGLE);
-        return;
-    }
-
-    // 1. 主人彻底脱战：随从同步停战并归位
+    // 3. 主人彻底脱战：随从同步停战并归位
     if (!owner->IsInCombat())
     {
         if (me->IsInCombat() || me->GetVictim())
@@ -277,7 +279,7 @@ void BotGuardianAI::UpdateAI(uint32 diff)
 
     Unit* masterTarget = owner->GetVictim();
 
-    // 2. 主人仍在战斗中，但当前无活体/合法目标（小怪刚死、正在选怪）：
+    // 4. 主人仍在战斗中，但当前无活体/合法目标（小怪刚死、正在选怪）：
     //    仅停手防发呆，绝不 CombatStop 清空战斗状态，保证多怪连战转火平滑。
     if (!masterTarget || !masterTarget->IsAlive() || !me->IsValidAttackTarget(masterTarget))
     {
@@ -292,7 +294,7 @@ void BotGuardianAI::UpdateAI(uint32 diff)
         return;
     }
 
-    // 3. 转火严格同步：唯一攻击目标源即宿主当前目标（宿主为机器人，无需
+    // 5. 转火严格同步：唯一攻击目标源即宿主当前目标（宿主为机器人，无需
     //    任何玩家专用的选中目标/协助目标探测逻辑），切换后双向绑定进战状态，
     //    确保随从与目标互相进入战斗列表，平砍与仇恨链路完整成立。
     if (me->GetVictim() != masterTarget)
@@ -301,12 +303,18 @@ void BotGuardianAI::UpdateAI(uint32 diff)
         me->SetInCombatWith(masterTarget);
         masterTarget->SetInCombatWith(me);
     }
-
-    // 白字平砍循环
-    if (UpdateVictim())
+    else if (me->GetMotionMaster()->GetCurrentMovementGeneratorType() != CHASE_MOTION_TYPE)
     {
-        DoMeleeAttackIfReady();
+        // 目标未变但追击链已断（被 Boss 击飞、昏迷/恐惧醒来、地形挤出等）：
+        // 重新下发 MoveChase 恢复贴身追击，杜绝原地发呆直到目标死亡。
+        // 注意 REACT_PASSIVE 下底层不会自动补发 Chase，必须在此显式自愈。
+        me->GetMotionMaster()->MoveChase(masterTarget);
     }
+
+    // 6. 白字平砍循环：直接调用，绝不使用 UpdateVictim() 作为守卫。
+    //    随从强制 REACT_PASSIVE，底层 UpdateVictim() 恒返回 false，
+    //    若以其为门禁会导致 DoMeleeAttackIfReady() 永远无法触发（平砍瘫痪）。
+    DoMeleeAttackIfReady();
 }
 
 class BotGuardianScript : public CreatureScript
