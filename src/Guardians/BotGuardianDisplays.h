@@ -19,7 +19,10 @@ struct GuardianDisplayEntry
 };
 
 // 1. 猎人陆生野兽池（机制内核：座狼模板）
-inline std::vector<GuardianDisplayEntry> const HunterBeastDisplays = {
+// 函数内 static：消除启动期全局动态初始化（std::vector 构造可能抛异常）
+inline std::vector<GuardianDisplayEntry> const& GetHunterBeastDisplays()
+{
+    static std::vector<GuardianDisplayEntry> const pool = {
     // 经典狼与恐狼
     { 165, 1.0f }, { 161, 1.0f }, { 644, 1.0f }, { 776, 1.0f }, { 4124, 1.0f },
     { 73, 1.0f }, { 720, 1.0f }, { 9369, 1.0f },
@@ -43,10 +46,14 @@ inline std::vector<GuardianDisplayEntry> const HunterBeastDisplays = {
     // 猩猩与陆行鸟
     { 809, 1.0f }, { 838, 1.0f }, { 840, 1.0f }, { 3186, 1.0f },
     { 38, 1.0f }, { 178, 1.0f }, { 1281, 1.0f }, { 1961, 1.0f }
-};
+    };
+    return pool;
+}
 
 // 2. 死亡骑士天灾军团池（机制内核：食尸鬼模板）
-inline std::vector<GuardianDisplayEntry> const DkUndeadDisplays = {
+inline std::vector<GuardianDisplayEntry> const& GetDkUndeadDisplays()
+{
+    static std::vector<GuardianDisplayEntry> const pool = {
     // 经典食尸鬼
     { 137, 1.0f }, { 414, 1.0f }, { 519, 1.0f }, { 547, 1.0f },
     // 诺森德高精食尸鬼
@@ -57,18 +64,32 @@ inline std::vector<GuardianDisplayEntry> const DkUndeadDisplays = {
     { 158, 1.0f }, { 200, 1.0f }, { 201, 1.0f }, { 9783, 1.0f }, { 9784, 1.0f }, { 9786, 1.0f },
     // 地穴恶魔
     { 3004, 1.0f }, { 6841, 1.0f }
-};
+    };
+    return pool;
+}
 
 // 3. 术士三大恶魔独立池
-inline std::vector<GuardianDisplayEntry> const WarlockImpDisplays = {
+inline std::vector<GuardianDisplayEntry> const& GetWarlockImpDisplays()
+{
+    static std::vector<GuardianDisplayEntry> const pool = {
     { 4449, 0.5f }, { 7552, 0.5f }, { 10811, 0.5f },
     { 16888, 0.5f }, { 16889, 0.5f }, { 16890, 0.5f }, { 16891, 0.5f }
-};
+    };
+    return pool;
+}
 
-inline std::vector<GuardianDisplayEntry> const WarlockFelhoundDisplays = {
+inline std::vector<GuardianDisplayEntry> const& GetWarlockFelhoundDisplays()
+{
+    static std::vector<GuardianDisplayEntry> const pool = {
     { 850, 1.0f }, { 1913, 1.0f }, { 6172, 1.0f }, { 7949, 1.0f }, { 10950, 1.0f }
-};
+    };
+    return pool;
+}
 
-inline std::vector<GuardianDisplayEntry> const WarlockFelguardDisplays = {
+inline std::vector<GuardianDisplayEntry> const& GetWarlockFelguardDisplays()
+{
+    static std::vector<GuardianDisplayEntry> const pool = {
     { 5048, 1.0f }, { 5049, 1.0f }, { 21365, 1.0f }, { 18342, 1.0f }, { 19901, 1.0f }
-};
+    };
+    return pool;
+}
