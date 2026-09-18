@@ -78,6 +78,16 @@ public:
     /// @brief 具体护卫专精（座狼 / 食尸鬼 / 地狱猎犬 ...）的初始化钩子。
     virtual void OnGuardianReset() {}
 
+    // =========================================================================
+    // 伴随战斗与索敌拦截
+    // =========================================================================
+    /// @brief 伴随型护卫严禁自主警戒引怪，视野内敌对目标一律忽略。
+    ///        索敌权完全交由主人控制，仅通过 UpdateAI 同步主人转火。
+    void MoveInLineOfSight(Unit* who) override;
+
+    /// @brief 伴随战斗主循环：严格同步主人转火 / 脱战归位 / 超距拉回，并执行白字平砍。
+    void UpdateAI(uint32 diff) override;
+
 protected:
     GuardianVisualType   _visualType;
     GuardianDisplayEntry _chosenDisplay{ 0, 1.0f };    ///< 首次生成时缓存的外观，Reset 幂等复用

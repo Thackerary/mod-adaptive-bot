@@ -93,6 +93,9 @@ void BotGuardianAI::Reset()
 {
     ScriptedAI::Reset();
 
+    // 被动反应状态：底层引擎不再自主指派仇恨目标，杜绝随从擅自警戒引怪
+    me->SetReactState(REACT_PASSIVE);
+
     // 未显式指定外观池时，依据主人职业自动推断，避免全职业沦为猎人野兽
     if (!_visualTypeExplicit)
         _visualType = ResolveVisualTypeFromMaster();
@@ -111,6 +114,62 @@ void BotGuardianAI::Reset()
     }
 
     OnGuardianReset();
+}
+
+void BotGuardianAI::MoveInLineOfSight(Unit* /*who*/)
+{
+    // 伴随型护卫严禁自主警戒引怪，索敌权完全交由主人控制
+    return;
+}
+
+void BotGuardianAI::UpdateAI(uint32 diff)
+{
+    if (!me->IsAlive())
+        return;
+
+    Unit* owner = me->GetCharmerOrOwner();
+    if (!owner || !owner->IsAlive())
+    {
+        if (me->IsInCombat())
+            EnterEvadeMode();
+        return;
+    }
+
+    // 超距拉回保护：主人大步位移或使用坐骑时防卡滞脱节
+    if (me->GetDistance(owner) > 40.0f)
+    {
+        me->CombatStop(true);
+        me->GetMotionMaster()->Clear();
+        me->NearTeleportTo(owner->GetPositionX(), owner->GetPositionY(), owner->GetPositionZ(), owner->GetOrientation());
+        me->GetMotionMaster()->MoveFollow(owner, PET_FOLLOW_DIST, PET_FOLLOW_ANGLE);
+        return;
+    }
+
+    Unit* masterTarget = owner->GetVictim();
+
+    // 主人无目标或已脱战，随从同步停手归位
+    if (!owner->IsInCombat() || !masterTarget || !masterTarget->IsAlive())
+    {
+        if (me->IsInCombat() || me->GetVictim())
+        {
+            me->CombatStop(true);
+            me->GetMotionMaster()->Clear();
+            me->GetMotionMaster()->MoveFollow(owner, PET_FOLLOW_DIST, PET_FOLLOW_ANGLE);
+        }
+        return;
+    }
+
+    // 转火严格同步：目标与主人不一致时立即切换并贴身追击
+    if (me->GetVictim() != masterTarget)
+    {
+        AttackStart(masterTarget);
+    }
+
+    // 白字平砍循环
+    if (UpdateVictim())
+    {
+        DoMeleeAttackIfReady();
+    }
 }
 
 class BotGuardianScript : public CreatureScript
