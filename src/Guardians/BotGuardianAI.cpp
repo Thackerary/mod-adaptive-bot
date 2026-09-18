@@ -135,8 +135,16 @@ void BotGuardianAI::UpdateAI(uint32 diff)
         return;
     }
 
-    // 超距拉回保护：主人大步位移或使用坐骑时防卡滞脱节
-    if (me->GetDistance(owner) > 40.0f)
+    // 防跨图断言崩溃：主人跨地图传送/进本时，随从与主人不在同一 Map，
+    // 此时严禁调用 GetDistance()（底层含 ASSERT 同一 Map 校验），直接销毁自身。
+    if (me->GetMap() != owner->GetMap())
+    {
+        me->DespawnOrUnsummon();
+        return;
+    }
+
+    // 50 码超距防走失拉回：放行猎人等 41 码极限射程开怪，避免在 40 码边界反复瞬移抽搐
+    if (me->GetDistance(owner) > 50.0f)
     {
         me->CombatStop(true);
         me->GetMotionMaster()->Clear();
@@ -145,10 +153,8 @@ void BotGuardianAI::UpdateAI(uint32 diff)
         return;
     }
 
-    Unit* masterTarget = owner->GetVictim();
-
-    // 主人无目标或已脱战，随从同步停手归位
-    if (!owner->IsInCombat() || !masterTarget || !masterTarget->IsAlive())
+    // 1. 主人彻底脱战：随从同步停战并归位
+    if (!owner->IsInCombat())
     {
         if (me->IsInCombat() || me->GetVictim())
         {
@@ -159,7 +165,24 @@ void BotGuardianAI::UpdateAI(uint32 diff)
         return;
     }
 
-    // 转火严格同步：目标与主人不一致时立即切换并贴身追击
+    Unit* masterTarget = owner->GetVictim();
+
+    // 2. 主人仍在战斗中，但当前无活体/合法目标（小怪刚死、正在选怪）：
+    //    仅停手防发呆，绝不 CombatStop 清空战斗状态，保证多怪连战转火平滑。
+    if (!masterTarget || !masterTarget->IsAlive() || !me->IsValidAttackTarget(masterTarget))
+    {
+        if (me->GetVictim())
+            me->AttackStop();
+
+        if (me->GetMotionMaster()->GetCurrentMovementGeneratorType() != FOLLOW_MOTION_TYPE)
+        {
+            me->GetMotionMaster()->Clear();
+            me->GetMotionMaster()->MoveFollow(owner, PET_FOLLOW_DIST, PET_FOLLOW_ANGLE);
+        }
+        return;
+    }
+
+    // 3. 转火严格同步：目标与主人不一致时立即切换并贴身追击
     if (me->GetVictim() != masterTarget)
     {
         AttackStart(masterTarget);

@@ -584,8 +584,16 @@ public:
 
             if (!unit->IsFriendlyTo(me))
                 return;
-            if (unit->GetTypeId() == TYPEID_UNIT && unit->ToCreature()->IsTotem())
-                return;
+
+            // 排除图腾与伴随型战斗护卫（Combat Guardian）：护卫自身具备
+            // IsCombatGuardian 语义且血量为投影值，绝不进入治疗打地鼠雷达，
+            // 杜绝治疗机器人把 GCD 浪费在护卫身上导致主坦断疗。
+            if (unit->GetTypeId() == TYPEID_UNIT)
+            {
+                Creature* creature = unit->ToCreature();
+                if (creature->IsTotem() || creature->GetScriptName() == "BotGuardianAI")
+                    return;
+            }
 
             if (me->IsWithinDist(unit, maxRange) && me->IsWithinLOSInMap(unit))
             {
