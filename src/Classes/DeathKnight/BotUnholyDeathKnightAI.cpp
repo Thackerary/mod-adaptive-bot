@@ -29,6 +29,10 @@ public:
 
     float GetDamageDealtMultiplier() const override { return 1.0f; }
 
+    // 专精契约：邪DK常驻天灾军团食尸鬼护卫（近战内核）
+    bool ShouldHaveGuardian() const override { return true; }
+    GuardianVisualType GetPreferredGuardianVisualType() const override { return GUARDIAN_VISUAL_DK_UNDEAD; }
+
     // =========================================================================
     // 天赋依赖技能的最低等级契约
     // =========================================================================

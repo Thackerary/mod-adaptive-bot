@@ -251,8 +251,12 @@ public:
     ///        其余职业不召唤，避免无意义占用服务器实体配额。
     virtual bool ShouldHaveGuardian() const
     {
+        // 默认仅猎人与术士全系常驻随从。
+        // 3.3.5a 死亡骑士中只有邪 DK 契约性常驻天灾军团食尸鬼，血 DK 与冰 DK
+        // 均无随从席位，故不再在基类按 CLASS_DEATH_KNIGHT 无差别放行，
+        // 改由邪 DK 专精显式覆写开启。
         uint8 const botClass = me->getClass();
-        return botClass == CLASS_HUNTER || botClass == CLASS_WARLOCK || botClass == CLASS_DEATH_KNIGHT;
+        return botClass == CLASS_HUNTER || botClass == CLASS_WARLOCK;
     }
 
     /// @brief 该专精偏好的伴随护卫机制内核（外观池 + 技能通道）。

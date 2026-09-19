@@ -30,6 +30,9 @@ public:
 
     float GetDamageDealtMultiplier() const override { return 1.0f; }
 
+    // 专精契约：双持冰DK为纯近战物理/冰霜输出定位，不常驻伴随护卫
+    bool ShouldHaveGuardian() const override { return false; }
+
     // =========================================================================
     // 天赋依赖技能的最低等级契约
     // 注: 3.3.5a 中纯天赋技能 DBC SpellLevel 恒为 0, GetAppropriateRank 无法降阶,
