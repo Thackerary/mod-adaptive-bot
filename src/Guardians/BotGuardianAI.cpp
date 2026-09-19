@@ -410,7 +410,14 @@ void BotGuardianAI::UpdateAI(uint32 diff)
             return;
         }
 
-        // 5.4 30 码射程内立定施法：先刹车锁定朝向，再打出火焰箭。
+        // 5.4 30 码射程内立定施法：必须先彻底清空追击发生器。
+        //     仅靠 StopMoving() 只能刹停当前这一帧的位移，ChaseMovementGenerator
+        //     仍驻留在运动栈中，下一帧会因目标微小位移重新下发寻路，
+        //     表现为「起手读条 -> 被底层微移打断 -> 再起手」的读条拉扯循环，
+        //     火焰箭几乎永远无法读条完成。此处显式 Clear() 后再刹停。
+        if (me->GetMotionMaster()->GetCurrentMovementGeneratorType() == CHASE_MOTION_TYPE)
+            me->GetMotionMaster()->Clear();
+
         if (me->isMoving())
             me->StopMoving();
 
