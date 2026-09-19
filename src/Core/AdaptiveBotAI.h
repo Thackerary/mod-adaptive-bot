@@ -161,7 +161,32 @@ public:
                                || master->HasAura(25780)  // 圣骑士: 正义之怒
                                || master->HasAura(48263); // 死亡骑士: 冰霜灵气
 
-        return isMasterTank ? master : nullptr;
+        if (isMasterTank)
+            return master;
+
+        // 扫描小队 / 团队中的其他真人队友是否处于坦克姿态。
+        // 若坦克由二号玩家担任，必须正确识别，否则 GetUrgentThreatTarget()
+        // 会把主坦误判为 OT 队员而触发嘲讽抢怪，远程随从也会失去背身避难锚点。
+        if (Group* group = master->GetGroup())
+        {
+            for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+            {
+                Player* member = itr->GetSource();
+                if (!member || member == master || !member->IsAlive() || !member->IsInWorld() || member->GetMap() != me->GetMap())
+                    continue;
+
+                bool const isMemberTank = member->HasAura(71)     // 战士: 防御姿态
+                                       || member->HasAura(5487)   // 德鲁伊: 熊形态
+                                       || member->HasAura(9634)   // 德鲁伊: 巨熊形态
+                                       || member->HasAura(25780)  // 圣骑士: 正义之怒
+                                       || member->HasAura(48263); // 死亡骑士: 冰霜灵气
+
+                if (isMemberTank)
+                    return member;
+            }
+        }
+
+        return nullptr;
     }
 
     void Reset() override
