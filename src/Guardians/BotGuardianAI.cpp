@@ -4,6 +4,7 @@
 
 #include "BotGuardianAI.h"
 #include "BotGuardianDisplays.h"
+#include "ObjectAccessor.h"
 #include "PetDefines.h"
 #include "Random.h"
 #include "ScriptMgr.h"
@@ -86,12 +87,29 @@ static uint32 GetImpFireboltSpellId(uint8 level)
     return 3110;
 }
 
+Unit* BotGuardianAI::GetMaster() const
+{
+    if (!me)
+        return nullptr;
+
+    // 优先取魅惑者/拥有者：随从归属绑定完成后的常态路径
+    if (Unit* owner = me->GetCharmerOrOwner())
+        return owner;
+
+    // 回退到创建者：SummonCreature 返回后到 SetOwnerGUID 生效前的窗口期内，
+    // 只有 CreatorGUID 可查，必须靠它才能拿到宿主并解析出正确职业内核。
+    if (ObjectGuid const& creatorGuid = me->GetCreatorGUID())
+        return ObjectAccessor::GetUnit(*me, creatorGuid);
+
+    return nullptr;
+}
+
 GuardianVisualType BotGuardianAI::ResolveVisualTypeFromMaster() const
 {
-    // 使用 GetCharmerOrOwnerOrCreator() 而非 GetCharmerOrOwner()：随从刚召唤出的
-    // 瞬间只有 CreatorGUID 有效，若只看 OwnerGuid 会解析失败并静默回退到默认的
-    // 猎人野兽池，导致术士小鬼 / 死骑食尸鬼被灌成近战内核。
-    if (Unit* owner = me->GetCharmerOrOwnerOrCreator())
+    // 使用自建 GetMaster() 而非 GetCharmerOrOwner()：随从刚召唤出的瞬间只有
+    // CreatorGUID 有效，若只看 OwnerGuid 会解析失败并静默回退到默认的猎人野兽池，
+    // 导致术士小鬼 / 死骑食尸鬼被灌成近战内核。
+    if (Unit* owner = GetMaster())
     {
         switch (owner->getClass())
         {
@@ -184,7 +202,7 @@ void BotGuardianAI::Reset()
     // 2. 宿主属性镜像同步：阵营 / 位面 / 等级 / 移速
     // 随从仅供 AdaptiveBotAI 机器人搭配，属性投影必须与宿主严格一致，
     // 否则会出现「能打却打不到」「同队却互相不可见」等投影错位问题。
-    if (Unit* owner = me->GetCharmerOrOwnerOrCreator())
+    if (Unit* owner = GetMaster())
     {
         me->SetFaction(owner->GetFaction());
         me->SetPhaseMask(owner->GetPhaseMask(), true);
@@ -217,7 +235,7 @@ void BotGuardianAI::Reset()
         RefreshGuardianDisplay();
 
     // 5. 脱战重聚自动归位到伴随位，避免遗留在原地
-    if (Unit* owner = me->GetCharmerOrOwnerOrCreator())
+    if (Unit* owner = GetMaster())
     {
         me->GetMotionMaster()->Clear();
         me->GetMotionMaster()->MoveFollow(owner, PET_FOLLOW_DIST, PET_FOLLOW_ANGLE);
@@ -242,7 +260,7 @@ void BotGuardianAI::UpdateAI(uint32 diff)
     if (!me->IsAlive())
         return;
 
-    Unit* owner = me->GetCharmerOrOwnerOrCreator();
+    Unit* owner = GetMaster();
 
     // 宿主阵亡 / 离开世界 / 不存在：随从连带销毁。
     // 随从仅供机器人搭配，宿主失效后自身毫无存在意义，绝不允许作为

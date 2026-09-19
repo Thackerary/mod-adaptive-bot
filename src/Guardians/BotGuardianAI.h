@@ -103,6 +103,13 @@ public:
     void UpdateAI(uint32 diff) override;
 
 protected:
+    /// @brief 宿主单位回溯解析器。
+    ///        解析顺序为 魅惑者 -> 拥有者 -> 创建者：AzerothCore 的 Unit 并未提供
+    ///        GetCharmerOrOwnerOrCreator()，且随从在刚生成的窗口期内只写入了
+    ///        CreatorGUID，此处必须手工以创建者兜底，才能正确推断宿主职业，
+    ///        杜绝术士小鬼 / 死骑食尸鬼退化为猎人野兽（近战白字）内核。
+    [[nodiscard]] Unit* GetMaster() const;
+
     GuardianVisualType   _visualType;
     GuardianDisplayEntry _chosenDisplay{ 0, 1.0f };    ///< 首次生成时缓存的外观，Reset 幂等复用
     bool                 _visualTypeExplicit{ false }; ///< 是否由外部显式指定外观池
