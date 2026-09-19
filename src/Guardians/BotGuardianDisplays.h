@@ -1,28 +1,35 @@
+/*
+ * Copyright (C) 2016+ AzerothCore <www.azerothcore.org>, released under GNU AGPL v3 license
+ */
+
 #pragma once
 
-#include <cstdint>
 #include <vector>
+#include "Define.h"
 
-enum GuardianVisualType : uint8_t
+// 伴随型战斗护卫统一 Creature Entry。
+// 数据库 creature_template 中的 990001 应定义为友好中立的载体 NPC（不主动索敌、
+// 不参与任务交互），全部外观与机制内核均由 BotGuardianAI 在运行时动态注入，
+// 模板仅提供最基础的骨架，杜绝为其单独维护多套模板。
+static constexpr uint32 NPC_BOT_GUARDIAN = 990001;
+
+enum GuardianVisualType : uint8
 {
-    GUARDIAN_VISUAL_HUNTER_BEAST = 0,
-    GUARDIAN_VISUAL_DK_UNDEAD    = 1,
-    GUARDIAN_VISUAL_WARLOCK_IMP  = 2,
+    GUARDIAN_VISUAL_HUNTER_BEAST     = 0,
+    GUARDIAN_VISUAL_DK_UNDEAD        = 1,
+    GUARDIAN_VISUAL_WARLOCK_IMP      = 2,
     GUARDIAN_VISUAL_WARLOCK_FELHOUND = 3,
     GUARDIAN_VISUAL_WARLOCK_FELGUARD = 4
 };
 
 struct GuardianDisplayEntry
 {
-    uint32_t displayId;
-    float scale;
+    uint32 displayId;
+    float  scale;
 };
 
 // 1. 猎人陆生野兽池（机制内核：座狼模板）
-// 函数内 static：消除启动期全局动态初始化（std::vector 构造可能抛异常）
-inline std::vector<GuardianDisplayEntry> const& GetHunterBeastDisplays()
-{
-    static std::vector<GuardianDisplayEntry> const pool = {
+static const std::vector<GuardianDisplayEntry> HunterBeastDisplays = {
     // 经典狼与恐狼
     { 165, 1.0f }, { 161, 1.0f }, { 644, 1.0f }, { 776, 1.0f }, { 4124, 1.0f },
     { 73, 1.0f }, { 720, 1.0f }, { 9369, 1.0f },
@@ -46,14 +53,10 @@ inline std::vector<GuardianDisplayEntry> const& GetHunterBeastDisplays()
     // 猩猩与陆行鸟
     { 809, 1.0f }, { 838, 1.0f }, { 840, 1.0f }, { 3186, 1.0f },
     { 38, 1.0f }, { 178, 1.0f }, { 1281, 1.0f }, { 1961, 1.0f }
-    };
-    return pool;
-}
+};
 
 // 2. 死亡骑士天灾军团池（机制内核：食尸鬼模板）
-inline std::vector<GuardianDisplayEntry> const& GetDkUndeadDisplays()
-{
-    static std::vector<GuardianDisplayEntry> const pool = {
+static const std::vector<GuardianDisplayEntry> DkUndeadDisplays = {
     // 经典食尸鬼
     { 137, 1.0f }, { 414, 1.0f }, { 519, 1.0f }, { 547, 1.0f },
     // 诺森德高精食尸鬼
@@ -64,32 +67,21 @@ inline std::vector<GuardianDisplayEntry> const& GetDkUndeadDisplays()
     { 158, 1.0f }, { 200, 1.0f }, { 201, 1.0f }, { 9783, 1.0f }, { 9784, 1.0f }, { 9786, 1.0f },
     // 地穴恶魔
     { 3004, 1.0f }, { 6841, 1.0f }
-    };
-    return pool;
-}
+};
 
 // 3. 术士三大恶魔独立池
-inline std::vector<GuardianDisplayEntry> const& GetWarlockImpDisplays()
-{
-    static std::vector<GuardianDisplayEntry> const pool = {
+// 毁灭术：小鬼（统一锁定 0.5f 缩放）
+static const std::vector<GuardianDisplayEntry> WarlockImpDisplays = {
     { 4449, 0.5f }, { 7552, 0.5f }, { 10811, 0.5f },
     { 16888, 0.5f }, { 16889, 0.5f }, { 16890, 0.5f }, { 16891, 0.5f }
-    };
-    return pool;
-}
+};
 
-inline std::vector<GuardianDisplayEntry> const& GetWarlockFelhoundDisplays()
-{
-    static std::vector<GuardianDisplayEntry> const pool = {
+// 痛苦术：地狱猎犬
+static const std::vector<GuardianDisplayEntry> WarlockFelhoundDisplays = {
     { 850, 1.0f }, { 1913, 1.0f }, { 6172, 1.0f }, { 7949, 1.0f }, { 10950, 1.0f }
-    };
-    return pool;
-}
+};
 
-inline std::vector<GuardianDisplayEntry> const& GetWarlockFelguardDisplays()
-{
-    static std::vector<GuardianDisplayEntry> const pool = {
+// 恶魔术：恶魔卫士
+static const std::vector<GuardianDisplayEntry> WarlockFelguardDisplays = {
     { 5048, 1.0f }, { 5049, 1.0f }, { 21365, 1.0f }, { 18342, 1.0f }, { 19901, 1.0f }
-    };
-    return pool;
-}
+};

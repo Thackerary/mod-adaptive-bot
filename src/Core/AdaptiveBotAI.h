@@ -14,6 +14,7 @@
 #include "Item.h"
 #include "SpellInfo.h"
 #include "SpellMgr.h"
+#include "BotGuardianDisplays.h"
 #include "ObjectAccessor.h"
 #include "GossipDef.h"
 #include "ScriptedGossip.h"
@@ -42,6 +43,10 @@ public:
     uint32 energyRegenTimer{ 0 };
     uint32 manaRegenTimer{ 0 };
     bool wasInCombat{ false };
+
+    // 伴随型战斗护卫（Combat Guardian）实时句柄与保活轮询计时器
+    ObjectGuid guardianGuid;
+    uint32 guardianCheckTimer{ 0 };
 
     // 缓存指挥官平均装等 (实现战斗算伤绝对 O(1))
     float cachedMasterItemLevel{ 200.0f };
@@ -179,6 +184,10 @@ public:
             me->SetFaction(master->GetFaction());
             me->SetPhaseMask(master->GetPhaseMask(), true);
         }
+
+        // 出生即常驻：Reset() 是随从被创建/重置的必经入口，在此确保护卫就位，
+        // 使机器人一落地便带宠，杜绝首次进战才发现缺宠造成的契约空窗。
+        EnsureGuardianAlive();
     }
 
     void EnterEvadeMode(EvadeReason /*why*/) override
@@ -232,6 +241,49 @@ public:
     Player* GetMaster() const
     {
         return ObjectAccessor::GetPlayer(*me, masterGuid);
+    }
+
+    // =========================================================================
+    // 伴随型战斗护卫常驻体系（出生即随行 + 战后秒补 + 脱战保活）
+    // =========================================================================
+    /// @brief 该专精机器人是否需要常驻伴随护卫。
+    ///        猎人（座狼）、术士（三大恶魔）、死亡骑士（食尸鬼）天然契约带宠，
+    ///        其余职业不召唤，避免无意义占用服务器实体配额。
+    virtual bool ShouldHaveGuardian() const
+    {
+        uint8 const botClass = me->getClass();
+        return botClass == CLASS_HUNTER || botClass == CLASS_WARLOCK || botClass == CLASS_DEATH_KNIGHT;
+    }
+
+    /// @brief 护卫存在性仲裁与幂等补招。
+    ///        仅在本体存活、处于世界内且专精需要护卫时执行；句柄失效
+    ///        （随从被销毁 / 阵亡 / 跨地图丢失）时清除句柄并重新召唤，
+    ///        保证机器人任意时刻都有一名合法护卫跟随。
+    void EnsureGuardianAlive()
+    {
+        if (!me->IsAlive() || !me->IsInWorld() || !ShouldHaveGuardian())
+            return;
+
+        if (!guardianGuid.IsEmpty())
+        {
+            Creature* guardian = ObjectAccessor::GetCreature(*me, guardianGuid);
+            if (guardian && guardian->IsAlive() && guardian->GetMap() == me->GetMap())
+                return;
+
+            guardianGuid.Clear();
+        }
+
+        if (TempSummon* summon = me->SummonCreature(NPC_BOT_GUARDIAN, me->GetPosition(), TEMPSUMMON_MANUAL_DESPAWN))
+        {
+            guardianGuid = summon->GetGUID();
+
+            // 归属绑定与属性镜像：护卫必须与宿主同阵营、同位面，
+            // 且被显式标记为宿主所属单位，避免被视作野生怪物而遭敌对势力攻击。
+            summon->SetOwnerGUID(me->GetGUID());
+            summon->SetCreatorGUID(me->GetGUID());
+            summon->SetFaction(me->GetFaction());
+            summon->SetPhaseMask(me->GetPhaseMask(), true);
+        }
     }
 
     void AttackStart(Unit* victim) override
@@ -310,6 +362,10 @@ public:
     {
         if (isDebugLogging)
             LOG_INFO("scripts", "[Bot: {}] 战斗结算完成: {}", me->GetName(), victory ? "击杀胜利" : "团灭重置");
+
+        // 战后秒补：护卫在团本 AoE 中阵亡属常态，战斗结算瞬间立即补齐，
+        // 保证下一场战斗（连战 / 转阶段）拥有完整的机制内核与增益覆盖。
+        EnsureGuardianAlive();
     }
 
     // =========================================================================
@@ -1160,6 +1216,18 @@ public:
             else
             {
                 levelSyncTimer -= diff;
+            }
+
+            // 脱战保活轮询：3 秒一次低频巡检，覆盖「护卫被脚本强制移除 /
+            // 跨图传送丢失 / 实体被清理」等无法通过战斗结算感知的异常场景。
+            if (guardianCheckTimer <= diff)
+            {
+                guardianCheckTimer = 3000;
+                EnsureGuardianAlive();
+            }
+            else
+            {
+                guardianCheckTimer -= diff;
             }
         }
     }

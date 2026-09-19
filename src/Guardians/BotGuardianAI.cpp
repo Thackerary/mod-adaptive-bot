@@ -68,6 +68,24 @@ void BotGuardianAI::ApplyGuardianDisplay(GuardianDisplayEntry const& entry)
     me->SetObjectScale(entry.scale);
 }
 
+/// @brief 小鬼内核【火焰箭】等级阶梯解析。
+///        3.3.5a 中小鬼火焰箭为固定 DBC 阶数法术（非 Rank 链），无法通过
+///        GetAppropriateRank 回溯降阶，必须手工按等级阶梯查表，
+///        否则低等级随从会强行施放 80 级法术被底层拒绝而形成永久发呆。
+static uint32 GetImpFireboltSpellId(uint8 level)
+{
+    if (level >= 80) return 47964;
+    if (level >= 76) return 47963;
+    if (level >= 68) return 27264;
+    if (level >= 58) return 10939;
+    if (level >= 48) return 10938;
+    if (level >= 38) return 7802;
+    if (level >= 28) return 7801;
+    if (level >= 18) return 7800;
+    if (level >= 8)  return 7799;
+    return 3110;
+}
+
 GuardianVisualType BotGuardianAI::ResolveVisualTypeFromMaster() const
 {
     if (Unit* owner = me->GetCharmerOrOwner())
@@ -169,6 +187,17 @@ void BotGuardianAI::Reset()
 
         me->SetSpeed(MOVE_RUN, owner->GetSpeedRate(MOVE_RUN));
         me->SetSpeed(MOVE_WALK, owner->GetSpeedRate(MOVE_WALK));
+    }
+
+    // 小鬼内核：配置独立法力池。
+    // 小鬼作为法系随从必须以法力驱动远程读条，若沿用近战模板的原生资源池
+    // 会出现「无蓝可读」的瘫疾；此处按等级线性投影法力上限并立即灌满。
+    if (_visualType == GUARDIAN_VISUAL_WARLOCK_IMP)
+    {
+        me->setPowerType(POWER_MANA);
+        uint32 const impMana = me->GetLevel() * 120 + 2000;
+        me->SetMaxPower(POWER_MANA, impMana);
+        me->SetPower(POWER_MANA, impMana);
     }
 
     // 未显式指定外观池时，依据主人职业自动推断，避免全职业沦为猎人野兽
@@ -295,26 +324,57 @@ void BotGuardianAI::UpdateAI(uint32 diff)
     }
 
     // 5. 转火严格同步：唯一攻击目标源即宿主当前目标（宿主为机器人，无需
-    //    任何玩家专用的选中目标/协助目标探测逻辑），切换后双向绑定进战状态，
-    //    确保随从与目标互相进入战斗列表，平砍与仇恨链路完整成立。
-    if (me->GetVictim() != masterTarget)
+    //    任何玩家专用的选中目标/协助目标探测逻辑）。
+    //    —— 小鬼为纯远程法系内核，与近战内核彻底分流，故不再走统一步骤。
+    if (_visualType == GUARDIAN_VISUAL_WARLOCK_IMP)
     {
-        AttackStart(masterTarget);
-        me->SetInCombatWith(masterTarget);
-        masterTarget->SetInCombatWith(me);
-    }
-    else if (me->GetMotionMaster()->GetCurrentMovementGeneratorType() != CHASE_MOTION_TYPE)
-    {
-        // 目标未变但追击链已断（被 Boss 击飞、昏迷/恐惧醒来、地形挤出等）：
-        // 重新下发 MoveChase 恢复贴身追击，杜绝原地发呆直到目标死亡。
-        // 注意 REACT_PASSIVE 下底层不会自动补发 Chase，必须在此显式自愈。
-        me->GetMotionMaster()->MoveChase(masterTarget);
-    }
+        // 5.1 蓝量锁定（解决耗蓝）：每帧读条前清空法力消耗顾虑。
+        //     随从没有玩家级的回蓝装备与精神回蓝，若按原生消耗结算，
+        //     连续几发火焰箭即 OOM 陷入永久发呆，此处直接置满根除。
+        me->SetPower(POWER_MANA, me->GetMaxPower(POWER_MANA));
 
-    // 6. 白字平砍循环：直接调用，绝不使用 UpdateVictim() 作为守卫。
-    //    随从强制 REACT_PASSIVE，底层 UpdateVictim() 恒返回 false，
-    //    若以其为门禁会导致 DoMeleeAttackIfReady() 永远无法触发（平砍瘫痪）。
-    DoMeleeAttackIfReady();
+        // 5.2 正在读条 / 引导时放行本帧，严禁下发任何走位指令掐断读条。
+        if (me->HasUnitState(UNIT_STATE_CASTING))
+            return;
+
+        // 5.3 射程与视线仲裁：超出 30 码或视线受阻时贴近至 20 码甜蜜点。
+        if (!me->IsWithinLOSInMap(masterTarget) || me->GetDistance(masterTarget) > 30.0f)
+        {
+            me->GetMotionMaster()->MoveChase(masterTarget, 20.0f);
+            return;
+        }
+
+        // 5.4 30 码射程内立定施法：先刹车锁定朝向，再打出火焰箭。
+        if (me->isMoving())
+            me->StopMoving();
+
+        me->SetFacingToObject(masterTarget);
+        me->CastSpell(masterTarget, GetImpFireboltSpellId(me->GetLevel()), false);
+    }
+    else
+    {
+        // 5.5 近战内核（座狼 / 食尸鬼 / 恶魔卫士 / 地狱猎犬）：
+        //     切换后双向绑定进战状态，确保随从与目标互相进入战斗列表，
+        //     平砍与仇恨链路完整成立。
+        if (me->GetVictim() != masterTarget)
+        {
+            AttackStart(masterTarget);
+            me->SetInCombatWith(masterTarget);
+            masterTarget->SetInCombatWith(me);
+        }
+        else if (me->GetMotionMaster()->GetCurrentMovementGeneratorType() != CHASE_MOTION_TYPE)
+        {
+            // 目标未变但追击链已断（被 Boss 击飞、昏迷/恐惧醒来、地形挤出等）：
+            // 重新下发 MoveChase 恢复贴身追击，杜绝原地发呆直到目标死亡。
+            // 注意 REACT_PASSIVE 下底层不会自动补发 Chase，必须在此显式自愈。
+            me->GetMotionMaster()->MoveChase(masterTarget);
+        }
+
+        // 6. 白字平砍循环：直接调用，绝不使用 UpdateVictim() 作为守卫。
+        //    随从强制 REACT_PASSIVE，底层 UpdateVictim() 恒返回 false，
+        //    若以其为门禁会导致 DoMeleeAttackIfReady() 永远无法触发（平砍瘫痪）。
+        DoMeleeAttackIfReady();
+    }
 }
 
 class BotGuardianScript : public CreatureScript
