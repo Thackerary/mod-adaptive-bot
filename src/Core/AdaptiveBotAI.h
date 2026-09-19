@@ -283,6 +283,13 @@ public:
             summon->SetCreatorGUID(me->GetGUID());
             summon->SetFaction(me->GetFaction());
             summon->SetPhaseMask(me->GetPhaseMask(), true);
+
+            // 归属绑定后再复位一次：SummonCreature 内部的首次 AI 初始化发生在我们
+            // 写入 OwnerGUID / Faction / PhaseMask 之前，此时随从无法正确推断主人
+            // 职业与阵营，必须以绑定后的快照重跑完整初始化，否则术士会拿到猎人
+            // 内核（近战白字）而彻底失去远程读条能力。
+            if (CreatureAI* guardianAI = summon->AI())
+                guardianAI->Reset();
         }
     }
 

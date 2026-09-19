@@ -88,7 +88,10 @@ static uint32 GetImpFireboltSpellId(uint8 level)
 
 GuardianVisualType BotGuardianAI::ResolveVisualTypeFromMaster() const
 {
-    if (Unit* owner = me->GetCharmerOrOwner())
+    // 使用 GetCharmerOrOwnerOrCreator() 而非 GetCharmerOrOwner()：随从刚召唤出的
+    // 瞬间只有 CreatorGUID 有效，若只看 OwnerGuid 会解析失败并静默回退到默认的
+    // 猎人野兽池，导致术士小鬼 / 死骑食尸鬼被灌成近战内核。
+    if (Unit* owner = me->GetCharmerOrOwnerOrCreator())
     {
         switch (owner->getClass())
         {
@@ -171,10 +174,17 @@ void BotGuardianAI::Reset()
     // 被动反应状态：底层引擎不再自主指派仇恨目标，杜绝随从擅自警戒引怪
     me->SetReactState(REACT_PASSIVE);
 
-    // 宿主属性镜像同步：阵营 / 位面 / 等级 / 移速
+    // 1. 外观池与职业内核必须最先就绪：后续的法力池配置、属性镜像与光环注入
+    //    全部以 _visualType 为分派依据。若把该推断留在函数末尾（原实现顺序），
+    //    首次生成时会先按构造期的默认猎人内核把小鬼灌成近战资源池，造成
+    //    「法系内核 + 近战资源」的倒挂，远程读条能力彻底失效。
+    if (!_visualTypeExplicit)
+        _visualType = ResolveVisualTypeFromMaster();
+
+    // 2. 宿主属性镜像同步：阵营 / 位面 / 等级 / 移速
     // 随从仅供 AdaptiveBotAI 机器人搭配，属性投影必须与宿主严格一致，
     // 否则会出现「能打却打不到」「同队却互相不可见」等投影错位问题。
-    if (Unit* owner = me->GetCharmerOrOwner())
+    if (Unit* owner = me->GetCharmerOrOwnerOrCreator())
     {
         me->SetFaction(owner->GetFaction());
         me->SetPhaseMask(owner->GetPhaseMask(), true);
@@ -189,9 +199,9 @@ void BotGuardianAI::Reset()
         me->SetSpeed(MOVE_WALK, owner->GetSpeedRate(MOVE_WALK));
     }
 
-    // 小鬼内核：配置独立法力池。
-    // 小鬼作为法系随从必须以法力驱动远程读条，若沿用近战模板的原生资源池
-    // 会出现「无蓝可读」的瘫疾；此处按等级线性投影法力上限并立即灌满。
+    // 3. 小鬼内核：配置独立法力池（必须在 _visualType 判定之后执行）。
+    //    小鬼作为法系随从必须以法力驱动远程读条，若沿用近战模板的原生资源池
+    //    会出现「无蓝可读」的瘫疾；此处按等级线性投影法力上限并立即灌满。
     if (_visualType == GUARDIAN_VISUAL_WARLOCK_IMP)
     {
         me->setPowerType(POWER_MANA);
@@ -200,26 +210,22 @@ void BotGuardianAI::Reset()
         me->SetPower(POWER_MANA, impMana);
     }
 
-    // 未显式指定外观池时，依据主人职业自动推断，避免全职业沦为猎人野兽
-    if (!_visualTypeExplicit)
-        _visualType = ResolveVisualTypeFromMaster();
-
-    // 幂等：仅首次生成 Roll 点，脱战重聚只重新应用缓存结果
+    // 4. 表现层外观应用：幂等，仅首次生成 Roll 点，脱战重聚只重新应用缓存结果
     if (!_displayApplied)
         ApplyRandomGuardianDisplay(_visualType);
     else
         RefreshGuardianDisplay();
 
-    // 脱战重聚自动归位到伴随位，避免遗留在原地
-    if (Unit* owner = me->GetCharmerOrOwner())
+    // 5. 脱战重聚自动归位到伴随位，避免遗留在原地
+    if (Unit* owner = me->GetCharmerOrOwnerOrCreator())
     {
         me->GetMotionMaster()->Clear();
         me->GetMotionMaster()->MoveFollow(owner, PET_FOLLOW_DIST, PET_FOLLOW_ANGLE);
     }
 
-    // 外观与属性就绪后注入毕业机制内核光环（外观千人千面，内核永远毕业）。
-    // Reset() 为脱战重聚的必经入口，故 30 分钟时长的常驻光环（血之契印 /
-    // 恶魔智力）在每次脱战归位时都会被幂等补刷，无需额外高频维护。
+    // 6. 外观与属性就绪后注入毕业机制内核光环（外观千人千面，内核永远毕业）。
+    //    Reset() 为脱战重聚的必经入口，故 30 分钟时长的常驻光环（血之契印 /
+    //    恶魔智力）在每次脱战归位时都会被幂等补刷，无需额外高频维护。
     ApplyGuardianCoreAuras();
 
     OnGuardianReset();
@@ -236,7 +242,7 @@ void BotGuardianAI::UpdateAI(uint32 diff)
     if (!me->IsAlive())
         return;
 
-    Unit* owner = me->GetCharmerOrOwner();
+    Unit* owner = me->GetCharmerOrOwnerOrCreator();
 
     // 宿主阵亡 / 离开世界 / 不存在：随从连带销毁。
     // 随从仅供机器人搭配，宿主失效后自身毫无存在意义，绝不允许作为
@@ -294,14 +300,16 @@ void BotGuardianAI::UpdateAI(uint32 diff)
         }
     }
 
-    // 3. 主人彻底脱战：随从同步停战并归位
+    // 3. 主人彻底脱战：随从停战并执行一次完整 Reset()。
+    //    必须走 Reset() 而非手写归位：脱战重聚契约包含「属性重投影 + 位面修正 +
+    //    常驻机制光环幂等补刷（血之契印 / 恶魔智力）+ 外观缓存复用 + 跟随复位」
+    //    一整套动作，仅下发 MoveFollow 会让长时长的核心光环在连战间隙静默脱落。
     if (!owner->IsInCombat())
     {
         if (me->IsInCombat() || me->GetVictim())
         {
             me->CombatStop(true);
-            me->GetMotionMaster()->Clear();
-            me->GetMotionMaster()->MoveFollow(owner, PET_FOLLOW_DIST, PET_FOLLOW_ANGLE);
+            Reset();
         }
         return;
     }
@@ -312,6 +320,11 @@ void BotGuardianAI::UpdateAI(uint32 diff)
     //    仅停手防发呆，绝不 CombatStop 清空战斗状态，保证多怪连战转火平滑。
     if (!masterTarget || !masterTarget->IsAlive() || !me->IsValidAttackTarget(masterTarget))
     {
+        // 先掐断读条再停手：否则会发生「对已死亡目标继续读条」的无效施法，
+        // 读完才发现目标已消失，白白浪费一次 GCD 与读条窗口。
+        if (me->HasUnitState(UNIT_STATE_CASTING))
+            me->InterruptNonMeleeSpells(false);
+
         if (me->GetVictim())
             me->AttackStop();
 
@@ -328,6 +341,16 @@ void BotGuardianAI::UpdateAI(uint32 diff)
     //    —— 小鬼为纯远程法系内核，与近战内核彻底分流，故不再走统一步骤。
     if (_visualType == GUARDIAN_VISUAL_WARLOCK_IMP)
     {
+        // 5.0 远程目标锚定：小鬼为纯法系内核，必须显式建立 Victim 锚点。
+        //     第二参数传 false 仅完成法术目标锁定，绝不触发底层近战追击与白字
+        //     挥砍；同时补齐双向进战绑定，保证远程施法链路与仇恨统计完整成立。
+        if (me->GetVictim() != masterTarget)
+        {
+            me->Attack(masterTarget, false);
+            me->SetInCombatWith(masterTarget);
+            masterTarget->SetInCombatWith(me);
+        }
+
         // 5.1 蓝量锁定（解决耗蓝）：每帧读条前清空法力消耗顾虑。
         //     随从没有玩家级的回蓝装备与精神回蓝，若按原生消耗结算，
         //     连续几发火焰箭即 OOM 陷入永久发呆，此处直接置满根除。

@@ -63,7 +63,10 @@ public:
     /// @brief 幂等刷新：重新应用最近一次 Roll 到的缓存外观，绝不重新摇号。
     void RefreshGuardianDisplay();
 
-    /// @brief 依据主人（或魅惑/召唤者）职业推断默认外观池。
+    /// @brief 依据主人职业推断默认外观池。
+    ///        解析顺序为 魅惑者 -> 拥有者 -> 创建者：随从在刚被召唤、OwnerGUID
+    ///        尚未写入的窗口期内只存在 CreatorGUID，必须依赖创建者兜底才能得到
+    ///        正确职业，杜绝全职业退化为猎人野兽内核。
     [[nodiscard]] GuardianVisualType ResolveVisualTypeFromMaster() const;
 
     /// @brief 纯粹的表现层写入：双重设值模型 + 归一化缩放。
