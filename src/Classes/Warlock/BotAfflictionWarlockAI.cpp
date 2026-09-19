@@ -79,6 +79,9 @@ public:
     // 按专精契约固定 1.0x：不继承基类为法系远程预留的 2.0x ~ 3.3x 装备装等放大通道
     float GetDamageDealtMultiplier() const override { return 1.0f; }
 
+    // 专精契约：痛苦术携带地狱犬（恶魔智力光环 + 近战内核）
+    GuardianVisualType GetPreferredGuardianVisualType() const override { return GUARDIAN_VISUAL_WARLOCK_FELHOUND; }
+
     // =========================================================================
     // 天赋依赖技能的最低等级契约
     // 注：基础法术 (腐蚀术/痛苦诅咒/暗影箭/吸取灵魂/生命分流/死亡缠绕/护甲等) 严禁登记于此，

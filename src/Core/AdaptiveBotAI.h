@@ -255,6 +255,22 @@ public:
         return botClass == CLASS_HUNTER || botClass == CLASS_WARLOCK || botClass == CLASS_DEATH_KNIGHT;
     }
 
+    /// @brief 该专精偏好的伴随护卫机制内核（外观池 + 技能通道）。
+    ///        护卫实体在生成瞬间会回查宿主的专精偏好，因此术士三系必须在此分流：
+    ///          - 默认（含未覆写的职业级兜底）走小鬼池；
+    ///          - 痛苦术覆写为地狱犬、恶魔术覆写为恶魔卫士。
+    ///        否则三系术士会被统一灌成小鬼内核，与专精契约完全脱节。
+    virtual GuardianVisualType GetPreferredGuardianVisualType() const
+    {
+        switch (me->getClass())
+        {
+            case CLASS_HUNTER:       return GUARDIAN_VISUAL_HUNTER_BEAST;
+            case CLASS_DEATH_KNIGHT: return GUARDIAN_VISUAL_DK_UNDEAD;
+            case CLASS_WARLOCK:      return GUARDIAN_VISUAL_WARLOCK_IMP;
+            default:                 return GUARDIAN_VISUAL_HUNTER_BEAST;
+        }
+    }
+
     /// @brief 护卫存在性仲裁与幂等补招。
     ///        仅在本体存活、处于世界内且专精需要护卫时执行；句柄失效
     ///        （随从被销毁 / 阵亡 / 跨地图丢失）时清除句柄并重新召唤，

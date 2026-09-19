@@ -2,6 +2,7 @@
  * Copyright (C) 2016+ AzerothCore <www.azerothcore.org>, released under GNU AGPL v3 license
  */
 
+#include "AdaptiveBotAI.h"
 #include "BotGuardianAI.h"
 #include "BotGuardianDisplays.h"
 #include "ObjectAccessor.h"
@@ -111,6 +112,16 @@ GuardianVisualType BotGuardianAI::ResolveVisualTypeFromMaster() const
     // 导致术士小鬼 / 死骑食尸鬼被灌成近战内核。
     if (Unit* owner = GetMaster())
     {
+        // 首选：向宿主机器人查询「专精级」偏好。
+        // 职业级 switch 无法区分术士三系 —— 痛苦术要地狱犬、恶魔术要恶魔卫士、
+        // 毁灭术要小鬼，若只按 CLASS_WARLOCK 判定会把三系全部灌成小鬼内核。
+        if (Creature* ownerCreature = owner->ToCreature())
+        {
+            if (auto* botAI = dynamic_cast<AdaptiveBotAI*>(ownerCreature->AI()))
+                return botAI->GetPreferredGuardianVisualType();
+        }
+
+        // 兜底：宿主非模块机器人（或 AI 未就绪）时退回职业级推断
         switch (owner->getClass())
         {
             case CLASS_DEATH_KNIGHT:
@@ -141,6 +152,12 @@ void BotGuardianAI::ApplyGuardianCoreAuras()
 
     uint8 const level = me->GetLevel();
 
+    // 非小鬼内核必须清除法伤增效光环 23568：该光环会同时放大近战护卫的白字平砍
+    // 与技能伤害，使座狼 / 食尸鬼 / 地狱犬 / 恶魔卫士出现数值溢出。
+    // 必须保证该光环仅由小鬼分支独占持有。
+    if (_visualType != GUARDIAN_VISUAL_WARLOCK_IMP)
+        me->RemoveAurasDueToSpell(23568);
+
     // 2. 依据机制内核施加专属毕业功能光环（等级阶梯自适应）
     switch (_visualType)
     {
@@ -168,6 +185,14 @@ void BotGuardianAI::ApplyGuardianCoreAuras()
                                   (level >= 14) ? 7804  : 6307;
             if (!me->HasAura(pactId))
                 me->CastSpell(me, pactId, true);
+
+            // 小鬼法伤增效：随从作为普通 Creature 没有玩家级的装备法强与天赋加成，
+            // 仅靠原生基础法伤会导致火焰箭造成个位数伤害，完全无法贡献有效输出。
+            // 此处按等级阶梯注入系统伤害增效光环 23568，与治疗随从注入 23569 的
+            // 通道同源，保证小鬼在 1~80 全等级段维持及格的远程秒伤。
+            int32 const spellDamagePercent = (level >= 80) ? 120 : static_cast<int32>(40 + (level / 80.0f) * 60.0f);
+            me->RemoveAurasDueToSpell(23568);
+            me->CastCustomSpell(me, 23568, &spellDamagePercent, nullptr, nullptr, true);
             break;
         }
         case GUARDIAN_VISUAL_WARLOCK_FELHOUND:

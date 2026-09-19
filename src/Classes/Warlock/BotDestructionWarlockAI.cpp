@@ -96,6 +96,9 @@ public:
     // 固定 1.0x: 不继承基类为法系远程预留的 2.0x ~ 3.3x 装备装等放大通道
     float GetDamageDealtMultiplier() const override { return 1.0f; }
 
+    // 专精契约：毁灭术携带小鬼（远程火焰箭内核 + 血之契印耐力光环）
+    GuardianVisualType GetPreferredGuardianVisualType() const override { return GUARDIAN_VISUAL_WARLOCK_IMP; }
+
     // =========================================================================
     // 天赋依赖技能的最低等级契约
     // 注: 3.3.5a 中纯天赋技能 DBC SpellLevel 恒为 0, GetAppropriateRank 无法降阶,
