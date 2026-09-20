@@ -1066,6 +1066,32 @@ private:
         if (me->HasUnitState(UNIT_STATE_CASTING))
             return;
 
+        // ---- 基础位: APF 势场紧急避险 (火圈/顺劈强行接管) ----
+        // 读条路径被 CanCast 的「危险区封锁」截断后，若此处不下发主动位移，
+        // 治疗随从只会原地站桩瞬发，被火圈与锥形区域活活烧穿。
+        // 避险优先级必须高于一切跟随/贴坦握手逻辑。
+        if (IsUnderDangerThreat(2.0f))
+        {
+            if (apfMoveUpdateTimer == 0 || me->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+            {
+                float nextX = 0.0f, nextY = 0.0f, nextZ = 0.0f;
+                Unit* avoidAnchor = groupSnapshot.mainTank ? groupSnapshot.mainTank : GetMaster();
+                if (avoidAnchor)
+                {
+                    if (PotentialField::CalculateNextPosition(me, avoidAnchor, IDEAL_FOLLOW_DIST, false, false, activeDangerZones, nextX, nextY, nextZ))
+                    {
+                        me->GetMotionMaster()->MovePoint(1, nextX, nextY, nextZ);
+                        apfMoveUpdateTimer = 300;
+                        return;
+                    }
+                }
+            }
+            else
+            {
+                return; // 正在平滑执行上一个避险航点，暂不打断
+            }
+        }
+
         Unit* anchor = groupSnapshot.mainTank;
         if (!anchor || !anchor->IsAlive())
             anchor = GetMaster();

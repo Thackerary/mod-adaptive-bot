@@ -617,11 +617,14 @@ private:
                 recklessnessCooldown = CD_RECKLESSNESS;
         }
 
-        // ---- 拳击：目标读条/引导时近战瞬发打断 (狂暴姿态) ----
-        if (pummelCooldown == 0 && IsInterruptibleTarget(victim))
+        // ---- 拳击：接入阶段三基类记忆化压秒打断仲裁引擎 ----
+        // 交由基类 ShouldInterruptTarget 统一裁决：引导类即刻抢断，
+        // 读条类严格按 learnedInterruptDelays 学到的压秒余量出手，
+        // 彻底取代原先「只要在读条就砍」的盲目秒断。
+        if (pummelCooldown == 0)
         {
             uint32 const pummel = GetAppropriateRank(FuryWarriorSpells::PUMMEL, false);
-            if (pummel && CanCast(victim, pummel, true) && ExecuteSpell(victim, pummel, true))
+            if (pummel && TryInterrupt(victim, pummel))
                 pummelCooldown = CD_PUMMEL;
         }
     }

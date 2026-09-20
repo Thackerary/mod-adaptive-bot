@@ -188,32 +188,29 @@ public:
             }
         }
 
-        // 2. 战术打断：目标正在读条施法
-        if (victim->HasUnitState(UNIT_STATE_CASTING)) 
+        // 2. 战术打断：盾击接入阶段三基类记忆化压秒打断仲裁引擎。
+        // 交由基类 ShouldInterruptTarget 统一裁决：引导类即刻抢断，
+        // 读条类严格按 learnedInterruptDelays 学到的压秒余量出手，
+        // 彻底取代原先「只要在读条就砍」的盲目秒断。
+        uint32 const shieldBash = GetAppropriateRank(ProtectionWarriorSpells::SHIELD_BASH);
+        if (shieldBash && TryInterrupt(victim, shieldBash))
+            return;
+
+        // 远距离突进打断：仅当目标确在施法且处于突进射程时才交冲锋/拦截，
+        // 避免把机动技能浪费在无读条的常规拉怪上。
+        if (victim->HasUnitState(UNIT_STATE_CASTING) && distToVictim >= 8.0f && distToVictim <= 25.0f && !me->HasUnitState(UNIT_STATE_ROOT))
         {
-            if (me->IsWithinMeleeRange(victim)) 
+            uint32 const charge = GetAppropriateRank(ProtectionWarriorSpells::CHARGE); 
+            if (charge && CanCast(victim, charge, false)) 
             {
-                uint32 const shieldBash = GetAppropriateRank(ProtectionWarriorSpells::SHIELD_BASH); 
-                if (shieldBash && CanCast(victim, shieldBash, true)) 
-                {
-                    if (ExecuteSpell(victim, shieldBash, true)) 
-                        return;
-                }
+                if (ExecuteSpell(victim, charge, false)) 
+                    return;
             }
-            else if (distToVictim >= 8.0f && distToVictim <= 25.0f && !me->HasUnitState(UNIT_STATE_ROOT)) 
+            uint32 const intercept = GetAppropriateRank(ProtectionWarriorSpells::INTERCEPT); 
+            if (intercept && CanCast(victim, intercept, false)) 
             {
-                uint32 const charge = GetAppropriateRank(ProtectionWarriorSpells::CHARGE); 
-                if (charge && CanCast(victim, charge, false)) 
-                {
-                    if (ExecuteSpell(victim, charge, false)) 
-                        return;
-                }
-                uint32 const intercept = GetAppropriateRank(ProtectionWarriorSpells::INTERCEPT); 
-                if (intercept && CanCast(victim, intercept, false)) 
-                {
-                    if (ExecuteSpell(victim, intercept, false)) 
-                        return;
-                }
+                if (ExecuteSpell(victim, intercept, false)) 
+                    return;
             }
         }
 
