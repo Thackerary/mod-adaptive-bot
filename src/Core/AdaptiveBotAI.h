@@ -956,7 +956,8 @@ public:
         // 若按「距离 > 0.8f」放行，服务端每 50ms 心跳都会重新下发 MovePoint，
         // 起跑动画被无限掐断重置，表现为原地剧烈抽搐。故改为 300ms 帧节流：
         // 仅在节流窗口结束、或当前已脱离 POINT 生成器（被打断/被抢占）时才重算。
-        if (!activeDangerZones.empty() && !me->HasUnitState(UNIT_STATE_CHARGING))
+        bool const threatened = IsUnderDangerThreat(2.0f);
+        if ((threatened || !activeDangerZones.empty()) && !me->HasUnitState(UNIT_STATE_CHARGING))
         {
             if (apfMoveUpdateTimer == 0 || me->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
             {
@@ -974,6 +975,17 @@ public:
             else
             {
                 return; // 正在平滑执行上一个 APF 导航航点，不进行路径打断
+            }
+
+            // 核心关键修复：脱离危险区途中合力会逐渐衰减到阈值以下而返回 false，
+            // 若就此向下击穿调用 MoveChase(victim)，会把随从强行拉回火圈中心，
+            // 形成「推出->拉回」的溜溜球折返跑。因此只要仍在危险覆盖边缘，
+            // 就地站桩挥砍，把危险区排除权交给下一帧的势场重算。
+            if (threatened)
+            {
+                if (me->GetVictim() != victim || !me->HasUnitState(UNIT_STATE_MELEE_ATTACKING))
+                    me->Attack(victim, true);
+                return;
             }
         }
 
