@@ -22,7 +22,7 @@ AttributionReport CombatAnalyzer::Analyze(
     uint32 maxDamageInRecent = 0;
     uint32 maxDamageSpell = 0;
 
-    uint32 tankThreatSum = 0;
+    uint32 maxTankThreat = 0;
     uint32 tankSampleCount = 0;
 
     // 1. 逆序扫描：捕获致死伤害与尖刺爆发
@@ -36,8 +36,10 @@ AttributionReport CombatAnalyzer::Analyze(
             report.fatalSourceGuid = ev.sourceGuid;
             foundFatal = true;
 
-            // 将致死落点逆向提炼为临时避险禁区 (半径 6 码)
-            if (ev.x != 0.0f || ev.y != 0.0f)
+            // 仅当致死来源为具体法术技能（非平砍白字 SpellID == 0）时，
+            // 才把落点逆向提炼为地面避险禁区；否则随从被普攻打死会在原地
+            // 画出一个 6 码假火圈，导致后续战斗出现无意义的绕行抖动。
+            if (ev.spellId != 0 && (ev.x != 0.0f || ev.y != 0.0f))
             {
                 DangerZone zone;
                 zone.type = DangerZoneType::CIRCLE;
@@ -84,13 +86,17 @@ AttributionReport CombatAnalyzer::Analyze(
 
         if (ev.eventType == BotCombatEventType::TANK_THREAT_SAMPLE && ev.combatTimeMs <= 10000)
         {
-            tankThreatSum += ev.amount;
+            // 采样值为该秒的绝对累计仇恨，而非每秒增量，因此只能取窗口内峰值，
+            // 直接累加会得到 O(n^2) 量级的虚高结果（TPS 暴涨 5~10 倍）。
+            if (ev.amount > maxTankThreat)
+                maxTankThreat = ev.amount;
+
             ++tankSampleCount;
         }
     });
 
     float const seconds = std::min(combatDurationMs, 10000u) / 1000.0f;
-    report.tankFirst10sTps = (seconds > 0.0f) ? (static_cast<float>(tankThreatSum) / seconds) : 0.0f;
+    report.tankFirst10sTps = (seconds > 0.0f) ? (static_cast<float>(maxTankThreat) / seconds) : 0.0f;
 
     return report;
 }

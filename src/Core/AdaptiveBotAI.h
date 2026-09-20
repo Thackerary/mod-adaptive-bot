@@ -57,6 +57,7 @@ public:
     BotCombatRingBuffer<256> combatEventBuffer;
     uint32 combatTimerMs{ 0 };
     uint32 tankSampleTimer{ 0 };
+    uint32 otCheckTimer{ 0 };
 
     // 当前感知到的动态危险斥力源（由战后归因逆向提炼，供 APF 势场避险消费）
     std::vector<DangerZone> activeDangerZones;
@@ -213,8 +214,10 @@ public:
         wasInCombat = false;
         combatTimerMs = 0;
         tankSampleTimer = 0;
+        otCheckTimer = 0;
         combatEventBuffer.Clear();
-        activeDangerZones.clear();
+        // 刻意保留 activeDangerZones：团灭跑尸的 Reset() 不得冲刷已学到的
+        // 危险禁区，否则每一次团灭都会把当次归因成果清零，永远无法跨战斗避险。
         ResetComboPoints();
         me->SetNpcFlag(UNIT_NPC_FLAG_GOSSIP);
 
@@ -920,8 +923,27 @@ public:
         if (!victim || !victim->IsAlive() || victim->GetMap() != me->GetMap())
             return;
 
-        if (me->HasUnitState(UNIT_STATE_CASTING))
+        if (me->HasUnitState(UNIT_STATE_CASTING) || me->GetCurrentSpell(CURRENT_CHANNELED_SPELL))
             return;
+
+        // 优先由 APF 人工势场接管走位：战场存在由战后归因逆向提炼的危险禁区时，
+        // 仍沿用原生 MoveChase 会让随从直线穿火圈，避险数据完全空转。
+        if (!activeDangerZones.empty() && !me->HasUnitState(UNIT_STATE_CHARGING))
+        {
+            float nextX = 0.0f, nextY = 0.0f, nextZ = 0.0f;
+            if (PotentialField::CalculateNextPosition(me, victim, 2.0f, !IsTankBot(), IsTankBot(), activeDangerZones, nextX, nextY, nextZ))
+            {
+                if (me->GetVictim() != victim || !me->HasUnitState(UNIT_STATE_MELEE_ATTACKING))
+                    me->Attack(victim, true);
+
+                // 最小位移容差：势场落点与自身距离过近时不重下发路径，
+                // 杜绝每帧抖动切换 POINT 生成器造成的原地抽搐。
+                if (me->GetDistance(nextX, nextY, nextZ) > 0.8f)
+                    me->GetMotionMaster()->MovePoint(1, nextX, nextY, nextZ);
+
+                return;
+            }
+        }
 
         if (me->GetVictim() != victim)
         {
@@ -1364,6 +1386,7 @@ public:
             wasInCombat = true;
             combatTimerMs = 0;
             tankSampleTimer = 0;
+            otCheckTimer = 0;
             combatEventBuffer.Clear();
         }
 
@@ -1374,8 +1397,13 @@ public:
 
             if (combatTimerMs <= 10000)
             {
-                if (!IsTankBot() && (combatTimerMs % 1000) < diff)
+                // 独立累加器取代 combatTimerMs % 1000 取模判定：
+                // diff 波动（卡帧 / 批量结算）会让取模判定跳帧或同一秒重复命中，
+                // 造成 OT 采样密度不稳定。
+                otCheckTimer += diff;
+                if (!IsTankBot() && otCheckTimer >= 1000)
                 {
+                    otCheckTimer -= 1000;
                     Unit* attacker = me->getAttackerForHelper();
                     if (attacker && attacker->GetVictim() == me)
                     {
