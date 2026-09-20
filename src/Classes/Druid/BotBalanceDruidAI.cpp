@@ -164,12 +164,16 @@ public:
         // 台风自身的击退会强制目标位移 (施法中位移即中断读条)，
         // 交由基类按 learnedInterruptDelays 学到的提前量裁决出手窗口，
         // 引导类法术零延时抢断，读条类法术压在末端，榨取最大输出偷跑时间。
+        // 注意：台风为自身原点 PBAoE (DBC 射程为 0)，严禁把技能 ID 传入
+        // ShouldInterruptTarget —— 那会让基类对敌对目标做定向距离检验，
+        // 目标稍超 5 码即被误判为超距而拒绝打断。此处仅用纯读条时间判定，
+        // 作用半径交由外层 TYPHOON_RADIUS (15 码) 单独把关。
         uint32 const interruptTyphoon = GetTalentRank(BalanceDruidSpells::TYPHOON);
         if (interruptTyphoon && typhoonCooldown == 0 && me->IsWithinDist(victim, TYPHOON_RADIUS) &&
-            ShouldInterruptTarget(victim, interruptTyphoon))
+            ShouldInterruptTarget(victim))
         {
             me->SetFacingToObject(victim);
-            if (ExecuteSpell(me, interruptTyphoon, true))
+            if (CanCast(me, interruptTyphoon, true) && ExecuteSpell(me, interruptTyphoon, true))
             {
                 typhoonCooldown = CD_TYPHOON;
                 return;
