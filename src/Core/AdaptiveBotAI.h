@@ -58,6 +58,7 @@ public:
     uint32 combatTimerMs{ 0 };
     uint32 tankSampleTimer{ 0 };
     uint32 otCheckTimer{ 0 };
+    uint32 apfMoveUpdateTimer{ 0 }; // APF 势场走位决策节流器 (300ms 防抖)
 
     // 当前感知到的动态危险斥力源（由战后归因逆向提炼，供 APF 势场避险消费）
     std::vector<DangerZone> activeDangerZones;
@@ -215,6 +216,7 @@ public:
         combatTimerMs = 0;
         tankSampleTimer = 0;
         otCheckTimer = 0;
+        apfMoveUpdateTimer = 0;
         combatEventBuffer.Clear();
         // 刻意保留 activeDangerZones：团灭跑尸的 Reset() 不得冲刷已学到的
         // 危险禁区，否则每一次团灭都会把当次归因成果清零，永远无法跨战斗避险。
@@ -926,22 +928,28 @@ public:
         if (me->HasUnitState(UNIT_STATE_CASTING) || me->GetCurrentSpell(CURRENT_CHANNELED_SPELL))
             return;
 
-        // 优先由 APF 人工势场接管走位：战场存在由战后归因逆向提炼的危险禁区时，
-        // 仍沿用原生 MoveChase 会让随从直线穿火圈，避险数据完全空转。
+        // 优先由 APF 人工势场接管走位：势场单步外推为 3.0 码定长，
+        // 若按「距离 > 0.8f」放行，服务端每 50ms 心跳都会重新下发 MovePoint，
+        // 起跑动画被无限掐断重置，表现为原地剧烈抽搐。故改为 300ms 帧节流：
+        // 仅在节流窗口结束、或当前已脱离 POINT 生成器（被打断/被抢占）时才重算。
         if (!activeDangerZones.empty() && !me->HasUnitState(UNIT_STATE_CHARGING))
         {
-            float nextX = 0.0f, nextY = 0.0f, nextZ = 0.0f;
-            if (PotentialField::CalculateNextPosition(me, victim, 2.0f, !IsTankBot(), IsTankBot(), activeDangerZones, nextX, nextY, nextZ))
+            if (apfMoveUpdateTimer == 0 || me->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
             {
-                if (me->GetVictim() != victim || !me->HasUnitState(UNIT_STATE_MELEE_ATTACKING))
-                    me->Attack(victim, true);
+                float nextX = 0.0f, nextY = 0.0f, nextZ = 0.0f;
+                if (PotentialField::CalculateNextPosition(me, victim, 2.0f, !IsTankBot(), IsTankBot(), activeDangerZones, nextX, nextY, nextZ))
+                {
+                    if (me->GetVictim() != victim || !me->HasUnitState(UNIT_STATE_MELEE_ATTACKING))
+                        me->Attack(victim, true);
 
-                // 最小位移容差：势场落点与自身距离过近时不重下发路径，
-                // 杜绝每帧抖动切换 POINT 生成器造成的原地抽搐。
-                if (me->GetDistance(nextX, nextY, nextZ) > 0.8f)
                     me->GetMotionMaster()->MovePoint(1, nextX, nextY, nextZ);
-
-                return;
+                    apfMoveUpdateTimer = 300;
+                    return;
+                }
+            }
+            else
+            {
+                return; // 正在平滑执行上一个 APF 导航航点，不进行路径打断
             }
         }
 
@@ -980,6 +988,27 @@ public:
         bool const targetChanged = (me->GetVictim() != victim);
         me->SetFacingToObject(victim);
         float const dist = me->GetDistance(victim);
+
+        // 动态避险：脚下或周围存在危险禁区时，优先由势场规划安全射击位，
+        // 否则猎人会在火圈/毒水上原地站桩平射直至暴毙。
+        if (!activeDangerZones.empty())
+        {
+            if (apfMoveUpdateTimer == 0 || me->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+            {
+                float nextX = 0.0f, nextY = 0.0f, nextZ = 0.0f;
+                float const optDist = std::clamp(dist, minDist + 3.0f, maxDist - 3.0f);
+                if (PotentialField::CalculateNextPosition(me, victim, optDist, false, false, activeDangerZones, nextX, nextY, nextZ))
+                {
+                    me->GetMotionMaster()->MovePoint(1, nextX, nextY, nextZ);
+                    apfMoveUpdateTimer = 300;
+                    return;
+                }
+            }
+            else
+            {
+                return; // 正在平滑执行 APF 避险航点，暂不打断
+            }
+        }
 
         if (dist < minDist)
         {
@@ -1021,12 +1050,34 @@ public:
         if (!victim || !victim->IsAlive() || victim->GetMap() != me->GetMap())
             return;
 
-        if (me->HasUnitState(UNIT_STATE_CASTING))
+        // 引导类法术与读条一同置顶守卫：势场走位的 MovePoint 指令会掐断引导通道，
+        // 若仅拦截 UNIT_STATE_CASTING，法系会在吸取灵魂/精神鞭笞中途被迫断条。
+        if (me->HasUnitState(UNIT_STATE_CASTING) || me->GetCurrentSpell(CURRENT_CHANNELED_SPELL))
             return;
 
         bool const targetChanged = (me->GetVictim() != victim);
         if (targetChanged)
             me->Attack(victim, false);
+
+        // 动态避险：法系远程在地面遭遇火圈/毒水时，由势场平滑引导移出危险区
+        if (!activeDangerZones.empty())
+        {
+            if (apfMoveUpdateTimer == 0 || me->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+            {
+                float nextX = 0.0f, nextY = 0.0f, nextZ = 0.0f;
+                float const optDist = std::clamp(me->GetDistance(victim), 18.0f, maxRange - 4.0f);
+                if (PotentialField::CalculateNextPosition(me, victim, optDist, false, false, activeDangerZones, nextX, nextY, nextZ))
+                {
+                    me->GetMotionMaster()->MovePoint(1, nextX, nextY, nextZ);
+                    apfMoveUpdateTimer = 300;
+                    return;
+                }
+            }
+            else
+            {
+                return; // 正在平滑执行 APF 避险航点，暂不打断
+            }
+        }
 
         bool const outOfRange = !me->IsWithinCombatRange(victim, maxRange);
         bool const outOfLos   = !me->IsWithinLOSInMap(victim);
@@ -1347,6 +1398,11 @@ public:
 
     void UpdateTimers(uint32 diff)
     {
+        if (apfMoveUpdateTimer > diff)
+            apfMoveUpdateTimer -= diff;
+        else
+            apfMoveUpdateTimer = 0;
+
         if (gcdTimer > diff)
             gcdTimer -= diff;
         else
