@@ -58,27 +58,44 @@ public:
         // 近战输出：引力锚点设在目标正后方 2.0 码处（背身位规避顺劈与招架加速）
         if (isMeleeBehind && !isTankFront)
         {
+            // 近战输出：引力锚点直接锚定目标正后方 1.8 码处
             float const behindAngle = target->GetOrientation() + static_cast<float>(M_PI);
-            targetAnchorX += 2.0f * std::cos(behindAngle);
-            targetAnchorY += 2.0f * std::sin(behindAngle);
+            targetAnchorX += 1.8f * std::cos(behindAngle);
+            targetAnchorY += 1.8f * std::sin(behindAngle);
+
+            FieldVector2D const dirToAnchor = {
+                targetAnchorX - bot->GetPositionX(),
+                targetAnchorY - bot->GetPositionY()
+            };
+
+            float const distToAnchor = dirToAnchor.Length();
+            // 进入背后 0.8 码死区即算就位，移除背身锚点内部的离心排斥，
+            // 否则随从抵达落点后会被自己的斥力推开，形成高频轨道弹簧震颤。
+            if (distToAnchor > 0.8f)
+            {
+                totalForce = totalForce + dirToAnchor.Normalized() * std::min(1.2f, distToAnchor * 0.8f);
+            }
         }
-
-        FieldVector2D const dirToTarget = {
-            targetAnchorX - bot->GetPositionX(),
-            targetAnchorY - bot->GetPositionY()
-        };
-
-        float const distToTarget = std::sqrt(dirToTarget.x * dirToTarget.x + dirToTarget.y * dirToTarget.y);
-        float const deadZone = isMeleeBehind ? 1.0f : 2.5f;
-
-        if (distToTarget > optDistance + deadZone)
+        else
         {
-            totalForce = totalForce + dirToTarget.Normalized() * 1.2f;
-        }
-        else if (distToTarget < std::max(1.0f, optDistance - deadZone))
-        {
-            float const pushStrength = 1.5f * (1.0f - (distToTarget / optDistance));
-            totalForce = totalForce - dirToTarget.Normalized() * pushStrength;
+            // 坦克与远程：维持距目标中心 optDistance 的向心引力/离心斥力
+            FieldVector2D const dirToTarget = {
+                targetAnchorX - bot->GetPositionX(),
+                targetAnchorY - bot->GetPositionY()
+            };
+
+            float const distToTarget = dirToTarget.Length();
+            float const deadZone = 2.5f;
+
+            if (distToTarget > optDistance + deadZone)
+            {
+                totalForce = totalForce + dirToTarget.Normalized() * 1.2f;
+            }
+            else if (distToTarget < std::max(1.0f, optDistance - deadZone))
+            {
+                float const pushStrength = 1.5f * (1.0f - (distToTarget / optDistance));
+                totalForce = totalForce - dirToTarget.Normalized() * pushStrength;
+            }
         }
 
         // 2. 友军防挤压斥力 (Personal Space)
@@ -108,8 +125,12 @@ public:
         }
 
         // 3. 动态危险区域斥力叠加 (Danger Zones Repulsion)
+        uint32 const currentMapId = bot->GetMapId();
         for (auto const& zone : dangerZones)
         {
+            if (zone.mapId != 0 && zone.mapId != currentMapId)
+                continue;
+
             if (zone.type == DangerZoneType::CIRCLE)
             {
                 float const dx = bot->GetPositionX() - zone.x;

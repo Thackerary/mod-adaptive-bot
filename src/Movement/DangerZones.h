@@ -16,6 +16,7 @@ enum class DangerZoneType : uint8
 struct DangerZone
 {
     DangerZoneType type{ DangerZoneType::CIRCLE };
+    uint32 mapId{ 0 };            // 归属地图 ID (防跨地图残留)
     float x{ 0.0f };
     float y{ 0.0f };
     float z{ 0.0f };

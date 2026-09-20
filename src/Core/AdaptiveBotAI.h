@@ -63,6 +63,27 @@ public:
     // 当前感知到的动态危险斥力源（由战后归因逆向提炼，供 APF 势场避险消费）
     std::vector<DangerZone> activeDangerZones;
 
+    /// @brief 检查随从自身当前是否处于任一危险禁区的影响范围内。
+    ///        仅用于「是否需要紧急走位」的判定门禁：远程/治疗专精若不在
+    ///        危险区内，即便场上存在火圈也必须保持站桩，杜绝被友军防挤压
+    ///        斥力推着频繁移步而掐断读条。
+    bool IsUnderDangerThreat(float buffer = 2.0f) const
+    {
+        uint32 const currentMapId = me->GetMapId();
+        for (auto const& zone : activeDangerZones)
+        {
+            if (zone.mapId != 0 && zone.mapId != currentMapId)
+                continue;
+
+            if (zone.type == DangerZoneType::CIRCLE)
+            {
+                if (me->GetDistance2d(zone.x, zone.y) < (zone.radius + buffer))
+                    return true;
+            }
+        }
+        return false;
+    }
+
     // 缓存指挥官平均装等 (实现战斗算伤绝对 O(1))
     float cachedMasterItemLevel{ 200.0f };
 
@@ -522,8 +543,11 @@ public:
                 LOG_INFO("scripts", "==================================================================");
             }
 
-            // 将归因提炼出的危险禁区注入当前感知列表，供后续战斗中的 APF 势场避险
+            // 将归因提炼出的危险禁区注入当前感知列表，并标记当前地图 ID，
+            // 防止旧副本的残留禁区在换图后继续干扰走位。
             activeDangerZones = report.derivedDangerZones;
+            for (auto& zone : activeDangerZones)
+                zone.mapId = me->GetMapId();
         }
 
         // 战后秒补：护卫在团本 AoE 中阵亡属常态，战斗结算瞬间立即补齐，
@@ -989,9 +1013,9 @@ public:
         me->SetFacingToObject(victim);
         float const dist = me->GetDistance(victim);
 
-        // 动态避险：脚下或周围存在危险禁区时，优先由势场规划安全射击位，
-        // 否则猎人会在火圈/毒水上原地站桩平射直至暴毙。
-        if (!activeDangerZones.empty())
+        // 动态避险：仅当猎人自身落入火圈/毒水时，才由势场规划安全射击位；
+        // 若火圈在别处而自身安全，则坚决站桩平射，避免被友军斥力推着移步。
+        if (IsUnderDangerThreat(2.0f))
         {
             if (apfMoveUpdateTimer == 0 || me->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
             {
@@ -1059,8 +1083,8 @@ public:
         if (targetChanged)
             me->Attack(victim, false);
 
-        // 动态避险：法系远程在地面遭遇火圈/毒水时，由势场平滑引导移出危险区
-        if (!activeDangerZones.empty())
+        // 动态避险：法系远程仅在自身踏入火圈/毒水时才移步，安全距离坚决站桩读条
+        if (IsUnderDangerThreat(2.0f))
         {
             if (apfMoveUpdateTimer == 0 || me->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
             {
@@ -1429,6 +1453,22 @@ public:
                 uint32 const addMana = me->GetMaxPower(POWER_MANA) * 2 / 100;
                 if (me->GetPower(POWER_MANA) < me->GetMaxPower(POWER_MANA))
                     me->ModifyPower(POWER_MANA, addMana);
+            }
+        }
+
+        // 危险禁区生命周期自然消退：没有衰减机制的禁区会永久残留，
+        // 使随从在后续战斗中被早已消失的火圈持续排挤。
+        if (!activeDangerZones.empty())
+        {
+            for (auto it = activeDangerZones.begin(); it != activeDangerZones.end(); )
+            {
+                if (it->durationMs <= diff)
+                    it = activeDangerZones.erase(it);
+                else
+                {
+                    it->durationMs -= diff;
+                    ++it;
+                }
             }
         }
 
