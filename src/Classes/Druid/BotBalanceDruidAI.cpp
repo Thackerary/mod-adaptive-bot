@@ -45,6 +45,7 @@ class BotBalanceDruidAI : public AdaptiveBotAI
     static constexpr float BARKSKIN_HP_PCT    = 45.0f;  // 树皮术自保血线
     static constexpr float INNERVATE_MANA_PCT = 25.0f;  // 激活回蓝蓝线
     static constexpr float STARFALL_MAX_DIST  = 30.0f;  // 星辰坠落有效作用距离
+    static constexpr float TYPHOON_RADIUS     = 15.0f;  // 台风 3.3.5a 实际作用半径：超出则击退与减速均不生效
     static constexpr uint32 BOSS_HEALTH_GATE  = 200000; // 精英首领血量门槛：防止把小怪误判为首领空交底牌
 
 public:
@@ -159,6 +160,24 @@ public:
         // 树皮术为 Off-GCD 减伤，施放成功后必须当帧顺下，严禁 return 抢占决策流
         TryBarkskin();
 
+        // ---- 战术打断：目标正在读条时，以瞬发台风击退并中断其施法 ----
+        // 台风占 GCD：成功即交还控制权，等待击退与眩晕把目标推出读条节奏。
+        // 必须在 TYPHOON_RADIUS (15 码) 内施放，否则法术虽成功但击退半径外目标毫无反应。
+        uint32 const interruptTyphoon = GetTalentRank(BalanceDruidSpells::TYPHOON);
+        if (interruptTyphoon && typhoonCooldown == 0 && IsInterruptibleTarget(victim) &&
+            me->IsWithinDist(victim, TYPHOON_RADIUS))
+        {
+            // 台风为以自身为原点的正面锥形击退：起手前必须锁定朝向，
+            // 否则背身施放会出现「施法成功但锥形落空」的隐形浪费。
+            me->SetFacingToObject(victim);
+
+            if (CanCast(me, interruptTyphoon, true) && ExecuteSpell(me, interruptTyphoon, true))
+            {
+                typhoonCooldown = CD_TYPHOON;
+                return;
+            }
+        }
+
         // 台风占 GCD：成功即交还控制权，等待走位发生器把小怪推离盲区
         if (TryTyphoon(victim))
             return;
@@ -260,6 +279,18 @@ private:
         }
 
         return false;
+    }
+
+    // 目标是否处于可打断的读条/引导状态。
+    // 注：台风在 3.3.5a 中并无 SPELL_EFFECT_INTERRUPT，其击退会强制目标位移
+    // (施法中位移即中断读条)，随后 6 秒眩晕减速可有效拖延下一发施法，
+    // 故作为平衡系唯一的「软打断」手段使用，而非严格意义上的硬打断。
+    bool IsInterruptibleTarget(Unit* target) const
+    {
+        if (!target || !target->IsAlive() || target->GetMap() != me->GetMap())
+            return false;
+
+        return target->HasUnitState(UNIT_STATE_CASTING);
     }
 
     // 首领判定：世界首领直接放行；副本首领在 3.3.5 中多以「精英」等级呈现，

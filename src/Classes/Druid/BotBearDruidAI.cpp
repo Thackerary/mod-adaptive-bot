@@ -251,6 +251,15 @@ private:
         if (!me->isInFrontInMap(victim, 25.0f))
             return false;
 
+        // 目标正在读条：野性冲锋自带「压制施法」效果 (冲撞并中断目标施法 4 秒)，
+        // 这是 3.3.5a 熊德唯一的打断手段 (熊形态并无 Skull Bash 一类的纯打断技能)。
+        // 因此改由基类记忆化压秒裁决：引导类法术即刻抢断，
+        // 读条类法术严格等到 learnedInterruptDelays 学到的提前量窗口再出手，
+        // 榨取最大输出偷跑时间。目标未在读条时维持原行为，仅作拉怪与贴身位移，
+        // 避免坦克因等待打断窗口而拒绝贴身、彻底丧失仇恨建立能力。
+        if (victim->HasUnitState(UNIT_STATE_CASTING) && !ShouldInterruptTarget(victim, chargeSpell))
+            return false;
+
         if (!CanCast(victim, chargeSpell, true))
             return false;
 

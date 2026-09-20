@@ -54,6 +54,14 @@ class BotRestorationDruidAI : public AdaptiveBotAI
     // 放宽到 4000ms，保证每轮巡检都能在三花落地前提前接续。
     static constexpr int32  LIFEBLOOM_REFRESH_WINDOW = 4000;
 
+    // 记忆化预警预读窗口：当 Boss 正在读条的法术命中记忆库中已学到的高危机制时，
+    // 在读条剩余时间滑入此窗口的瞬间抢铺 HoT，把「事后补救」变为「事前预铺」。
+    // 取值 1500ms 的权衡：
+    //   - 过早 (> 2500ms)：HoT 会在大招落地前被自然跳完，白白烧掉一个 GCD；
+    //   - 过晚 (< 800ms)：瞬发法术受网络延迟与服务端心跳影响，可能来不及落地。
+    // 1500ms 恰好覆盖一次瞬发抬手 + 一跳 HoT 生效的完整链路。
+    static constexpr uint32 PREHEAL_LEAD_MS = 1500;
+
 public:
     explicit BotRestorationDruidAI(Creature* creature) : AdaptiveBotAI(creature) {}
 
@@ -193,6 +201,11 @@ public:
         // ---- P0: 极限急救 (树皮自保 + 自然迅捷瞬发治疗之触) ----
         if (TryEmergencyHeals()) return;
 
+        // ---- P0.5: 记忆化预警预读 (Boss 高危读条落地前抢铺 HoT) ----
+        // 必须独立于 P1 的 sweepDue 巡检周期：预读窗口仅 1500ms，
+        // 若挂在 3 秒一轮的巡检节流里，十次有九次会错过整个窗口期。
+        if (TryPredictivePreHoT()) return;
+
         // ---- P1: 生命之树形态维持、野性印记与主坦「三花聚顶」滚动 ----
         if (sweepDue)
         {
@@ -222,6 +235,12 @@ private:
     // 贴脸避难状态标记：记录当前是否处于「紧抱坦克身侧」的应急姿态。
     // 仇恨解除后必须凭此标记主动重发跟随指令，否则会永久粘在坦克身后吃顺劈与吐息。
     bool isHuggingTank{ false };
+
+    // 预警预读状态标记：标记本轮高危读条是否已经完成预铺。
+    // 窗口期持续约 1500ms，期间服务端会经历多次心跳 (每 50ms 一帧)，
+    // 缺此标记会让每一帧都重发一次瞬发 HoT，把 GCD 全部烧在重复预铺上。
+    // 目标切换法术、停止施法或退出窗口时自动复位，为下一次高危机制重新武装。
+    bool isPreHealing{ false };
 
     // 自管冷却计时
     uint32 swiftmendCooldown{ 0 };
@@ -270,6 +289,8 @@ private:
         innervateCooldown = 0;
         naturesSwiftnessCooldown = 0;
         barkspinCooldown = 0;
+
+        isPreHealing = false;
     }
 
     // =========================================================================
@@ -546,6 +567,103 @@ private:
         // 若光环尚未可见 (极端情形)，则返回 false 交由下一帧「情形一」兜底。
         if (me->HasAura(RestorationDruidSpells::NATURES_SWIFTNESS))
             return TryHealingTouch(target, true);
+
+        return false;
+    }
+
+    // =========================================================================
+    // P0.5: 记忆化预警预读 (阶段三记忆层在治疗侧的唯一落地形态)
+    // -------------------------------------------------------------------------
+    // 恢复德在 3.3.5a 中没有任何打断技能，无法直接消费 learnedInterruptDelays;
+    // 但它可以消费同一份认知记忆的另一个维度 —— 危险禁区 spellId 列表。
+    // 基类 UpdateTimers 每帧主动追踪当前目标的读条进度 (纯 diff 驱动，与打断 CD 无关)，
+    // 本函数据此在「已学到的高危机制」落地前提前铺 HoT，把治疗从被动打地鼠
+    // 升级为主动预铺。
+    //
+    // 数据来源零新增：spellId 命中 activeDangerZones 即视为高危机制，
+    // 该列表由中层归因器在团灭时逆向提炼并落库，战前由 PreloadBossKnowledge 预热灌入。
+    // =========================================================================
+    bool TryPredictivePreHoT()
+    {
+        if (!me->IsInCombat())
+            return false;
+
+        // 无读条进度 (目标未在读条 / 追踪器已清零)：复位武装状态待下次机制
+        if (currentEnemyCastingSpellId == 0 || currentEnemyCastingTotalMs == 0)
+        {
+            isPreHealing = false;
+            return false;
+        }
+
+        // 判定当前读条是否命中记忆库中已学到的高危机制。
+        // 未命中即普通读条 (平砍强化 / 杂兵小法术)，绝不预铺：
+        // 对每一发小读条都预铺会把法力烧空，反而失去真正高压期的续航。
+        bool isLearnedHazard = false;
+        for (auto const& zone : activeDangerZones)
+        {
+            if (zone.spellId == currentEnemyCastingSpellId)
+            {
+                isLearnedHazard = true;
+                break;
+            }
+        }
+
+        if (!isLearnedHazard)
+        {
+            isPreHealing = false;
+            return false;
+        }
+
+        uint32 const remainingMs = (currentEnemyCastingTotalMs > currentEnemyCastingElapsedMs)
+            ? (currentEnemyCastingTotalMs - currentEnemyCastingElapsedMs)
+            : 0;
+
+        // 尚未进入预警窗口：保持武装，等待读条滑入最后 1500ms
+        if (remainingMs > PREHEAL_LEAD_MS)
+            return false;
+
+        // 本轮机制已完成预铺：窗口期内严禁重复抢铺，把 GCD 还给正常治疗通道
+        if (isPreHealing)
+            return false;
+
+        Unit* tank = groupSnapshot.mainTank;
+
+        // 排己与宠物排除：锚点退化为自身 / 指挥官宠物时无预铺意义
+        if (!tank || tank == me || !tank->IsAlive() || tank->ToPet() || !IsValidHealTarget(tank))
+            return false;
+
+        uint32 const rejuvenation = GetAppropriateRank(RestorationDruidSpells::REJUVENATION, false);
+        uint32 const lifebloom    = GetAppropriateRank(RestorationDruidSpells::LIFEBLOOM, false);
+
+        // 优先回春：它是迅捷治愈的跳板，且瞬发 HoT 在大招落地瞬间即可开始跳血。
+        // 三花仅在回春已覆盖或不可用时作为第二选择 (三花的核心收益是常驻续航，
+        // 大招前临时挂 1 层救急的边际收益低于回春)。
+        if (rejuvenation && !tank->HasAura(rejuvenation) &&
+            CanCast(tank, rejuvenation, true) && ExecuteSpell(tank, rejuvenation, true))
+        {
+            isPreHealing = true;
+
+            if (isDebugLogging)
+                LOG_INFO("scripts", "[Bot: {}] 记忆化预警预读：检测到高危机制 [{}] 落地前 {}ms，已为 [{}] 预铺回春术。",
+                    me->GetName(), currentEnemyCastingSpellId, remainingMs, tank->GetName());
+            return true;
+        }
+
+        if (lifebloom)
+        {
+            Aura* bloom = tank->GetAura(lifebloom);
+            bool const needBloom = !bloom || bloom->GetStackAmount() < 3;
+
+            if (needBloom && CanCast(tank, lifebloom, true) && ExecuteSpell(tank, lifebloom, true))
+            {
+                isPreHealing = true;
+
+                if (isDebugLogging)
+                    LOG_INFO("scripts", "[Bot: {}] 记忆化预警预读：检测到高危机制 [{}] 落地前 {}ms，已为 [{}] 预铺生命之绽。",
+                        me->GetName(), currentEnemyCastingSpellId, remainingMs, tank->GetName());
+                return true;
+            }
+        }
 
         return false;
     }
