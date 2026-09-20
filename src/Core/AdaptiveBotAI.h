@@ -12,6 +12,7 @@
 #include "Player.h"
 #include "Group.h"
 #include "Item.h"
+#include "Spell.h"
 #include "SpellInfo.h"
 #include "SpellMgr.h"
 #include "BotGuardianDisplays.h"
@@ -53,10 +54,16 @@ public:
     uint32 guardianCheckTimer{ 0 };
 
     // =========================================================================
-    // 阶段三：顶层持久化认知记忆预热档案
+    // 阶段三：顶层持久化认知记忆预热档案与实时打断追踪器
     // =========================================================================
     ObjectGuid memoryPreloadTargetGuid;                       // 已预热 Boss 句柄（防重复读库）
     std::unordered_map<uint32, uint32> learnedInterruptDelays; // spellId -> 压秒提前量(ms)
+
+    // 敌方施法进度追踪器 (纯 diff 驱动，避开底层 Spell 成员访问限制)
+    ObjectGuid currentEnemyCastingGuid;
+    uint32 currentEnemyCastingSpellId{ 0 };
+    uint32 currentEnemyCastingElapsedMs{ 0 };
+    uint32 currentEnemyCastingTotalMs{ 0 };
 
     // =========================================================================
     // 中层归因分析：战斗事件环形缓冲区与动态危险禁区（栈内定长，零堆分配）
@@ -86,6 +93,33 @@ public:
             {
                 if (me->GetDistance2d(zone.x, zone.y) < (zone.radius + buffer))
                     return true;
+            }
+            else if (zone.type == DangerZoneType::FRONTAL_CONE)
+            {
+                // 坦克位豁免：正面承伤聚怪是坦克的本职，严禁因避险转头
+                if (IsTankBot())
+                    continue;
+
+                // 扇形原点/朝向优先锚定当前目标实时面向，缺失时才回退持久化快照
+                Unit* victim = me->GetVictim();
+                float const originX = victim ? victim->GetPositionX() : zone.x;
+                float const originY = victim ? victim->GetPositionY() : zone.y;
+                float const coneOrient = victim ? victim->GetOrientation() : zone.orientation;
+
+                float const dx = me->GetPositionX() - originX;
+                float const dy = me->GetPositionY() - originY;
+                float const dist = std::sqrt(dx * dx + dy * dy);
+
+                if (dist < (zone.radius + buffer) && dist > 0.001f)
+                {
+                    float const phi = std::atan2(dy, dx);
+                    float diffAngle = phi - coneOrient;
+                    while (diffAngle > static_cast<float>(M_PI))  diffAngle -= static_cast<float>(2.0 * M_PI);
+                    while (diffAngle < -static_cast<float>(M_PI)) diffAngle += static_cast<float>(2.0 * M_PI);
+
+                    if (std::abs(diffAngle) < ((zone.coneAngle * 0.5f) + 0.15f))
+                        return true;
+                }
             }
         }
         return false;
@@ -247,6 +281,10 @@ public:
         apfMoveUpdateTimer = 0;
         memoryPreloadTargetGuid.Clear();
         learnedInterruptDelays.clear();
+        currentEnemyCastingGuid.Clear();
+        currentEnemyCastingSpellId = 0;
+        currentEnemyCastingElapsedMs = 0;
+        currentEnemyCastingTotalMs = 0;
         combatEventBuffer.Clear();
         // 刻意保留 activeDangerZones：团灭跑尸的 Reset() 不得冲刷已学到的
         // 危险禁区，否则每一次团灭都会把当次归因成果清零，永远无法跨战斗避险。
@@ -1583,6 +1621,83 @@ public:
     }
 
     // =========================================================================
+    // 阶段三：记忆化压秒打断仲裁引擎
+    // =========================================================================
+    /// @brief 检查指定目标是否正在读条，并根据记忆库中该技能的提前量判定是否到达打断时机。
+    ///        引导类法术每跳均生效，零延时即刻抢断；读条法术严格匹配压秒窗口。
+    bool ShouldInterruptTarget(Unit* target, uint32 interruptSpellId = 0)
+    {
+        if (!target || !target->IsAlive() || target->GetMap() != me->GetMap())
+            return false;
+
+        if (interruptSpellId != 0 && !CanCast(target, interruptSpellId))
+            return false;
+
+        if (!target->HasUnitState(UNIT_STATE_CASTING))
+            return false;
+
+        Spell* curSpell = target->GetCurrentSpell(CURRENT_GENERIC_SPELL);
+        bool isChanneled = false;
+        if (!curSpell)
+        {
+            curSpell = target->GetCurrentSpell(CURRENT_CHANNELED_SPELL);
+            isChanneled = true;
+        }
+
+        if (!curSpell)
+            return false;
+
+        SpellInfo const* spellInfo = curSpell->GetSpellInfo();
+        if (!spellInfo)
+            return false;
+
+        uint32 const spellId = spellInfo->Id;
+
+        // 通道引导类法术（暴风雪、苦修、精神鞭笞等）持续造成威胁，
+        // 不存在压秒收益，必须零延时立刻抢断；此时打断技能的 CD 也天然被最大化利用。
+        if (isChanneled || spellInfo->IsChanneled())
+            return true;
+
+        int32 const castTime = curSpell->GetCastTime();
+        if (castTime <= 0)
+            return false;
+
+        // 识别到新施法时，重置追踪基准
+        if (target->GetGUID() != currentEnemyCastingGuid || spellId != currentEnemyCastingSpellId)
+        {
+            currentEnemyCastingGuid = target->GetGUID();
+            currentEnemyCastingSpellId = spellId;
+            currentEnemyCastingTotalMs = static_cast<uint32>(castTime);
+            currentEnemyCastingElapsedMs = 0;
+        }
+
+        uint32 const remainingMs = (currentEnemyCastingTotalMs > currentEnemyCastingElapsedMs)
+            ? (currentEnemyCastingTotalMs - currentEnemyCastingElapsedMs)
+            : 0;
+
+        // 读取该随从对该技能学到的出手余量（未录入时默认提前 350ms）
+        uint32 leadTimeMs = 350;
+        auto it = learnedInterruptDelays.find(spellId);
+        if (it != learnedInterruptDelays.end())
+            leadTimeMs = it->second;
+
+        // 读条剩余时间进入余量窗口，判定为最佳打断时机
+        return remainingMs <= leadTimeMs;
+    }
+
+    /// @brief 一键尝试打断：结合压秒时机检查、施法条件判定与法术释放
+    bool TryInterrupt(Unit* target, uint32 interruptSpellId)
+    {
+        if (!target || interruptSpellId == 0)
+            return false;
+
+        if (ShouldInterruptTarget(target, interruptSpellId))
+            return ExecuteSpell(target, interruptSpellId);
+
+        return false;
+    }
+
+    // =========================================================================
     // 通用脱战跟随维护
     // =========================================================================
     void UpdateFollowMaster(uint32 diff)
@@ -1639,6 +1754,24 @@ public:
             gcdTimer -= diff;
         else
             gcdTimer = 0;
+
+        // 维护敌方施法进度计时器：目标停止施法、阵亡或丢失时立即强制清零，
+        // 杜绝上一场战斗的残留进度污染下一次压秒判定窗口。
+        if (!currentEnemyCastingGuid.IsEmpty())
+        {
+            Unit* castingUnit = ObjectAccessor::GetUnit(*me, currentEnemyCastingGuid);
+            if (!castingUnit || !castingUnit->IsAlive() || !castingUnit->HasUnitState(UNIT_STATE_CASTING))
+            {
+                currentEnemyCastingGuid.Clear();
+                currentEnemyCastingSpellId = 0;
+                currentEnemyCastingElapsedMs = 0;
+                currentEnemyCastingTotalMs = 0;
+            }
+            else
+            {
+                currentEnemyCastingElapsedMs += diff;
+            }
+        }
 
         if (me->getPowerType() == POWER_ENERGY)
         {

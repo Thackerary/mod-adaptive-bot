@@ -145,6 +145,49 @@ public:
                     totalForce = totalForce + pushDir * intensity;
                 }
             }
+            else if (zone.type == DangerZoneType::FRONTAL_CONE)
+            {
+                // 坦克彻底豁免正面顺劈/吐息斥力：坦克的核心职责是正面承伤聚怪，
+                // 一旦被斥力顶去侧后方，首领仇恨随之转头，顺劈反而横扫全团。
+                if (isTankFront)
+                    continue;
+
+                // 顺劈/吐息的原点与朝向必须动态锚定目标的实时坐标与面向：
+                // 首领在战斗中持续转向，任何静态快照坐标都会立即失效。
+                float const originX = target->GetPositionX();
+                float const originY = target->GetPositionY();
+                float const coneOrient = target->GetOrientation();
+
+                float const dx = bot->GetPositionX() - originX;
+                float const dy = bot->GetPositionY() - originY;
+                float const dist = std::sqrt(dx * dx + dy * dy);
+
+                float const maxDist = zone.radius + 2.0f;
+                if (dist < maxDist && dist > 0.001f)
+                {
+                    float const phi = std::atan2(dy, dx);
+                    float diffAngle = phi - coneOrient;
+                    while (diffAngle > static_cast<float>(M_PI))  diffAngle -= static_cast<float>(2.0 * M_PI);
+                    while (diffAngle < -static_cast<float>(M_PI)) diffAngle += static_cast<float>(2.0 * M_PI);
+
+                    float const halfAngle = (zone.coneAngle * 0.5f) + 0.2f; // 附带 0.2 rad 角度缓冲
+                    if (std::abs(diffAngle) < halfAngle)
+                    {
+                        // 位于扇形内部：向最近的一侧切线方向 + 背后合成逃逸合力。
+                        // 侧移权重高于后退，避免瞬间把近战距离拉爆导致全程断输出。
+                        float const sign = (diffAngle >= 0.0f) ? 1.0f : -1.0f;
+                        FieldVector2D const lateralPush(-std::sin(phi) * sign, std::cos(phi) * sign);
+                        FieldVector2D const rearPush(-std::cos(coneOrient), -std::sin(coneOrient));
+
+                        float const distFactor = 1.0f - (dist / maxDist);
+                        float const angleFactor = 1.0f - (std::abs(diffAngle) / halfAngle);
+                        float const intensity = 4.0f * distFactor * (0.5f + 0.5f * angleFactor);
+
+                        FieldVector2D const escapeDir = (lateralPush * 0.7f + rearPush * 0.5f).Normalized();
+                        totalForce = totalForce + escapeDir * intensity;
+                    }
+                }
+            }
         }
 
         // 4. 合力收敛与物理落点校验
