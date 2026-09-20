@@ -20,6 +20,9 @@
 #include "ScriptedGossip.h"
 #include "Chat.h"
 #include "Log.h"
+#include "Analytics/CombatAnalyzer.h"
+#include "Movement/PotentialField.h"
+#include "Movement/DangerZones.h"
 #include <cmath>
 #include <algorithm>
 #include <vector>
@@ -47,6 +50,16 @@ public:
     // 伴随型战斗护卫（Combat Guardian）实时句柄与保活轮询计时器
     ObjectGuid guardianGuid;
     uint32 guardianCheckTimer{ 0 };
+
+    // =========================================================================
+    // 中层归因分析：战斗事件环形缓冲区与动态危险禁区（栈内定长，零堆分配）
+    // =========================================================================
+    BotCombatRingBuffer<256> combatEventBuffer;
+    uint32 combatTimerMs{ 0 };
+    uint32 tankSampleTimer{ 0 };
+
+    // 当前感知到的动态危险斥力源（由战后归因逆向提炼，供 APF 势场避险消费）
+    std::vector<DangerZone> activeDangerZones;
 
     // 缓存指挥官平均装等 (实现战斗算伤绝对 O(1))
     float cachedMasterItemLevel{ 200.0f };
@@ -198,6 +211,10 @@ public:
         energyRegenTimer = 0;
         manaRegenTimer = 0;
         wasInCombat = false;
+        combatTimerMs = 0;
+        tankSampleTimer = 0;
+        combatEventBuffer.Clear();
+        activeDangerZones.clear();
         ResetComboPoints();
         me->SetNpcFlag(UNIT_NPC_FLAG_GOSSIP);
 
@@ -360,12 +377,39 @@ public:
     void DamageDealt(Unit* doneTo, uint32& damage, DamageEffectType damagetype, SpellSchoolMask damageSchoolMask) override
     {
         damage = static_cast<uint32>(damage * GetDamageDealtMultiplier());
+
+        if (me->IsInCombat() && damage > 0)
+        {
+            BotCombatEvent ev;
+            ev.combatTimeMs = combatTimerMs;
+            ev.eventType = BotCombatEventType::DAMAGE_DEALT;
+            ev.amount = damage;
+            ev.sourceGuid = doneTo ? doneTo->GetGUID() : ObjectGuid::Empty;
+            ev.schoolMask = static_cast<uint8>(damageSchoolMask);
+            combatEventBuffer.Push(ev);
+        }
+
         ScriptedAI::DamageDealt(doneTo, damage, damagetype, damageSchoolMask);
     }
 
     void DamageTaken(Unit* attacker, uint32& damage, DamageEffectType damagetype, SpellSchoolMask damageSchoolMask) override
     {
         damage = static_cast<uint32>(damage * GetDamageTakenMultiplier());
+
+        if (me->IsInCombat())
+        {
+            BotCombatEvent ev;
+            ev.combatTimeMs = combatTimerMs;
+            ev.eventType = (damage >= me->GetHealth()) ? BotCombatEventType::LETHAL_DAMAGE : BotCombatEventType::DAMAGE_TAKEN;
+            ev.amount = damage;
+            ev.x = me->GetPositionX();
+            ev.y = me->GetPositionY();
+            ev.z = me->GetPositionZ();
+            ev.sourceGuid = attacker ? attacker->GetGUID() : ObjectGuid::Empty;
+            ev.schoolMask = static_cast<uint8>(damageSchoolMask);
+            combatEventBuffer.Push(ev);
+        }
+
         ScriptedAI::DamageTaken(attacker, damage, damagetype, damageSchoolMask);
     }
 
@@ -378,6 +422,22 @@ public:
     void SpellHit(Unit* caster, SpellInfo const* spell) override
     {
         ScriptedAI::SpellHit(caster, spell);
+
+        // 归因采样：仅记录敌方「有读条」的非正向法术命中，作为漏打断审计口径
+        if (me->IsInCombat() && spell && !spell->IsPositive() && spell->CalcCastTime() > 0)
+        {
+            BotCombatEvent ev;
+            ev.combatTimeMs = combatTimerMs;
+            ev.eventType = BotCombatEventType::SPELL_HIT_TAKEN;
+            ev.spellId = spell->Id;
+            ev.x = me->GetPositionX();
+            ev.y = me->GetPositionY();
+            ev.z = me->GetPositionZ();
+            ev.sourceGuid = caster ? caster->GetGUID() : ObjectGuid::Empty;
+            ev.schoolMask = static_cast<uint8>(spell->GetSchoolMask());
+            combatEventBuffer.Push(ev);
+        }
+
         OnSpellHitTaken(caster, spell);
     }
 
@@ -414,6 +474,52 @@ public:
     {
         if (isDebugLogging)
             LOG_INFO("scripts", "[Bot: {}] 战斗结算完成: {}", me->GetName(), victory ? "击杀胜利" : "团灭重置");
+
+        // =====================================================================
+        // 中层：战斗回溯与归因分析（仅战斗终结瞬间一次性执行，零运行时开销）
+        // =====================================================================
+        if (!combatEventBuffer.Empty())
+        {
+            uint32 bossEntry = 0;
+            if (Unit* victim = me->GetVictim())
+            {
+                if (Creature* creature = victim->ToCreature())
+                    bossEntry = creature->GetEntry();
+            }
+
+            AttributionReport const report = CombatAnalyzer::Analyze(combatEventBuffer, combatTimerMs, victory, bossEntry);
+
+            if (isDebugLogging)
+            {
+                LOG_INFO("scripts", "================= [Post-Combat Attribution: {}] =================", me->GetName());
+                LOG_INFO("scripts", "战斗结果: {} | 战斗耗时: {:.2f}s | 事件采样总数: {}",
+                    report.isWipe ? "团灭脱战" : "击杀胜利", report.totalCombatTimeMs / 1000.0f, combatEventBuffer.Size());
+
+                if (report.fatalDamage > 0)
+                    LOG_INFO("scripts", "[维度1-致死归因] 致死法术ID: {} | 致命伤害: {} | 击杀者: {}",
+                        report.fatalSpellId, report.fatalDamage, report.fatalSourceGuid.ToString());
+
+                LOG_INFO("scripts", "[维度1-承伤峰值] 承受最高伤害技能ID: {} | 峰值伤害: {}",
+                    report.peakDamageSpellId, report.peakDamage);
+
+                LOG_INFO("scripts", "[维度2-漏断审计] 承受敌方未打断施法总数: {} 次 (末次法术ID: {})",
+                    report.missedInterruptsCount, report.lastMissedSpellId);
+
+                LOG_INFO("scripts", "[维度3-起手OT] 前10秒是否OT: {} (OT触发时点: {} ms)",
+                    report.earlyOtDetected ? "【是】" : "否", report.otTimeMs);
+
+                LOG_INFO("scripts", "[维度4-仇恨速率] 主坦前10秒建立仇恨速率 (TPS): {:.1f}",
+                    report.tankFirst10sTps);
+
+                if (!report.derivedDangerZones.empty())
+                    LOG_INFO("scripts", "[空间感知] 逆向提炼动态危险区: {} 处 (已载入避险势场)", report.derivedDangerZones.size());
+
+                LOG_INFO("scripts", "==================================================================");
+            }
+
+            // 将归因提炼出的危险禁区注入当前感知列表，供后续战斗中的 APF 势场避险
+            activeDangerZones = report.derivedDangerZones;
+        }
 
         // 战后秒补：护卫在团本 AoE 中阵亡属常态，战斗结算瞬间立即补齐，
         // 保证下一场战斗（连战 / 转阶段）拥有完整的机制内核与增益覆盖。
@@ -1256,6 +1362,53 @@ public:
         else if (!wasInCombat && me->IsInCombat())
         {
             wasInCombat = true;
+            combatTimerMs = 0;
+            tankSampleTimer = 0;
+            combatEventBuffer.Clear();
+        }
+
+        // 战时采样：前 10 秒窗口内做 OT 检测与主坦仇恨速率 (TPS) 沉淀
+        if (me->IsInCombat())
+        {
+            combatTimerMs += diff;
+
+            if (combatTimerMs <= 10000)
+            {
+                if (!IsTankBot() && (combatTimerMs % 1000) < diff)
+                {
+                    Unit* attacker = me->getAttackerForHelper();
+                    if (attacker && attacker->GetVictim() == me)
+                    {
+                        BotCombatEvent ev;
+                        ev.combatTimeMs = combatTimerMs;
+                        ev.eventType = BotCombatEventType::THREAT_OT_WARNING;
+                        ev.sourceGuid = attacker->GetGUID();
+                        combatEventBuffer.Push(ev);
+                    }
+                }
+
+                tankSampleTimer += diff;
+                if (tankSampleTimer >= 1000)
+                {
+                    tankSampleTimer -= 1000;
+
+                    Unit* groupTank = GetGroupTank();
+                    Unit* currentVictim = me->GetVictim();
+                    if (groupTank && groupTank != me && currentVictim && currentVictim->IsInWorld() && groupTank->GetMap() == me->GetMap())
+                    {
+                        float const currentThreat = currentVictim->GetThreatMgr().getThreat(groupTank);
+                        if (currentThreat > 0.0f)
+                        {
+                            BotCombatEvent ev;
+                            ev.combatTimeMs = combatTimerMs;
+                            ev.eventType = BotCombatEventType::TANK_THREAT_SAMPLE;
+                            ev.amount = static_cast<uint32>(currentThreat);
+                            ev.sourceGuid = groupTank->GetGUID();
+                            combatEventBuffer.Push(ev);
+                        }
+                    }
+                }
+            }
         }
 
         if (!me->IsInCombat())
