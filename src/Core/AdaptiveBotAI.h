@@ -100,11 +100,19 @@ public:
                 if (IsTankBot())
                     continue;
 
-                // 扇形原点/朝向优先锚定当前目标实时面向，缺失时才回退持久化快照
-                Unit* victim = me->GetVictim();
-                float const originX = victim ? victim->GetPositionX() : zone.x;
-                float const originY = victim ? victim->GetPositionY() : zone.y;
-                float const coneOrient = victim ? victim->GetOrientation() : zone.orientation;
+                // 优先取当前交战目标；治疗随从贴身奶队友时 GetVictim() 常为空，
+                // 此时回退至开怪预热锁定的 Boss 实体，确保治疗位同样能感知正面顺劈。
+                Unit* enemy = me->GetVictim();
+                if (!enemy && !memoryPreloadTargetGuid.IsEmpty())
+                    enemy = ObjectAccessor::GetUnit(*me, memoryPreloadTargetGuid);
+
+                // 战场上已无存活施法首领时，锥形区无从锚定，直接忽略该威胁。
+                if (!enemy || !enemy->IsAlive())
+                    continue;
+
+                float const originX = enemy->GetPositionX();
+                float const originY = enemy->GetPositionY();
+                float const coneOrient = enemy->GetOrientation();
 
                 float const dx = me->GetPositionX() - originX;
                 float const dy = me->GetPositionY() - originY;
@@ -467,16 +475,22 @@ public:
             bool merged = false;
             for (auto& existing : activeDangerZones)
             {
+                // 顺劈锥形动态依附首领本体、不占固定坐标，同技能即视为同源直接刷新；
+                // 只有地面圆形火圈/毒池才需要比对几何间距。
+                bool const isSameCone = (learned.type == DangerZoneType::FRONTAL_CONE && existing.spellId == learned.spellId);
                 float const dx = existing.x - learned.x;
                 float const dy = existing.y - learned.y;
-                if (existing.spellId == learned.spellId && (dx * dx + dy * dy) < 16.0f)
+                bool const isSameCircle = (existing.spellId == learned.spellId && (dx * dx + dy * dy) < 16.0f);
+
+                if (isSameCone || isSameCircle)
                 {
                     existing.mapId = currentMapId;
                     existing.durationMs = 600000;
                     existing.x = learned.x;
                     existing.y = learned.y;
                     existing.z = learned.z;
-                    existing.radius = learned.radius;
+                    existing.radius = std::max(existing.radius, learned.radius);
+                    existing.type = std::max(existing.type, learned.type);
                     merged = true;
                     break;
                 }
@@ -726,19 +740,22 @@ public:
                     bool merged = false;
                     for (auto& existing : activeDangerZones)
                     {
-                        // 正确比对主体：必须计算「新危险区 newZone」与「现有危险区 existing」
-                        // 之间的几何间距。此前误用 me->GetDistance2d(existing.x, existing.y)，
-                        // 算的是随从肉身与旧火圈的距离；灭团跑尸归来时随从早已远离旧火圈，
-                        // 判定恒为 false，导致同源同坐标火圈被反复推入列表、斥力成倍暴涨。
+                        // 顺劈锥形动态依附首领本体、不占固定坐标，同技能即视为同源直接刷新；
+                        // 地面圆形火圈才比对几何间距。此前统一按距离比对时，
+                        // 顺劈区因首领位移/随从跑尸反复失配，多轮灭团后斥力线性暴涨。
+                        bool const isSameCone = (newZone.type == DangerZoneType::FRONTAL_CONE && existing.spellId == newZone.spellId);
                         float const dx = existing.x - newZone.x;
                         float const dy = existing.y - newZone.y;
-                        if (existing.mapId == currentMapId && existing.spellId == newZone.spellId &&
-                            (dx * dx + dy * dy) < 16.0f)
+                        bool const isSameCircle = (existing.spellId == newZone.spellId && (dx * dx + dy * dy) < 16.0f);
+
+                        if (existing.mapId == currentMapId && (isSameCone || isSameCircle))
                         {
                             existing.durationMs = 600000; // 同源机制刷新为 10 分钟长效记忆
                             existing.x = newZone.x;
                             existing.y = newZone.y;
                             existing.z = newZone.z;
+                            existing.radius = std::max(existing.radius, newZone.radius);
+                            existing.type = std::max(existing.type, newZone.type);
                             merged = true;
                             break;
                         }
@@ -1651,6 +1668,10 @@ public:
         if (!spellInfo)
             return false;
 
+        // 免疫打断的法术不值得消耗打断 CD
+        if (spellInfo->HasAttribute(SPELL_ATTR1_NOT_INTERRUPTABLE))
+            return false;
+
         uint32 const spellId = spellInfo->Id;
 
         // 通道引导类法术（暴风雪、苦修、精神鞭笞等）持续造成威胁，
@@ -1662,7 +1683,9 @@ public:
         if (castTime <= 0)
             return false;
 
-        // 识别到新施法时，重置追踪基准
+        // 常态进度由 UpdateTimers 每帧驱动，此处仅作目标切换时的兜底校准：
+        // 绝不在查询路径清零 elapsed，否则打断 CD 期间积累的进度会被反复抹掉，
+        // 导致技能一就绪就误判为「刚起手」而错过压秒窗口。
         if (target->GetGUID() != currentEnemyCastingGuid || spellId != currentEnemyCastingSpellId)
         {
             currentEnemyCastingGuid = target->GetGUID();
@@ -1755,21 +1778,45 @@ public:
         else
             gcdTimer = 0;
 
-        // 维护敌方施法进度计时器：目标停止施法、阵亡或丢失时立即强制清零，
-        // 杜绝上一场战斗的残留进度污染下一次压秒判定窗口。
-        if (!currentEnemyCastingGuid.IsEmpty())
+        // 敌方施法进度常态化侦测：即使打断技能正处于冷却，也每帧主动推进读条进度，
+        // 保证 CD 一转好即可立刻命中压在末尾的正确窗口，而非从 0 重新计时。
         {
-            Unit* castingUnit = ObjectAccessor::GetUnit(*me, currentEnemyCastingGuid);
-            if (!castingUnit || !castingUnit->IsAlive() || !castingUnit->HasUnitState(UNIT_STATE_CASTING))
+            Unit* enemyTarget = me->GetVictim();
+            if (!enemyTarget && !memoryPreloadTargetGuid.IsEmpty())
+                enemyTarget = ObjectAccessor::GetUnit(*me, memoryPreloadTargetGuid);
+
+            Spell* trackedSpell = nullptr;
+            if (enemyTarget && enemyTarget->IsAlive() && enemyTarget->HasUnitState(UNIT_STATE_CASTING))
             {
+                trackedSpell = enemyTarget->GetCurrentSpell(CURRENT_GENERIC_SPELL);
+                if (!trackedSpell)
+                    trackedSpell = enemyTarget->GetCurrentSpell(CURRENT_CHANNELED_SPELL);
+            }
+
+            if (trackedSpell && trackedSpell->GetSpellInfo())
+            {
+                uint32 const trackedSpellId = trackedSpell->GetSpellInfo()->Id;
+                if (enemyTarget->GetGUID() != currentEnemyCastingGuid || trackedSpellId != currentEnemyCastingSpellId)
+                {
+                    // 换目标 / 换法术：重置追踪基准
+                    currentEnemyCastingGuid = enemyTarget->GetGUID();
+                    currentEnemyCastingSpellId = trackedSpellId;
+                    currentEnemyCastingTotalMs = static_cast<uint32>(trackedSpell->GetCastTime());
+                    currentEnemyCastingElapsedMs = 0;
+                }
+                else
+                {
+                    currentEnemyCastingElapsedMs += diff;
+                }
+            }
+            else
+            {
+                // 目标停止施法、阵亡或丢失：立即强制清零，
+                // 杜绝上一场战斗的残留进度污染下一次压秒判定窗口。
                 currentEnemyCastingGuid.Clear();
                 currentEnemyCastingSpellId = 0;
                 currentEnemyCastingElapsedMs = 0;
                 currentEnemyCastingTotalMs = 0;
-            }
-            else
-            {
-                currentEnemyCastingElapsedMs += diff;
             }
         }
 
