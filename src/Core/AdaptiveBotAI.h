@@ -470,11 +470,29 @@ public:
         if (!who || who->GetTypeId() != TYPEID_UNIT)
             return;
 
+        Creature* targetCreature = who->ToCreature();
+        if (!targetCreature)
+            return;
+
         if (who->GetGUID() == memoryPreloadTargetGuid)
             return;
 
+        // 首领防抢占锁：若已预热过首领且该首领依然存活，
+        // 战斗途中转火杂兵小怪时严禁覆盖句柄，确保战后归因准确落盘至该首领档案中。
+        if (!memoryPreloadTargetGuid.IsEmpty())
+        {
+            if (Creature* currentBoss = ObjectAccessor::GetCreature(*me, memoryPreloadTargetGuid))
+            {
+                if (currentBoss->IsAlive() && (currentBoss->isWorldBoss() || currentBoss->IsDungeonBoss()))
+                {
+                    if (!targetCreature->isWorldBoss() && !targetCreature->IsDungeonBoss())
+                        return;
+                }
+            }
+        }
+
         memoryPreloadTargetGuid = who->GetGUID();
-        PreloadBossKnowledge(who->ToCreature()->GetEntry());
+        PreloadBossKnowledge(targetCreature->GetEntry());
     }
 
     void AttackStart(Unit* victim) override

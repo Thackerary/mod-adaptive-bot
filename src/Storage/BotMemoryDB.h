@@ -60,9 +60,9 @@ public:
     void Close();
 
     /// @brief 数据库句柄是否已就绪（供上层决定是否走记忆化分支）。
-    [[nodiscard]] bool IsReady() const { return _db != nullptr; }
+    [[nodiscard]] bool IsReady() const { return _readDb != nullptr && _writeDb != nullptr; }
 
-    // 战前查询 (主线程调用, 主键索引 O(1) 单行命中)
+    // 战前查询 (主线程调用, 主键索引 O(1) 单行命中, 走独立只读连接, 与写入完全并发)
     bool LoadBotKnowledge(uint32 spawnId, uint32 bossEntry, BotCognitionRecord& outRecord);
 
     // 战后提交 (主线程非阻塞入队)
@@ -78,7 +78,12 @@ private:
     void WorkerLoop();
     void InitSchema();
 
-    struct sqlite3* _db{ nullptr };
+    // 读写分离架构：彻底消除主线程查询与后台落盘的单句柄互斥争抢。
+    // 两者共享同一 WAL 数据库文件，但连接句柄完全独立：
+    //   - _readDb  以 SQLITE_OPEN_READONLY 打开，仅由游戏主线程使用；
+    //   - _writeDb 仅由后台落盘线程使用，独占写事务。
+    struct sqlite3* _readDb{ nullptr };  // 主线程只读连接
+    struct sqlite3* _writeDb{ nullptr }; // 后台工作线程独占写入连接
     std::string _dbPath;
 
     std::queue<AttributionPersistTask> _taskQueue;
