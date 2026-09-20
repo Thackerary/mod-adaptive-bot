@@ -32,7 +32,7 @@ namespace AssassinationRogueSpells
     constexpr uint32 STEALTH             = 1784;   // 潜行 Rank 4 (脱战常驻)
     constexpr uint32 VANISH              = 26889;  // 消失 Rank 3 (强行进潜，清仇恨并触发灭绝回能，3 分钟 CD)
     constexpr uint32 COLD_BLOOD          = 14177;  // 冷血 (20 级天赋，下次攻击必暴，Off-GCD，2 分钟 CD)
-    constexpr uint32 KICK                = 1766;   // 脚踢 Rank 5 (打断目标读条，15 能量，10s CD)
+    constexpr uint32 KICK                = 38768;  // 脚踢 Rank 5 (Off-GCD 打断, 接入基类压秒仲裁)
     constexpr uint32 TRICKS_OF_THE_TRADE = 57934;  // 嫁祸诀窍 (75 级仇恨转移与 15% 增伤，30s CD)
 
     // -------------------------------------------------------------------------
