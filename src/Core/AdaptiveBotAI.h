@@ -561,8 +561,14 @@ public:
                     bool merged = false;
                     for (auto& existing : activeDangerZones)
                     {
+                        // 正确比对主体：必须计算「新危险区 newZone」与「现有危险区 existing」
+                        // 之间的几何间距。此前误用 me->GetDistance2d(existing.x, existing.y)，
+                        // 算的是随从肉身与旧火圈的距离；灭团跑尸归来时随从早已远离旧火圈，
+                        // 判定恒为 false，导致同源同坐标火圈被反复推入列表、斥力成倍暴涨。
+                        float const dx = existing.x - newZone.x;
+                        float const dy = existing.y - newZone.y;
                         if (existing.mapId == currentMapId && existing.spellId == newZone.spellId &&
-                            me->GetDistance2d(existing.x, existing.y) < 4.0f)
+                            (dx * dx + dy * dy) < 16.0f)
                         {
                             existing.durationMs = 600000; // 同源机制刷新为 10 分钟长效记忆
                             existing.x = newZone.x;
@@ -1293,6 +1299,15 @@ public:
         SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spellId);
         if (!spellInfo || spellInfo->IsPassive())
             return LogBlock("法术元数据无效或为被动技能");
+
+        // 避火移动优先保护：自身处于危险禁区覆盖范围内时，封锁一切需读条或引导的技能。
+        // 否则 ExecuteSpell() 内部的 StopMoving() 会把正在逃跑的随从强行刹停站桩，
+        // 而读条期间的 UNIT_STATE_CASTING 又反过来封锁 ManageCasterCombat 的走位通道，
+        // 最终陷入「起跑 -> 刹车读条 -> 踩火暴毙」的死循环。
+        // 瞬发技能（火冲、真言术：盾、回春术等）不在此列，依然允许边走边丢。
+        bool const isNonInstant = (spellInfo->CalcCastTime() > 0 || spellInfo->IsChanneled());
+        if (isNonInstant && IsUnderDangerThreat(2.0f))
+            return LogBlock("自身处于危险区域中，封锁读条/引导以保证 APF 跑位优先");
 
         if (me->HasUnitState(UNIT_STATE_ROOT) && (spellInfo->HasEffect(SPELL_EFFECT_CHARGE) || spellInfo->HasEffect(SPELL_EFFECT_CHARGE_DEST)))
             return LogBlock("定身状态无法突进/冲锋");
