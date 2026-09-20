@@ -778,6 +778,29 @@ private:
         if (me->HasUnitState(UNIT_STATE_CASTING))
             return;
 
+        // ---- P0: APF 势场紧急避险 (火圈/顺劈强行接管，规避背后盲区站立吃火) ----
+        // 找背站位以 M_PI 锁定目标正后方，该方位在动态战局中常与地面火圈重叠；
+        // 若不允许势场接管，撕碎读条会与火圈伤害互相叠加导致暴毙。
+        // 势场单步外推为定长，逐帧重算会无限掐断起跑动画形成原地抽搐，
+        // 故做 300ms 帧节流，并仅在脱离 POINT 生成器(被打断/被抢占)时才重规划。
+        if (IsUnderDangerThreat(2.0f))
+        {
+            if (apfMoveUpdateTimer == 0 || me->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+            {
+                float nextX = 0.0f, nextY = 0.0f, nextZ = 0.0f;
+                if (PotentialField::CalculateNextPosition(me, victim, MELEE_FOLLOW_DIST, true, false, activeDangerZones, nextX, nextY, nextZ))
+                {
+                    me->GetMotionMaster()->MovePoint(1, nextX, nextY, nextZ);
+                    apfMoveUpdateTimer = 300;
+                    return;
+                }
+            }
+            else
+            {
+                return; // 正在平滑执行 APF 避险航点, 不打断既有路径
+            }
+        }
+
         me->SetFacingToObject(victim);
 
         float const dist = me->GetDistance(victim);

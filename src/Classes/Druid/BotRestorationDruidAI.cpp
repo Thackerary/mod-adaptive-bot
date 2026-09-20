@@ -1233,6 +1233,35 @@ private:
         if (me->HasUnitState(UNIT_STATE_CASTING))
             return;
 
+        // ---- P0: APF 势场紧急避险 (火圈/顺劈强行接管) ----
+        // 常规站位为坦克正后方 18 码，该落点无法感知地面火圈/毒池；
+        // 自身踏入危险区时必须让位给势场重规划安全治疗位，否则治疗随从会在
+        // 站桩读条中被持续灼烧，把宝贵的法力与 GCD 全部耗在自保上。
+        // 势场单步外推为定长，逐帧重算会无限掐断起跑动画形成原地抽搐，
+        // 故做 300ms 帧节流，并仅在脱离 POINT 生成器(被打断/被抢占)时才重规划。
+        // 锚点优先主坦以保持治疗射程，无主坦时退化为指挥官。
+        if (IsUnderDangerThreat(2.0f))
+        {
+            if (apfMoveUpdateTimer == 0 || me->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+            {
+                float nextX = 0.0f, nextY = 0.0f, nextZ = 0.0f;
+                Unit* avoidAnchor = groupSnapshot.mainTank ? groupSnapshot.mainTank : GetMaster();
+                if (avoidAnchor)
+                {
+                    if (PotentialField::CalculateNextPosition(me, avoidAnchor, IDEAL_FOLLOW_DIST, false, false, activeDangerZones, nextX, nextY, nextZ))
+                    {
+                        me->GetMotionMaster()->MovePoint(1, nextX, nextY, nextZ);
+                        apfMoveUpdateTimer = 300;
+                        return;
+                    }
+                }
+            }
+            else
+            {
+                return; // 正在平滑执行 APF 避险航点, 不打断既有路径
+            }
+        }
+
         Unit* anchor = groupSnapshot.mainTank;
         if (!anchor || !anchor->IsAlive())
             anchor = GetMaster();

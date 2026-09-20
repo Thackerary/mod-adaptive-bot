@@ -63,10 +63,10 @@ public:
 
     void Reset() override
     {
-        // 配置怒气通道 (熊坦核心资源)
+        // 配置怒气通道 (底层按 x10 放大，0 ~ 1000 刻度)
         me->setPowerType(POWER_RAGE);
-        me->SetMaxPower(POWER_RAGE, 100);
-        me->SetPower(POWER_RAGE, 20);
+        me->SetMaxPower(POWER_RAGE, 1000);
+        me->SetPower(POWER_RAGE, 200);
 
         AdaptiveBotAI::Reset();
 
@@ -125,10 +125,18 @@ public:
         SupplementRage();
 
         // ---------------------------------------------------------------------
-        // P0: 远距突进、远程开怪与怒气补充
+        // P0: 远距突进、远程开怪、近战猛击打断与怒气补充
         // ---------------------------------------------------------------------
         if (TryFeralCharge(victim))
             return;
+
+        // 猛击 (Bash)：3.3.5a 熊形态近战位打断/昏迷手段 (Rank 3: 8983)
+        if (me->IsWithinMeleeRange(victim))
+        {
+            uint32 const bash = GetAppropriateRank(8983, false);
+            if (bash && TryInterrupt(victim, bash))
+                return;
+        }
 
         if (MaintainFaerieFireFeral(victim))
             return;
@@ -195,9 +203,9 @@ private:
 
     void MaintainResourcePools()
     {
-        // 怒气上限契约 (引擎若按 10 倍存储自动上调，此处仅做下限保障)
-        if (me->GetMaxPower(POWER_RAGE) < 100)
-            me->SetMaxPower(POWER_RAGE, 100);
+        // 怒气上限契约 (必须对齐 CanCast 的 cost *= 10 规则)
+        if (me->GetMaxPower(POWER_RAGE) < 1000)
+            me->SetMaxPower(POWER_RAGE, 1000);
 
         // 形态切换 / 野性赐福 / 精灵之火仍属法力消耗技能，需保留法力池
         if (me->GetMaxPower(POWER_MANA) < 5000)
@@ -223,10 +231,10 @@ private:
     // =========================================================================
     void SupplementRage()
     {
-        if (me->GetPower(POWER_RAGE) >= 25)
+        if (me->GetPower(POWER_RAGE) >= 250)
             return;
 
-        me->ModifyPower(POWER_RAGE, 15);
+        me->ModifyPower(POWER_RAGE, 150);
     }
 
     // =========================================================================

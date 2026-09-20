@@ -160,18 +160,16 @@ public:
         // 树皮术为 Off-GCD 减伤，施放成功后必须当帧顺下，严禁 return 抢占决策流
         TryBarkskin();
 
-        // ---- 战术打断：目标正在读条时，以瞬发台风击退并中断其施法 ----
-        // 台风占 GCD：成功即交还控制权，等待击退与眩晕把目标推出读条节奏。
-        // 必须在 TYPHOON_RADIUS (15 码) 内施放，否则法术虽成功但击退半径外目标毫无反应。
+        // ---- 战术打断：接入阶段三记忆化压秒判定 ----
+        // 台风自身的击退会强制目标位移 (施法中位移即中断读条)，
+        // 交由基类按 learnedInterruptDelays 学到的提前量裁决出手窗口，
+        // 引导类法术零延时抢断，读条类法术压在末端，榨取最大输出偷跑时间。
         uint32 const interruptTyphoon = GetTalentRank(BalanceDruidSpells::TYPHOON);
-        if (interruptTyphoon && typhoonCooldown == 0 && IsInterruptibleTarget(victim) &&
-            me->IsWithinDist(victim, TYPHOON_RADIUS))
+        if (interruptTyphoon && typhoonCooldown == 0 && me->IsWithinDist(victim, TYPHOON_RADIUS) &&
+            ShouldInterruptTarget(victim, interruptTyphoon))
         {
-            // 台风为以自身为原点的正面锥形击退：起手前必须锁定朝向，
-            // 否则背身施放会出现「施法成功但锥形落空」的隐形浪费。
             me->SetFacingToObject(victim);
-
-            if (CanCast(me, interruptTyphoon, true) && ExecuteSpell(me, interruptTyphoon, true))
+            if (ExecuteSpell(me, interruptTyphoon, true))
             {
                 typhoonCooldown = CD_TYPHOON;
                 return;
@@ -644,6 +642,30 @@ private:
 
         if (me->HasUnitState(UNIT_STATE_CASTING))
             return;
+
+        // ---- P0: APF 势场紧急避险 (火圈/顺劈强行接管) ----
+        // 常规站位以 IDEAL_SHOT_DIST 保持 25 码输出环，该落点无法感知地面火圈；
+        // 自身踏入危险区时必须让位给势场重规划安全射击位。
+        // 势场单步外推为定长，逐帧重算会无限掐断起跑动画形成原地抽搐，
+        // 故做 300ms 帧节流，并仅在脱离 POINT 生成器(被打断/被抢占)时才重规划。
+        if (IsUnderDangerThreat(2.0f))
+        {
+            if (apfMoveUpdateTimer == 0 || me->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+            {
+                float nextX = 0.0f, nextY = 0.0f, nextZ = 0.0f;
+                float const optDist = std::clamp(me->GetDistance(victim), 18.0f, IDEAL_SHOT_DIST);
+                if (PotentialField::CalculateNextPosition(me, victim, optDist, false, false, activeDangerZones, nextX, nextY, nextZ))
+                {
+                    me->GetMotionMaster()->MovePoint(1, nextX, nextY, nextZ);
+                    apfMoveUpdateTimer = 300;
+                    return;
+                }
+            }
+            else
+            {
+                return; // 正在平滑执行 APF 避险航点, 不打断既有路径
+            }
+        }
 
         me->SetFacingToObject(victim);
 
