@@ -23,6 +23,7 @@
 #include "Analytics/CombatAnalyzer.h"
 #include "Movement/PotentialField.h"
 #include "Movement/DangerZones.h"
+#include "Storage/BotMemoryDB.h"
 #include <cmath>
 #include <algorithm>
 #include <vector>
@@ -50,6 +51,12 @@ public:
     // 伴随型战斗护卫（Combat Guardian）实时句柄与保活轮询计时器
     ObjectGuid guardianGuid;
     uint32 guardianCheckTimer{ 0 };
+
+    // =========================================================================
+    // 阶段三：顶层持久化认知记忆预热档案
+    // =========================================================================
+    ObjectGuid memoryPreloadTargetGuid;                       // 已预热 Boss 句柄（防重复读库）
+    std::unordered_map<uint32, uint32> learnedInterruptDelays; // spellId -> 压秒提前量(ms)
 
     // =========================================================================
     // 中层归因分析：战斗事件环形缓冲区与动态危险禁区（栈内定长，零堆分配）
@@ -238,6 +245,8 @@ public:
         tankSampleTimer = 0;
         otCheckTimer = 0;
         apfMoveUpdateTimer = 0;
+        memoryPreloadTargetGuid.Clear();
+        learnedInterruptDelays.clear();
         combatEventBuffer.Clear();
         // 刻意保留 activeDangerZones：团灭跑尸的 Reset() 不得冲刷已学到的
         // 危险禁区，否则每一次团灭都会把当次归因成果清零，永远无法跨战斗避险。
@@ -381,6 +390,91 @@ public:
         }
     }
 
+    // =========================================================================
+    // 阶段三：世界常驻实体的物理身份标识
+    // =========================================================================
+    /// @brief 获取随从在 world 数据库 creature 表中的物理身份 spawnId。
+    ///        只有由 .sql 世界刷新出来的常驻 NPC 才具备有效 spawnId；
+    ///        运行时 SummonCreature 的临时实体（含伴随护卫）恒返回 0，
+    ///        据此天然隔离「可跨战斗积累经验的常驻随从」与「一次性召唤物」。
+    uint32 GetBotSpawnId() const
+    {
+        if (me->GetSpawnId() > 0)
+            return static_cast<uint32>(me->GetSpawnId());
+
+        return static_cast<uint32>(me->GetDBTableGUIDLow());
+    }
+
+    // =========================================================================
+    // 阶段三：Boss 认知记忆预热（战前 O(1) 单行读取）
+    // =========================================================================
+    /// @brief 将个体认知档案中的危险禁区与打断余量灌入运行时状态。
+    ///        老兵随从首次面对该首领即可提前避火，无需再拿命试错。
+    void PreloadBossKnowledge(uint32 bossEntry)
+    {
+        uint32 const spawnId = GetBotSpawnId();
+        if (spawnId == 0 || bossEntry == 0)
+            return;
+
+        BotCognitionRecord record;
+        if (!sBotMemory->LoadBotKnowledge(spawnId, bossEntry, record))
+            return;
+
+        uint32 const currentMapId = me->GetMapId();
+
+        for (auto const& learned : record.learnedHazards)
+        {
+            bool merged = false;
+            for (auto& existing : activeDangerZones)
+            {
+                float const dx = existing.x - learned.x;
+                float const dy = existing.y - learned.y;
+                if (existing.spellId == learned.spellId && (dx * dx + dy * dy) < 16.0f)
+                {
+                    existing.mapId = currentMapId;
+                    existing.durationMs = 600000;
+                    existing.x = learned.x;
+                    existing.y = learned.y;
+                    existing.z = learned.z;
+                    existing.radius = learned.radius;
+                    merged = true;
+                    break;
+                }
+            }
+
+            if (!merged)
+            {
+                DangerZone zone = learned;
+                // 数据库不持久化地图归属：跨副本复用时必须由运行时盖章，
+                // 否则 mapId 为 0 会被 IsUnderDangerThreat() 视作全地图生效。
+                zone.mapId = currentMapId;
+                zone.durationMs = 600000;
+                activeDangerZones.push_back(zone);
+            }
+        }
+
+        learnedInterruptDelays = record.interruptDelays;
+
+        if (isDebugLogging)
+            LOG_INFO("scripts", "[Bot: {}] 已从个体认知库预热 Boss [{}] 经验: 熟练度 {}/3 | 危险区 {} 处 | 打断档案 {} 条 | 历史 {} 次灭团 / {} 次击杀",
+                me->GetName(), bossEntry, static_cast<uint32>(record.proficiencyLevel),
+                record.learnedHazards.size(), record.interruptDelays.size(),
+                record.wipeCount, record.killCount);
+    }
+
+    /// @brief 进战瞬间的记忆预热保险丝（按 Boss 句柄去重，同场战斗只读库一次）。
+    void TryPreloadBossKnowledge(Unit* who)
+    {
+        if (!who || who->GetTypeId() != TYPEID_UNIT)
+            return;
+
+        if (who->GetGUID() == memoryPreloadTargetGuid)
+            return;
+
+        memoryPreloadTargetGuid = who->GetGUID();
+        PreloadBossKnowledge(who->ToCreature()->GetEntry());
+    }
+
     void AttackStart(Unit* victim) override
     {
         if (!victim)
@@ -488,6 +582,11 @@ public:
     void JustEngagedWith(Unit* who) override
     {
         ScriptedAI::JustEngagedWith(who);
+
+        // 阶段三：无论开怪是由 TryEngageCombat 主动发起，还是引擎因受击/协助
+        // 把随从拖进战斗，都在进战瞬间补齐一次 Boss 认知预热。
+        TryPreloadBossKnowledge(who);
+
         OnEngaged(who);
     }
 
@@ -506,11 +605,19 @@ public:
         // =====================================================================
         if (!combatEventBuffer.Empty())
         {
+            // 结算时 GetVictim() 可能已被清空，优先复用开怪瞬间预热的 Boss 句柄，
+            // 保证认知档案永远落在正确的 (spawn_id, boss_entry) 复合主键上。
             uint32 bossEntry = 0;
-            if (Unit* victim = me->GetVictim())
+            if (!memoryPreloadTargetGuid.IsEmpty())
+                bossEntry = memoryPreloadTargetGuid.GetEntry();
+
+            if (bossEntry == 0)
             {
-                if (Creature* creature = victim->ToCreature())
-                    bossEntry = creature->GetEntry();
+                if (Unit* victim = me->GetVictim())
+                {
+                    if (Creature* creature = victim->ToCreature())
+                        bossEntry = creature->GetEntry();
+                }
             }
 
             AttributionReport const report = CombatAnalyzer::Analyze(combatEventBuffer, combatTimerMs, victory, bossEntry);
@@ -588,6 +695,16 @@ public:
                     }
                 }
             }
+
+            // =================================================================
+            // 阶段三：顶层持久化记忆库落盘
+            // 主线程此处只做一次 AttributionReport 深拷贝入队（< 1 微秒），
+            // 真正的 INSERT/UPDATE 与 fsync 全部由后台工作线程在单一事务中完成，
+            // 绝不阻塞游戏主世界心跳。仅「世界常驻实体」的认知才会落盘。
+            // =================================================================
+            uint32 const spawnId = GetBotSpawnId();
+            if (spawnId > 0 && bossEntry != 0)
+                sBotMemory->EnqueuePersistTask(spawnId, bossEntry, me->GetMapId(), report);
         }
 
         // 战后秒补：护卫在团本 AoE 中阵亡属常态，战斗结算瞬间立即补齐，
@@ -760,6 +877,10 @@ public:
         Unit* target = SelectAssistTarget();
         if (target && target->IsAlive())
         {
+            // 阶段三：开怪锁定首领瞬间完成记忆预热（主键索引 O(1)，
+            // 且由 memoryPreloadTargetGuid 去重，连战期间不会反复读库）。
+            TryPreloadBossKnowledge(target);
+
             AttackStart(target);
             me->SetInCombatWith(target);
             target->SetInCombatWith(me);
