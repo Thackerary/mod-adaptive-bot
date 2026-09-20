@@ -1396,7 +1396,7 @@ public:
                     Unit* currentVictim = me->GetVictim();
                     if (groupTank && groupTank != me && currentVictim && currentVictim->IsInWorld() && groupTank->GetMap() == me->GetMap())
                     {
-                        float const currentThreat = currentVictim->GetThreatMgr().getThreat(groupTank);
+                        float const currentThreat = currentVictim->GetThreatMgr().GetThreat(groupTank);
                         if (currentThreat > 0.0f)
                         {
                             BotCombatEvent ev;

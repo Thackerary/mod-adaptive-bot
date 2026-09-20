@@ -46,7 +46,7 @@ public:
         if (!bot || !target || !bot->IsAlive())
             return false;
 
-        if (bot->HasUnitState(UNIT_STATE_CASTING | UNIT_STATE_CHANNELING))
+        if (bot->HasUnitState(UNIT_STATE_CASTING) || bot->GetCurrentSpell(CURRENT_CHANNELED_SPELL))
             return false;
 
         FieldVector2D totalForce{ 0.0f, 0.0f };
