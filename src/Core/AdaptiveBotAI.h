@@ -399,10 +399,12 @@ public:
     ///        据此天然隔离「可跨战斗积累经验的常驻随从」与「一次性召唤物」。
     uint32 GetBotSpawnId() const
     {
-        if (me->GetSpawnId() > 0)
-            return static_cast<uint32>(me->GetSpawnId());
-
-        return static_cast<uint32>(me->GetDBTableGUIDLow());
+        // AzerothCore 已移除 GetDBTableGUIDLow()，世界常驻实体的数据库物理 GUID
+        // 唯一合法入口为 GetSpawnId()：
+        //   - 由 .sql 世界刷新出来的常驻 NPC 返回非零 spawnId；
+        //   - 运行时 SummonCreature 的临时实体（含伴随护卫）恒返回 0。
+        // 据此天然隔离「可跨战斗积累经验的常驻随从」与「一次性召唤物」。
+        return static_cast<uint32>(me->GetSpawnId());
     }
 
     // =========================================================================

@@ -6,7 +6,9 @@
 
 #include "Log.h"
 
-#include <sqlite3.h>
+// 内嵌编译模式：sqlite3 官方 amalgamation（sqlite3.c / sqlite3.h）随模块源码一同编译，
+// 使用引号包含以优先命中本模块 src/Storage 目录，彻底摆脱系统级 SQLite 环境依赖。
+#include "sqlite3.h"
 
 #include <algorithm>
 #include <ctime>
