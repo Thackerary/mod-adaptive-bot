@@ -187,6 +187,11 @@ public:
         // P5: AoE 与填充 (枯萎凋零 / 血液沸腾 / 心脏打击 / 灵界打击)
         if (PerformCombatFiller(victim))
             return;
+
+        // ---- 双手武器白字平砍驱动 ----
+        // 本类已完整接管 ScriptedAI::UpdateAI，引擎不会自动驱动挥砍，
+        // 必须在决策流末帧显式调用，否则白字伤害与「符文打击(下一次平砍强化)」将永久无法落地。
+        DoMeleeAttackIfReady();
     }
 
 private:
