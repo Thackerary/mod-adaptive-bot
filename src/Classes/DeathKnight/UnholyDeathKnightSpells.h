@@ -37,6 +37,7 @@ namespace UnholyDeathKnightSpells
     constexpr uint32 EMPOWER_RUNE_WEAPON = 47568; // 符文武器增效 (5m CD, 重置符文 + 25 符能)
     constexpr uint32 ICEBOUND_FORTITUDE  = 48792; // 冰封之韧 (濒死 50% 硬减伤 + 免疫昏迷, 2m CD)
     constexpr uint32 ANTI_MAGIC_SHELL    = 48707; // 反魔法护罩 (绿坝吸收魔法自保, 45s CD)
+    constexpr uint32 MIND_FREEZE         = 47528; // 心灵冰冻 (基础技能, 10s CD, 压秒打断)
 
     // =========================================================================
     // 触发光环 / 疾病 Debuff / 光环 
