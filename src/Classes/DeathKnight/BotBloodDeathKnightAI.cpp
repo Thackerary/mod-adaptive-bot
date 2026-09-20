@@ -54,6 +54,13 @@ public:
 
         presenceCheckTimer = 0;
         pestilenceTimer = 0;
+        antiMagicShellCooldown = 0;
+        iceboundFortitudeCooldown = 0;
+        vampiricBloodCooldown = 0;
+        runeTapCooldown = 0;
+        deathGripCooldown = 0;
+        darkCommandCooldown = 0;
+        deathAndDecayCooldown = 0;
         ApplyPassiveTalents();
     }
 
@@ -74,6 +81,19 @@ public:
     void UpdateAI(uint32 diff) override
     {
         UpdateTimers(diff);
+
+        // 自管冷却推进：Creature 不参与引擎 CD 追踪，必须逐帧递减，
+        // 否则(冷却恒为 0)减伤链会在每个心跳里反复重放同一技能。
+        {
+            auto Tick = [diff](uint32& timer) { timer = (timer > diff) ? (timer - diff) : 0; };
+            Tick(antiMagicShellCooldown);
+            Tick(iceboundFortitudeCooldown);
+            Tick(vampiricBloodCooldown);
+            Tick(runeTapCooldown);
+            Tick(deathGripCooldown);
+            Tick(darkCommandCooldown);
+            Tick(deathAndDecayCooldown);
+        }
 
         // 巡检计时器：每 3 秒复核一次常驻姿态与增益
         if (presenceCheckTimer <= diff)
@@ -139,6 +159,13 @@ public:
         // 符能保底：低于阈值时平滑补充，模拟平砍与受击获取符能 (不占用 GCD)
         SupplementRunicPower();
 
+        // ---- 心灵冰冻：接入阶段三基类记忆化压秒打断仲裁引擎 (Off-GCD) ----
+        // 打断成功必须当帧 return 释放整整一个 GCD 的决策权；
+        // 打断失败(时机未到/超距)时返回 false，决策流继续顺下执行减伤与仇恨链。
+        uint32 const mindFreeze = GetAppropriateRank(BloodDeathKnightSpells::MIND_FREEZE, false);
+        if (mindFreeze && TryInterrupt(victim, mindFreeze))
+            return;
+
         // P1: 生存与减伤链 (绿罩 / 冰封之韧 / 吸血鬼之血 / 符文分流)
         if (MaintainDefensiveCooldowns(victim))
             return;
@@ -174,8 +201,30 @@ private:
     // 传染本地限流：3.3.5a 传染无技能 CD，需自行约束刷新节奏
     static constexpr uint32 PESTILENCE_COOLDOWN_MS      = 10000;
 
+    // =========================================================================
+    // 自管冷却时长
+    // -------------------------------------------------------------------------
+    // Creature 不参与引擎技能 CD 追踪 (HasSpellCooldown 恒 false)，
+    // 凡无持续光环保护的 CD 技能必须由专精自行计时，
+    // 否则减伤链/聚怪链会逐帧空转重入，把绿罩、冰封之韧与死亡之握全部浪费在首帧。
+    // =========================================================================
+    static constexpr uint32 CD_ANTI_MAGIC_SHELL   = 45000;
+    static constexpr uint32 CD_ICEBOUND_FORTITUDE = 120000;
+    static constexpr uint32 CD_VAMPIRIC_BLOOD     = 60000;
+    static constexpr uint32 CD_RUNE_TAP           = 60000;
+    static constexpr uint32 CD_DEATH_GRIP         = 35000;
+    static constexpr uint32 CD_DARK_COMMAND       = 8000;
+    static constexpr uint32 CD_DEATH_AND_DECAY    = 30000;
+
     uint32 presenceCheckTimer{ 0 };
     uint32 pestilenceTimer{ 0 };
+    uint32 antiMagicShellCooldown{ 0 };
+    uint32 iceboundFortitudeCooldown{ 0 };
+    uint32 vampiricBloodCooldown{ 0 };
+    uint32 runeTapCooldown{ 0 };
+    uint32 deathGripCooldown{ 0 };
+    uint32 darkCommandCooldown{ 0 };
+    uint32 deathAndDecayCooldown{ 0 };
 
     // =========================================================================
     // 常驻姿态与增益维护器
@@ -195,13 +244,13 @@ private:
     {
         // 寒冬号角在 3.3.5a 占用 1.0 秒 GCD，战时不再反复吹动；
         // 符能续航统一交由 SupplementRunicPower() 保底机制处理。
-        if (me->HasAura(BloodDeathKnightSpells::HORN_OF_WINTER))
+        // 寒冬号角为分阶法术：必须走 GetAppropriateRank 做降阶解析，
+        // 直接硬放最高 Rank 会在低等级被底层以「法术等级超限」拒绝，造成增益永久断档。
+        uint32 const hornOfWinter = GetAppropriateRank(BloodDeathKnightSpells::HORN_OF_WINTER, false);
+        if (!hornOfWinter || !CanCast(me, hornOfWinter, true))
             return false;
 
-        if (!CanCast(me, BloodDeathKnightSpells::HORN_OF_WINTER, true))
-            return false;
-
-        return ExecuteSpell(me, BloodDeathKnightSpells::HORN_OF_WINTER, true);
+        return ExecuteSpell(me, hornOfWinter, true);
     }
 
     // =========================================================================
@@ -251,6 +300,9 @@ private:
         if (!target || target == me)
             return false;
 
+        if (deathGripCooldown > 0)
+            return false;
+
         float const dist = me->GetDistance(target);
         if (dist < 8.0f || dist > 30.0f)
             return false;
@@ -268,7 +320,13 @@ private:
         if (!CanCast(target, BloodDeathKnightSpells::DEATH_GRIP, true))
             return false;
 
-        return ExecuteSpell(target, BloodDeathKnightSpells::DEATH_GRIP, true);
+        if (ExecuteSpell(target, BloodDeathKnightSpells::DEATH_GRIP, true))
+        {
+            deathGripCooldown = CD_DEATH_GRIP;
+            return true;
+        }
+
+        return false;
     }
 
     // =========================================================================
@@ -282,37 +340,52 @@ private:
         bool const targetCasting = victim->IsNonMeleeSpellCast(false);
 
         if (targetCasting &&
+            antiMagicShellCooldown == 0 &&
             !me->HasAura(BloodDeathKnightSpells::ANTI_MAGIC_SHELL) &&
             CanCast(me, BloodDeathKnightSpells::ANTI_MAGIC_SHELL, true))
         {
             if (ExecuteSpell(me, BloodDeathKnightSpells::ANTI_MAGIC_SHELL, true))
+            {
+                antiMagicShellCooldown = CD_ANTI_MAGIC_SHELL;
                 return true;
+            }
         }
 
         // 冰封之韧：自身血量 < 35%
         if (hpPct < 35.0f &&
+            iceboundFortitudeCooldown == 0 &&
             !me->HasAura(BloodDeathKnightSpells::ICEBOUND_FORTITUDE) &&
             CanCast(me, BloodDeathKnightSpells::ICEBOUND_FORTITUDE, true))
         {
             if (ExecuteSpell(me, BloodDeathKnightSpells::ICEBOUND_FORTITUDE, true))
+            {
+                iceboundFortitudeCooldown = CD_ICEBOUND_FORTITUDE;
                 return true;
+            }
         }
 
         // 吸血鬼之血：自身血量 < 50%
         if (hpPct < 50.0f &&
+            vampiricBloodCooldown == 0 &&
             !me->HasAura(BloodDeathKnightSpells::VAMPIRIC_BLOOD) &&
             CanCast(me, BloodDeathKnightSpells::VAMPIRIC_BLOOD, true))
         {
             if (ExecuteSpell(me, BloodDeathKnightSpells::VAMPIRIC_BLOOD, true))
+            {
+                vampiricBloodCooldown = CD_VAMPIRIC_BLOOD;
                 return true;
+            }
         }
 
         // 符文分流：自身血量 < 60%
         uint32 const runeTap = GetAppropriateRank(BloodDeathKnightSpells::RUNE_TAP);
-        if (runeTap && hpPct < 60.0f && CanCast(me, runeTap, true))
+        if (runeTap && hpPct < 60.0f && runeTapCooldown == 0 && CanCast(me, runeTap, true))
         {
             if (ExecuteSpell(me, runeTap, true))
+            {
+                runeTapCooldown = CD_RUNE_TAP;
                 return true;
+            }
         }
 
         return false;
@@ -331,10 +404,14 @@ private:
             return true;
 
         // 黑暗命令为 30 码远程强嘲；死亡之握冷却中时仍可隔距离直接拉回失控怪
-        if (CanCast(urgentTarget, BloodDeathKnightSpells::DARK_COMMAND, true))
+        if (darkCommandCooldown == 0 &&
+            CanCast(urgentTarget, BloodDeathKnightSpells::DARK_COMMAND, true))
         {
             if (ExecuteSpell(urgentTarget, BloodDeathKnightSpells::DARK_COMMAND, true))
+            {
+                darkCommandCooldown = CD_DARK_COMMAND;
                 return true;
+            }
         }
 
         return false;
@@ -446,10 +523,13 @@ private:
         if (needsAoE)
         {
             uint32 const deathAndDecay = GetAppropriateRank(BloodDeathKnightSpells::DEATH_AND_DECAY);
-            if (deathAndDecay && CanCast(victim, deathAndDecay, true))
+            if (deathAndDecay && deathAndDecayCooldown == 0 && CanCast(victim, deathAndDecay, true))
             {
                 if (ExecuteSpell(victim, deathAndDecay, true, victim))
+                {
+                    deathAndDecayCooldown = CD_DEATH_AND_DECAY;
                     return true;
+                }
             }
         }
 

@@ -403,6 +403,13 @@ private:
         // ---- P0: 极限自保 (Off-GCD 顺下, 严禁 return 中断当帧决策流) ----
         TryEmergencySurvival(victim);
 
+        // ---- P0.5: 心灵冰冻压秒打断 (阶段三记忆化仲裁, Off-GCD) ----
+        // 心灵冰冻不占用 GCD, 严禁 return: 必须在当帧继续顺下执行 P1/P2 决策,
+        // 否则一次成功打断会把号角/铜墙铁壁/符文武器整体延后一个心跳周期。
+        uint32 const mindFreeze = GetAppropriateRank(FrostDeathKnightSpells::MIND_FREEZE, false);
+        if (mindFreeze)
+            TryInterrupt(victim, mindFreeze);
+
         // ---- P1: 姿态与团队增益常驻维持 ----
         if (MaintainBloodPresence())
             return;
@@ -757,6 +764,28 @@ private:
         // 铁律 38: 读条期间严禁下发任何走位指令, 否则读条会被同帧 MoveFollow 秒断
         if (me->HasUnitState(UNIT_STATE_CASTING))
             return;
+
+        // ---- P0: APF 势场紧急避险 (火圈/顺劈强行接管, 规避背后盲区站立吃火) ----
+        // 找背站位以 M_PI 锁定目标正后方, 该方位在动态战局中常与地面火圈/正面顺劈
+        // 覆盖区重叠。势场单步外推为定长, 若逐帧重算会无限掐断起跑动画形成原地抽搐,
+        // 必须做 300ms 帧节流, 并仅在脱离 POINT 生成器(被打断/被抢占)时才重规划。
+        if (IsUnderDangerThreat(2.0f))
+        {
+            if (apfMoveUpdateTimer == 0 || me->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+            {
+                float nextX = 0.0f, nextY = 0.0f, nextZ = 0.0f;
+                if (PotentialField::CalculateNextPosition(me, victim, MELEE_FOLLOW_DIST, true, false, activeDangerZones, nextX, nextY, nextZ))
+                {
+                    me->GetMotionMaster()->MovePoint(1, nextX, nextY, nextZ);
+                    apfMoveUpdateTimer = 300;
+                    return;
+                }
+            }
+            else
+            {
+                return; // 正在平滑执行 APF 避险航点, 不打断既有路径
+            }
+        }
 
         me->SetFacingToObject(victim);
 
