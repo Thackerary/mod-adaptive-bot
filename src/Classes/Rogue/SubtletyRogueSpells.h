@@ -25,6 +25,7 @@ namespace SubtletyRogueSpells
     constexpr uint32 VANISH              = 26889;  // 消失 Rank 3 (战斗中强行潜行, 3m CD)
     constexpr uint32 EVASION             = 26669;  // 闪避 Rank 2 (濒死 50% 闪避, 3m CD)
     constexpr uint32 CLOAK_OF_SHADOWS    = 31224;  // 暗影斗篷 (魔法免疫与解除, 1m CD)
+    constexpr uint32 KICK                = 38768;  // 脚踢 Rank 5 (Off-GCD 打断, 接入基类压秒仲裁)
     constexpr uint32 SINISTER_STRIKE     = 48638;  // 邪恶攻击 Rank 12 (低级正面无出血时兜底产星)
     constexpr uint32 DEADLY_POISON       = 57973;  // 致命毒药 Rank 9 (普攻模拟注入)
     constexpr uint32 INSTANT_POISON      = 57965;  // 速效毒药 Rank 9 (技能命中模拟注入)

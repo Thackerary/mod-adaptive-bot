@@ -45,9 +45,11 @@ class BotCombatRogueAI : public AdaptiveBotAI
     static constexpr uint32 CD_VANISH              = 180000;
     static constexpr uint32 CD_EVASION             = 180000;
     static constexpr uint32 CD_CLOAK               = 60000;
+    static constexpr uint32 CD_KICK                = 10000;
 
     // 生命 / 能量门禁
     static constexpr float  EVASION_HP_PCT          = 30.0f; // 濒死闪避
+    static constexpr uint32 KICK_ENERGY             = 15;    // 脚踢能量消耗
     static constexpr float  VANISH_HP_PCT           = 20.0f; // 极度濒危消失
     static constexpr uint8  FINISHER_MIN_CP         = 4;     // 终结技最低连击点
     static constexpr uint32 FINISHER_ENERGY         = 35;    // 终结技支付门槛 (不足则原地挂起等能量)
@@ -217,6 +219,7 @@ private:
     uint32 vanishCooldown{ 0 };
     uint32 evasionCooldown{ 0 };
     uint32 cloakCooldown{ 0 };
+    uint32 kickCooldown{ 0 };
 
     // 毒药模拟巡检节流计时器
     uint32 poisonProcTimer{ 0 };
@@ -235,6 +238,7 @@ private:
         Tick(vanishCooldown);
         Tick(evasionCooldown);
         Tick(cloakCooldown);
+        Tick(kickCooldown);
         Tick(poisonProcTimer);
     }
 
@@ -247,6 +251,7 @@ private:
         vanishCooldown = 0;
         evasionCooldown = 0;
         cloakCooldown = 0;
+        kickCooldown = 0;
 
         poisonProcTimer = 0;
     }
@@ -586,6 +591,13 @@ private:
             }
         }
 
+        // ---- 脚踢：接入阶段三基类记忆化压秒打断仲裁引擎 (Off-GCD) ----
+        if (kickCooldown == 0 && me->GetPower(POWER_ENERGY) >= KICK_ENERGY)
+        {
+            uint32 const kick = GetAppropriateRank(CombatRogueSpells::KICK, false);
+            if (kick && TryInterrupt(victim, kick))
+                kickCooldown = CD_KICK;
+        }
     }
 
     // 杀戮盛宴冷却动态结算：插有雕文时由 120s 缩短至 75s
@@ -803,6 +815,25 @@ private:
         // 读条期间严禁下发走位指令，否则本帧起手的读条法术会被同帧 MoveFollow 秒断。
         if (me->HasUnitState(UNIT_STATE_CASTING))
             return;
+
+        // ---- P0: APF 势场紧急避险 (火圈/顺劈强行接管，规避背后盲区站桩吃火) ----
+        if (IsUnderDangerThreat(2.0f))
+        {
+            if (apfMoveUpdateTimer == 0 || me->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+            {
+                float nextX = 0.0f, nextY = 0.0f, nextZ = 0.0f;
+                if (PotentialField::CalculateNextPosition(me, victim, MELEE_FOLLOW_DIST, true, false, activeDangerZones, nextX, nextY, nextZ))
+                {
+                    me->GetMotionMaster()->MovePoint(1, nextX, nextY, nextZ);
+                    apfMoveUpdateTimer = 300;
+                    return;
+                }
+            }
+            else
+            {
+                return;
+            }
+        }
 
         me->SetFacingToObject(victim);
 

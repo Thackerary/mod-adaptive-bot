@@ -580,11 +580,11 @@ private:
         if (!victim)
             return;
 
-        // ---- 脚踢：打断目标读条 (能量不足时严禁空放，交回产星循环优先保输出) ----
-        if (kickCooldown == 0 && IsInterruptibleTarget(victim) && me->GetPower(POWER_ENERGY) >= KICK_ENERGY)
+        // ---- 脚踢：接入阶段三基类记忆化压秒打断仲裁引擎 (Off-GCD) ----
+        if (kickCooldown == 0 && me->GetPower(POWER_ENERGY) >= KICK_ENERGY)
         {
             uint32 const kick = GetAppropriateRank(AssassinationRogueSpells::KICK, false);
-            if (kick && CanCast(victim, kick, true) && ExecuteSpell(victim, kick, true))
+            if (kick && TryInterrupt(victim, kick))
                 kickCooldown = CD_KICK;
         }
 
@@ -833,6 +833,25 @@ private:
 
         if (me->HasUnitState(UNIT_STATE_CASTING))
             return;
+
+        // ---- P0: APF 势场紧急避险 (火圈/顺劈强行接管，规避背后盲区站桩吃火) ----
+        if (IsUnderDangerThreat(2.0f))
+        {
+            if (apfMoveUpdateTimer == 0 || me->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+            {
+                float nextX = 0.0f, nextY = 0.0f, nextZ = 0.0f;
+                if (PotentialField::CalculateNextPosition(me, victim, MELEE_FOLLOW_DIST, true, false, activeDangerZones, nextX, nextY, nextZ))
+                {
+                    me->GetMotionMaster()->MovePoint(1, nextX, nextY, nextZ);
+                    apfMoveUpdateTimer = 300;
+                    return;
+                }
+            }
+            else
+            {
+                return;
+            }
+        }
 
         me->SetFacingToObject(victim);
 

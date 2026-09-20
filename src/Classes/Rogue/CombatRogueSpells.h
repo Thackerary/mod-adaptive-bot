@@ -27,6 +27,7 @@ namespace CombatRogueSpells
     constexpr uint32 VANISH              = 26889;  // 消失 Rank 3 (强行进潜清仇恨)
     constexpr uint32 EVASION             = 26669;  // 闪避 Rank 2 (濒死 50% 闪避)
     constexpr uint32 CLOAK_OF_SHADOWS    = 31224;  // 暗影斗篷 (魔法免疫与解除)
+    constexpr uint32 KICK                = 38768;  // 脚踢 Rank 5 (Off-GCD 打断, 接入基类压秒仲裁)
     constexpr uint32 DEADLY_POISON       = 57973;  // 致命毒药 Rank 9 (副手命中模拟注入)
     constexpr uint32 INSTANT_POISON      = 57965;  // 速效毒药 Rank 9 (主手命中模拟注入)
 

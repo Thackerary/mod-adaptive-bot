@@ -48,9 +48,11 @@ class BotSubtletyRogueAI : public AdaptiveBotAI
     static constexpr uint32 CD_EVASION       = 180000;
     static constexpr uint32 CD_CLOAK         = 60000;
     static constexpr uint32 CD_PREPARATION   = 300000;
+    static constexpr uint32 CD_KICK          = 10000;
 
     // 生命阈值
     static constexpr float  VANISH_HP_PCT    = 20.0f;   // 极度濒危：消失脱困
+    static constexpr uint32 KICK_ENERGY      = 15;      // 脚踢能量消耗
     static constexpr float  EVASION_HP_PCT   = 30.0f;   // 濒死：闪避
     static constexpr float  SAFE_HP_PCT      = 50.0f;   // 脱困判定线 (伺机待发)
 
@@ -227,6 +229,14 @@ public:
         // ---- P2: 爆发 (暗影之舞开启，Off-GCD 顺下) ----
         TryShadowDanceBurst(victim);
 
+        // ---- 脚踢：接入阶段三基类记忆化压秒打断仲裁引擎 (Off-GCD) ----
+        if (kickCooldown == 0 && me->GetPower(POWER_ENERGY) >= KICK_ENERGY)
+        {
+            uint32 const kick = GetAppropriateRank(SubtletyRogueSpells::KICK, false);
+            if (kick && TryInterrupt(victim, kick))
+                kickCooldown = CD_KICK;
+        }
+
         // ---- P2.5: 影舞持续期内绝对优先伏击 ----
         if (me->HasAura(SubtletyRogueSpells::AURA_SHADOW_DANCE))
         {
@@ -274,6 +284,7 @@ private:
     uint32 evasionCooldown{ 0 };
     uint32 cloakCooldown{ 0 };
     uint32 preparationCooldown{ 0 };
+    uint32 kickCooldown{ 0 };
 
     // 潜行起手窗口倒计时 (仅潜行态且贴近起手距离时递减)
     uint32 stealthOpenTimer{ STEALTH_OPEN_WINDOW };
@@ -298,6 +309,7 @@ private:
         Tick(evasionCooldown);
         Tick(cloakCooldown);
         Tick(preparationCooldown);
+        Tick(kickCooldown);
         Tick(poisonProcTimer);
         Tick(honorAmongThievesTimer);
 
@@ -330,6 +342,7 @@ private:
         evasionCooldown = 0;
         cloakCooldown = 0;
         preparationCooldown = 0;
+        kickCooldown = 0;
 
         stealthOpenTimer = STEALTH_OPEN_WINDOW;
         poisonProcTimer = 0;
@@ -1142,6 +1155,25 @@ private:
         // 否则本帧起手的读条法术会被同帧下发的 MoveFollow 秒断，造成永久抽搐。
         if (me->HasUnitState(UNIT_STATE_CASTING))
             return;
+
+        // ---- P0: APF 势场紧急避险 (火圈/顺劈强行接管，规避背后盲区站桩吃火) ----
+        if (IsUnderDangerThreat(2.0f))
+        {
+            if (apfMoveUpdateTimer == 0 || me->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+            {
+                float nextX = 0.0f, nextY = 0.0f, nextZ = 0.0f;
+                if (PotentialField::CalculateNextPosition(me, victim, MELEE_FOLLOW_DIST, true, false, activeDangerZones, nextX, nextY, nextZ))
+                {
+                    me->GetMotionMaster()->MovePoint(1, nextX, nextY, nextZ);
+                    apfMoveUpdateTimer = 300;
+                    return;
+                }
+            }
+            else
+            {
+                return;
+            }
+        }
 
         me->SetFacingToObject(victim);
 
