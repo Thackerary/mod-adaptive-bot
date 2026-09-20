@@ -543,11 +543,45 @@ public:
                 LOG_INFO("scripts", "==================================================================");
             }
 
-            // 将归因提炼出的危险禁区注入当前感知列表，并标记当前地图 ID，
-            // 防止旧副本的残留禁区在换图后继续干扰走位。
-            activeDangerZones = report.derivedDangerZones;
-            for (auto& zone : activeDangerZones)
-                zone.mapId = me->GetMapId();
+            // 知识记忆池更新：
+            if (victory)
+            {
+                // 首领击杀胜利：清空危险禁区记忆，避免把上一任首领的机制禁区
+                // 误带入后续杂兵战与下一场首领战。
+                activeDangerZones.clear();
+            }
+            else
+            {
+                // 灭团失败：增量合并新提炼的危险禁区。若直接整体赋值，
+                // 第二把死于平砍（derivedDangerZones 为空）会彻底抹除第一把
+                // 学到的火圈知识；此处改为同图同技能近距刷新 + 异技能累加。
+                uint32 const currentMapId = me->GetMapId();
+                for (auto const& newZone : report.derivedDangerZones)
+                {
+                    bool merged = false;
+                    for (auto& existing : activeDangerZones)
+                    {
+                        if (existing.mapId == currentMapId && existing.spellId == newZone.spellId &&
+                            me->GetDistance2d(existing.x, existing.y) < 4.0f)
+                        {
+                            existing.durationMs = 600000; // 同源机制刷新为 10 分钟长效记忆
+                            existing.x = newZone.x;
+                            existing.y = newZone.y;
+                            existing.z = newZone.z;
+                            merged = true;
+                            break;
+                        }
+                    }
+
+                    if (!merged)
+                    {
+                        DangerZone zone = newZone;
+                        zone.mapId = currentMapId;
+                        zone.durationMs = 600000; // 赋予 10 分钟跨战斗长效记忆
+                        activeDangerZones.push_back(zone);
+                    }
+                }
+            }
         }
 
         // 战后秒补：护卫在团本 AoE 中阵亡属常态，战斗结算瞬间立即补齐，
@@ -977,14 +1011,20 @@ public:
                 return; // 正在平滑执行上一个 APF 导航航点，不进行路径打断
             }
 
-            // 核心关键修复：脱离危险区途中合力会逐渐衰减到阈值以下而返回 false，
-            // 若就此向下击穿调用 MoveChase(victim)，会把随从强行拉回火圈中心，
-            // 形成「推出->拉回」的溜溜球折返跑。因此只要仍在危险覆盖边缘，
-            // 就地站桩挥砍，把危险区排除权交给下一帧的势场重算。
-            if (threatened)
+            // 核心关键修复：
+            // 1. 若自身仍在危险区覆盖边缘 (threatened)，就地站桩挥砍，
+            //    杜绝向下击穿 MoveChase 把随从拉回火圈形成溜溜球折返；
+            // 2. 若已被势场引导进近战攻击范围且合力衰减（说明绕背就位完成），
+            //    同样就地挥砍，严禁 MoveChase 把随从贴向首领正中心，
+            //    否则已站好的背后/侧翼攻击位会被破坏并引发原地滑步抖动。
+            if (threatened || me->IsWithinMeleeRange(victim))
             {
                 if (me->GetVictim() != victim || !me->HasUnitState(UNIT_STATE_MELEE_ATTACKING))
                     me->Attack(victim, true);
+
+                if (me->GetMotionMaster()->GetCurrentMovementGeneratorType() == POINT_MOTION_TYPE)
+                    me->GetMotionMaster()->Clear();
+
                 return;
             }
         }
@@ -1468,9 +1508,10 @@ public:
             }
         }
 
-        // 危险禁区生命周期自然消退：没有衰减机制的禁区会永久残留，
-        // 使随从在后续战斗中被早已消失的火圈持续排挤。
-        if (!activeDangerZones.empty())
+        // 危险禁区生命周期仅在战斗中自然消退；脱战与跑尸阶段挂起倒计时。
+        // 若按真实时间持续扣减，玩家释放灵魂跑尸回本动辄 1~2 分钟，
+        // 远长于 15 秒默认留存时间，重新开怪时学到的火圈已被全部清空。
+        if (me->IsInCombat() && !activeDangerZones.empty())
         {
             for (auto it = activeDangerZones.begin(); it != activeDangerZones.end(); )
             {
