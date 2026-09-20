@@ -45,9 +45,9 @@ public:
     void Reset() override
     {
         // 符文能量通道必须先于基类重置完成配置，保证 SyncLevelWithMaster 走符文能量分支
-        // 初始符能保底 30 点，确保接怪瞬间遭遇法系尖刺即可开启反魔法护盾
+        // 符能底层按 x10 定点存储 (0 ~ 1000)，初始符能保底 30 点 (300 刻度)
         me->setPowerType(POWER_RUNIC_POWER);
-        me->SetMaxPower(POWER_RUNIC_POWER, 100);
+        me->SetMaxPower(POWER_RUNIC_POWER, MAX_RUNIC_POWER);
         me->SetPower(POWER_RUNIC_POWER, MIN_RUNIC_POWER_RESERVE);
 
         AdaptiveBotAI::Reset();
@@ -160,11 +160,10 @@ public:
         SupplementRunicPower();
 
         // ---- 心灵冰冻：接入阶段三基类记忆化压秒打断仲裁引擎 (Off-GCD) ----
-        // 打断成功必须当帧 return 释放整整一个 GCD 的决策权；
-        // 打断失败(时机未到/超距)时返回 false，决策流继续顺下执行减伤与仇恨链。
+        // 技能不触发公共冷却 GCD，打断后当帧顺下继续执行减伤与仇恨循环
         uint32 const mindFreeze = GetAppropriateRank(BloodDeathKnightSpells::MIND_FREEZE, false);
-        if (mindFreeze && TryInterrupt(victim, mindFreeze))
-            return;
+        if (mindFreeze)
+            TryInterrupt(victim, mindFreeze);
 
         // P1: 生存与减伤链 (绿罩 / 冰封之韧 / 吸血鬼之血 / 符文分流)
         if (MaintainDefensiveCooldowns(victim))
@@ -191,12 +190,11 @@ public:
     }
 
 private:
-    // 符能保底阈值：绿罩 / 冰封之韧 / 符文打击 均需 20 点符能
-    static constexpr uint32 MIN_RUNIC_POWER_RESERVE = 30;
-
-    // 符能战时续航参数
-    static constexpr uint32 RUNIC_POWER_LOW_THRESHOLD   = 20; // 低于该值触发被动补能
-    static constexpr uint32 RUNIC_POWER_REFILL_AMOUNT   = 10; // 单次被动补能量
+    // 符能底层按 x10 存储 (0 ~ 1000)，与 CanCast 的 cost *= 10 口径完全对齐
+    static constexpr uint32 MAX_RUNIC_POWER             = 1000;
+    static constexpr uint32 MIN_RUNIC_POWER_RESERVE     = 300; // 30 符能
+    static constexpr uint32 RUNIC_POWER_LOW_THRESHOLD   = 200; // 低于 20 符能触发补能
+    static constexpr uint32 RUNIC_POWER_REFILL_AMOUNT   = 100; // 单次补 10 符能
 
     // 传染本地限流：3.3.5a 传染无技能 CD，需自行约束刷新节奏
     static constexpr uint32 PESTILENCE_COOLDOWN_MS      = 10000;
@@ -242,10 +240,10 @@ private:
 
     bool MaintainHornOfWinter()
     {
-        // 寒冬号角在 3.3.5a 占用 1.0 秒 GCD，战时不再反复吹动；
-        // 符能续航统一交由 SupplementRunicPower() 保底机制处理。
-        // 寒冬号角为分阶法术：必须走 GetAppropriateRank 做降阶解析，
-        // 直接硬放最高 Rank 会在低等级被底层以「法术等级超限」拒绝，造成增益永久断档。
+        // 全分阶光环检测：已有寒冬号角增益时绝不重复吹动，避免每秒死循环施放占死全部 GCD
+        if (me->GetAuraOfRankedSpell(BloodDeathKnightSpells::HORN_OF_WINTER))
+            return false;
+
         uint32 const hornOfWinter = GetAppropriateRank(BloodDeathKnightSpells::HORN_OF_WINTER, false);
         if (!hornOfWinter || !CanCast(me, hornOfWinter, true))
             return false;
