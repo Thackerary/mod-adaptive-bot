@@ -1668,10 +1668,6 @@ public:
         if (!spellInfo)
             return false;
 
-        // 免疫打断的法术不值得消耗打断 CD
-        if (spellInfo->HasAttribute(SPELL_ATTR1_NOT_INTERRUPTABLE))
-            return false;
-
         uint32 const spellId = spellInfo->Id;
 
         // 通道引导类法术（暴风雪、苦修、精神鞭笞等）持续造成威胁，
