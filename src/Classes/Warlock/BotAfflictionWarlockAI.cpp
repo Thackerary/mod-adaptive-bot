@@ -450,7 +450,9 @@ private:
         // 会对该非法能量索引执行 GetPower 读取，存在读到邻域字段垃圾值并误判
         // 「能量不足」从而把分流永久阻断的风险。故此处彻底绕开通用施法通道，
         // 直接以引擎底层 CastSpell 直放，并以自管蓝线/血线/GCD 三重门禁替代资源校验。
-        if (me->CastSpell(me, lifeTap, false) != SPELL_CAST_OK)
+        // 必须传 triggered = true: 非触发式通道仍会在底层执行 CheckPower 校验并越界读取
+        // POWER_HEALTH 字段, 只有触发式直放才能 100% 绕过能量与目标类型门禁。
+        if (me->CastSpell(me, lifeTap, true) != SPELL_CAST_OK)
             return false;
 
         gcdTimer = 1500;
