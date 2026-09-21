@@ -525,11 +525,11 @@ private:
             // 让十字军打击/审判立即吃满这 20% 增伤。
         }
 
-        // ---- 制裁之锤：目标读条/引导时近战瞬发打断 ----
-        if (hammerOfJusticeCooldown == 0 && IsInterruptibleTarget(victim))
+        // ---- 制裁之锤：接入阶段三基类记忆化压秒打断仲裁引擎 (Off-GCD) ----
+        if (hammerOfJusticeCooldown == 0)
         {
             uint32 const hammerOfJustice = GetAppropriateRank(RetributionPaladinSpells::HAMMER_OF_JUSTICE, false);
-            if (hammerOfJustice && CanCast(victim, hammerOfJustice, true) && ExecuteSpell(victim, hammerOfJustice, true))
+            if (hammerOfJustice && TryInterrupt(victim, hammerOfJustice))
                 hammerOfJusticeCooldown = CD_HAMMER_OF_JUSTICE;
         }
     }
@@ -714,6 +714,25 @@ private:
 
         if (me->HasUnitState(UNIT_STATE_CASTING))
             return;
+
+        // ---- P0: APF 势场紧急避险 (火圈/顺劈强行接管，规避背后盲区站桩吃火) ----
+        if (IsUnderDangerThreat(2.0f))
+        {
+            if (apfMoveUpdateTimer == 0 || me->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+            {
+                float nextX = 0.0f, nextY = 0.0f, nextZ = 0.0f;
+                if (PotentialField::CalculateNextPosition(me, victim, MELEE_FOLLOW_DIST, true, false, activeDangerZones, nextX, nextY, nextZ))
+                {
+                    me->GetMotionMaster()->MovePoint(1, nextX, nextY, nextZ);
+                    apfMoveUpdateTimer = 300;
+                    return;
+                }
+            }
+            else
+            {
+                return;
+            }
+        }
 
         me->SetFacingToObject(victim);
 

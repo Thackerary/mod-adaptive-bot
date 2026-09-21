@@ -224,6 +224,10 @@ public:
                 return;
         }
 
+        // ---- 单手武器白字平砍驱动 ----
+        // 本类已完整接管 ScriptedAI::UpdateAI，引擎不会自动驱动挥砍，
+        // 必须在决策流末帧显式调用，保证基础平砍仇恨与圣印 (腐蚀/复仇) 稳定叠层。
+        DoMeleeAttackIfReady();
     }
 
 private:
