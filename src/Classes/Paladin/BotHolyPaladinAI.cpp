@@ -37,6 +37,11 @@ class BotHolyPaladinAI : public AdaptiveBotAI
     // M_PI 即锚点正后方：坦克背身位，可规避顺劈斩与正面吐息
     static constexpr float  BEHIND_ANGLE        = static_cast<float>(M_PI);
 
+    // 制裁之锤自管冷却：Creature 不参与引擎技能 CD 追踪，
+    // 凡无「持续光环保护」的 CD 技能必须由专精自行计时，否则会因
+    // HasSpellCooldown 恒 false 而在每一帧对同一技能空转重入。
+    static constexpr uint32 CD_HAMMER_OF_JUSTICE = 60000;
+
 public:
     explicit BotHolyPaladinAI(Creature* creature) : AdaptiveBotAI(creature) {}
 
@@ -78,6 +83,7 @@ public:
         me->setPowerType(POWER_MANA);
         AdaptiveBotAI::Reset();
         buffSweepTimer = 0;
+        hammerOfJusticeCooldown = 0;
         isHuggingTank = false;
         ApplyPassiveTalents();
     }
@@ -99,6 +105,7 @@ public:
     void UpdateAI(uint32 diff) override
     {
         UpdateTimers(diff);
+        TickPaladinCooldowns(diff);
 
         if (buffSweepTimer <= diff)
             buffSweepTimer = BUFF_SWEEP_INTERVAL;
@@ -160,6 +167,17 @@ public:
         if (TrySelfPreservation()) return;
         if (TryEmergencyHeals()) return;
 
+        // ---- 制裁之锤：战术打断 (接入阶段三记忆化压秒仲裁，Off-GCD) ----
+        // 治疗专精常被默认「无打断手段」，但 3.3.5a 中奶骑天然携带制裁之锤：
+        // 它是不占公共冷却的瞬发技，交给基类 TryInterrupt 读取 SQLite 预热的
+        // 压秒余量即可，既不与治疗 GCD 冲突，也不会被血线门禁挤掉。
+        if (hammerOfJusticeCooldown == 0)
+        {
+            uint32 const hammerOfJustice = GetAppropriateRank(HolyPaladinSpells::HAMMER_OF_JUSTICE, false);
+            if (hammerOfJustice && TryInterrupt(victim, hammerOfJustice))
+                hammerOfJusticeCooldown = CD_HAMMER_OF_JUSTICE;
+        }
+
         // ---- P1: 核心 Buff 与道标维护 ----
         if (sweepDue)
         {
@@ -193,6 +211,14 @@ private:
     // 贴脸避难状态标记：记录当前是否处于「紧抱坦克身侧」的应急姿态。
     // 仇恨解除后必须凭此标记主动重发跟随指令，否则奶骑会永久粘在坦克身后吃顺劈与吐息
     bool isHuggingTank{ false };
+
+    // 制裁之锤自管冷却余量 (ms)
+    uint32 hammerOfJusticeCooldown{ 0 };
+
+    void TickPaladinCooldowns(uint32 diff)
+    {
+        hammerOfJusticeCooldown = (hammerOfJusticeCooldown > diff) ? (hammerOfJusticeCooldown - diff) : 0;
+    }
 
     // =========================================================================
     // 队友状态巡检 (打地鼠雷达)

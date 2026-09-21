@@ -459,9 +459,8 @@ private:
             if (!seal)
                 continue;
 
-            // 圣印光环与施法法术共用同一 ID，直接按该 Rank 判定存在性即可，
-            // 避免分阶查询在单阶圣印上恒返回 nullptr 导致每帧重复顶替浪费 GCD。
-            if (me->HasAura(seal))
+            // 圣印为分阶法术，必须走 GetAuraOfRankedSpell 避免因等级同步残留低阶光环导致重复刷
+            if (me->GetAuraOfRankedSpell(seal))
                 return false;
 
             if (!CanCast(me, seal, true))
@@ -474,7 +473,7 @@ private:
         // 低等级或双阵营 DoT 圣印均不可用：平滑回退正义圣印，
         // 保证任何阵营、任何等级段的随从都恒定持有有效圣印光环。
         uint32 const righteousness = GetAppropriateRank(RetributionPaladinSpells::SEAL_OF_RIGHTEOUSNESS, false);
-        if (righteousness && !me->HasAura(righteousness) && CanCast(me, righteousness, true))
+        if (righteousness && !me->GetAuraOfRankedSpell(righteousness) && CanCast(me, righteousness, true))
             return ExecuteSpell(me, righteousness, true);
 
         return false;

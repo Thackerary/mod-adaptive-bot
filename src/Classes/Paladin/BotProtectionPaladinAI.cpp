@@ -234,6 +234,76 @@ private:
     uint32 blessingCheckTimer{ 0 };
 
     // =========================================================================
+    // 坦克近战走位与 APF 势场避险 (铁律 21)
+    // -------------------------------------------------------------------------
+    // 本函数以同名成员刻意隐藏基类 AdaptiveBotAI::ManageMeleeCombat。
+    // 基类版本只要「场上存在任一危险禁区」就无条件下发 APF 航点，
+    // 坦克会被反复推离聚怪点位，造成仇恨丢失与站位漂移；
+    // 坦克版本仅在自身真正踏入危险区 (IsUnderDangerThreat) 时才接管走位。
+    // 因基类该函数非 virtual，故只能以名称隐藏方式在坦克专精内部生效，
+    // 不波及其他近战专精的既有行为。
+    // =========================================================================
+    void ManageMeleeCombat(Unit* victim)
+    {
+        if (!victim || !victim->IsAlive() || victim->GetMap() != me->GetMap())
+            return;
+
+        if (me->HasUnitState(UNIT_STATE_CASTING) || me->GetCurrentSpell(CURRENT_CHANNELED_SPELL))
+            return;
+
+        // ---- APF 势场紧急避险 (仅圆形火圈/毒池；正面顺劈由坦克本体硬接) ----
+        // 势场单步外推为 3.0 码定长，若服务端每 50ms 心跳都重下 MovePoint，
+        // 起跑动画会被无限掐断重置而表现为原地抽搐，故以 300ms 帧节流管控重算频率。
+        if (IsUnderDangerThreat(2.0f))
+        {
+            if (apfMoveUpdateTimer == 0 || me->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+            {
+                float nextX = 0.0f, nextY = 0.0f, nextZ = 0.0f;
+
+                // 第二参数 avoidFrontalCone = false：正面承伤聚怪是坦克本职，不规避锥形区；
+                // 第三参数 isTank = true：由势场底层豁免正面顺劈斥力。
+                if (PotentialField::CalculateNextPosition(me, victim, 2.0f, false, true, activeDangerZones, nextX, nextY, nextZ))
+                {
+                    if (me->GetVictim() != victim || !me->HasUnitState(UNIT_STATE_MELEE_ATTACKING))
+                        me->Attack(victim, true);
+
+                    me->GetMotionMaster()->MovePoint(1, nextX, nextY, nextZ);
+                    apfMoveUpdateTimer = 300;
+                    return;
+                }
+            }
+            else
+            {
+                return; // 正在平滑执行上一个 APF 避险航点，不打断
+            }
+
+            // 势场未能给出有效落点但已进入近战范围：就地站桩挥砍，
+            // 严禁向下击穿 MoveChase 把坦克拉回火圈中心造成溜溜球折返。
+            if (me->IsWithinMeleeRange(victim))
+            {
+                if (me->GetVictim() != victim || !me->HasUnitState(UNIT_STATE_MELEE_ATTACKING))
+                    me->Attack(victim, true);
+
+                if (me->GetMotionMaster()->GetCurrentMovementGeneratorType() == POINT_MOTION_TYPE)
+                    me->GetMotionMaster()->Clear();
+
+                return;
+            }
+        }
+
+        // ---- 常规追击：坦克直线贴身硬刚，不追求背身位 ----
+        if (me->GetVictim() != victim || !me->HasUnitState(UNIT_STATE_MELEE_ATTACKING))
+            me->Attack(victim, true);
+
+        if (!me->HasUnitState(UNIT_STATE_CHARGING))
+        {
+            MovementGeneratorType const moveType = me->GetMotionMaster()->GetCurrentMovementGeneratorType();
+            if (moveType != CHASE_MOTION_TYPE && moveType != POINT_MOTION_TYPE)
+                me->GetMotionMaster()->MoveChase(victim);
+        }
+    }
+
+    // =========================================================================
     // 团队平均血量采样器 (用于神圣牺牲的团队危机仲裁)
     // =========================================================================
     float ComputeGroupAverageHealthPct()
@@ -467,14 +537,17 @@ private:
             return ProtectionPaladinSpells::SEAL_OF_VENGEANCE;
         }
 
-        return ProtectionPaladinSpells::SEAL_OF_RIGHTEOUSNESS;
+        // 正义圣印为分阶法术，按坦克当前等级解析出可用最高阶，
+        // 避免低级段长期停留在 Rank 1 导致仇恨与审判伤害塌方。
+        return GetAppropriateRank(ProtectionPaladinSpells::SEAL_OF_RIGHTEOUSNESS, true);
     }
 
     bool MaintainSeal()
     {
-        if (me->HasAura(ProtectionPaladinSpells::SEAL_OF_VENGEANCE) ||
-            me->HasAura(ProtectionPaladinSpells::SEAL_OF_CORRUPTION) ||
-            me->HasAura(ProtectionPaladinSpells::SEAL_OF_RIGHTEOUSNESS))
+        // 圣印为分阶法术，必须走 GetAuraOfRankedSpell 避免因等级同步残留低阶光环导致重复刷
+        if (me->GetAuraOfRankedSpell(ProtectionPaladinSpells::SEAL_OF_VENGEANCE) ||
+            me->GetAuraOfRankedSpell(ProtectionPaladinSpells::SEAL_OF_CORRUPTION) ||
+            me->GetAuraOfRankedSpell(ProtectionPaladinSpells::SEAL_OF_RIGHTEOUSNESS))
         {
             return false;
         }
@@ -486,11 +559,13 @@ private:
                 return true;
         }
 
-        // 高级圣印未解锁或施放失败时，回退至正义圣印
-        if (preferredSeal != ProtectionPaladinSpells::SEAL_OF_RIGHTEOUSNESS &&
-            CanCast(me, ProtectionPaladinSpells::SEAL_OF_RIGHTEOUSNESS, true))
+        // 高级圣印未解锁或施放失败时，回退至正义圣印。
+        // 回退分支同样必须走 GetAppropriateRank 降阶：直接踩满阶 ID 会让
+        // 低等级坦克的施法被底层按 SpellLevel 门槛拒绝，退化为全程无圣印。
+        uint32 const righteousness = GetAppropriateRank(ProtectionPaladinSpells::SEAL_OF_RIGHTEOUSNESS, true);
+        if (righteousness && preferredSeal != righteousness && CanCast(me, righteousness, true))
         {
-            if (ExecuteSpell(me, ProtectionPaladinSpells::SEAL_OF_RIGHTEOUSNESS, true))
+            if (ExecuteSpell(me, righteousness, true))
                 return true;
         }
 

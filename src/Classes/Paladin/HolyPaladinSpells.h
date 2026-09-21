@@ -45,7 +45,14 @@ namespace HolyPaladinSpells
     constexpr uint32 FORBEARANCE            = 25771; // 自律 (封印圣盾/保护之手/圣佑)
 
     // =========================================================================
-    // 4. 被动天赋光环补偿 (Passive Talent Auras)
+    // 4. 战术打断 (Interrupts)
+    // =========================================================================
+    // 制裁之锤为最高 Rank (Rank 4) 入口 ID：低等级段由 GetAppropriateRank
+    // 沿 DBC 法术链自动降阶，严禁在此登记低阶 ID 造成满级随从只丢低级晕锤。
+    constexpr uint32 HAMMER_OF_JUSTICE      = 10308; // 制裁之锤 Rank 4 (6 秒瘫痪，瞬发 Off-GCD)
+
+    // =========================================================================
+    // 5. 被动天赋光环补偿 (Passive Talent Auras)
     // =========================================================================
     constexpr uint32 IMPROVED_JUDGEMENTS    = 25956; // 强化审判 Rank 2 (审判射程 +20 码)
     constexpr uint32 ILLUMINATION           = 20272; // 启发 Rank 5 (暴击治疗回蓝)
@@ -58,7 +65,7 @@ namespace HolyPaladinSpells
     constexpr uint32 BUFF_JUDGEMENTS_OF_THE_PURE   = 53657; // 纯洁审判急速 Buff (15% 急速，1 分钟)
 
     // =========================================================================
-    // 5. 核心雕文 (Major Glyphs)
+    // 6. 核心雕文 (Major Glyphs)
     // =========================================================================
     constexpr uint32 GLYPH_OF_HOLY_LIGHT    = 54937; // 圣光术雕文 (圣光术溅射群抬核心)
 }

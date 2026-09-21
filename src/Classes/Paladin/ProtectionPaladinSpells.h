@@ -20,7 +20,10 @@ namespace ProtectionPaladinSpells
     // =========================================================================
     constexpr uint32 SEAL_OF_VENGEANCE              = 31801; // 复仇圣印 (联盟向)
     constexpr uint32 SEAL_OF_CORRUPTION             = 53736; // 腐化圣印 (部落向)
-    constexpr uint32 SEAL_OF_RIGHTEOUSNESS          = 21084; // 正义圣印 (低级兜底)
+    // 必须登记满阶 Rank 9 (20290, 72 级) 而非 Rank 1：分阶圣印交给
+    // GetAppropriateRank 沿 DBC 法术链降阶，低等级坦克才会逐级取到
+    // 当时可用的最高阶圣印，避免整段练级期只挂 Rank 1 造成仇恨塌方。
+    constexpr uint32 SEAL_OF_RIGHTEOUSNESS          = 20290; // 正义圣印 Rank 9 (低级兜底)
 
     // =========================================================================
     // 3. 核心仇恨打击 (Core Threat Abilities)
