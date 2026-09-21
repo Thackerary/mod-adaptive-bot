@@ -269,7 +269,10 @@ public:
         // ---- 双手白字平砍驱动 ----
         // ScriptedAI::UpdateAI 已被本类完整接管，引擎不会自动驱动平砍，
         // 必须在决策流末帧显式调用，否则白字伤害与平砍产怒永久缺失。
-        DoMeleeAttackIfReady();
+        // 利刃风暴自转期内严禁驱动白字：自转通道会吞并平砍队列，
+        // 强行挥砍会被底层拒放并扰乱通道状态，大招结束后自然恢复。
+        if (!me->HasAura(ArmsWarriorSpells::BLADESTORM))
+            DoMeleeAttackIfReady();
     }
 
 private:
@@ -829,6 +832,11 @@ private:
 
         // 斩杀期把怒气全部让渡给致死打击与斩杀，严禁用英勇打击偷跑怒气导致斩杀断档
         if (victim->GetHealthPct() < EXECUTE_PHASE_HP_PCT)
+            return false;
+
+        // 猝死触发时，必须将所有怒气让渡给这发免费斩杀，
+        // 严禁此时执行泄怒排队把斩杀所需怒气预先烧掉。
+        if (me->HasAura(ArmsWarriorSpells::AURA_SUDDEN_DEATH))
             return false;
 
         if (me->GetPower(POWER_RAGE) < RAGE_DUMP_THRESHOLD)

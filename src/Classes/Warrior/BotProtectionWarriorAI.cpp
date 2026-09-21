@@ -49,6 +49,7 @@ public:
     void UpdateAI(uint32 diff) override
     {
         UpdateTimers(diff);
+        UpdateWarriorTimers(diff);
 
         // 维护团队怒吼计时器 (战斗内外通用)
         if (shoutCheckTimer <= diff)
@@ -173,18 +174,30 @@ public:
         // 1. 常规起手突进接怪
         if (distToVictim >= 8.0f && distToVictim <= 25.0f && !me->HasUnitState(UNIT_STATE_ROOT)) 
         {
-            uint32 const charge = GetAppropriateRank(ProtectionWarriorSpells::CHARGE); 
-            if (charge && CanCast(victim, charge, false)) 
+            if (chargeCooldown == 0)
             {
-                if (ExecuteSpell(victim, charge, false)) 
-                    return;
+                uint32 const charge = GetAppropriateRank(ProtectionWarriorSpells::CHARGE); 
+                if (charge && CanCast(victim, charge, false)) 
+                {
+                    if (ExecuteSpell(victim, charge, false)) 
+                    {
+                        chargeCooldown = 15000;
+                        return;
+                    }
+                }
             }
 
-            uint32 const intercept = GetAppropriateRank(ProtectionWarriorSpells::INTERCEPT); 
-            if (intercept && CanCast(victim, intercept, false)) 
+            if (interceptCooldown == 0)
             {
-                if (ExecuteSpell(victim, intercept, false)) 
-                    return;
+                uint32 const intercept = GetAppropriateRank(ProtectionWarriorSpells::INTERCEPT); 
+                if (intercept && CanCast(victim, intercept, false)) 
+                {
+                    if (ExecuteSpell(victim, intercept, false)) 
+                    {
+                        interceptCooldown = 30000;
+                        return;
+                    }
+                }
             }
         }
 
@@ -192,25 +205,44 @@ public:
         // 交由基类 ShouldInterruptTarget 统一裁决：引导类即刻抢断，
         // 读条类严格按 learnedInterruptDelays 学到的压秒余量出手，
         // 彻底取代原先「只要在读条就砍」的盲目秒断。
-        uint32 const shieldBash = GetAppropriateRank(ProtectionWarriorSpells::SHIELD_BASH);
-        if (shieldBash && TryInterrupt(victim, shieldBash))
-            return;
+        if (shieldBashCooldown == 0)
+        {
+            uint32 const shieldBash = GetAppropriateRank(ProtectionWarriorSpells::SHIELD_BASH);
+            if (shieldBash && TryInterrupt(victim, shieldBash))
+            {
+                shieldBashCooldown = 12000;
+                return;
+            }
+        }
 
         // 远距离突进打断：仅当目标确在施法且处于突进射程时才交冲锋/拦截，
         // 避免把机动技能浪费在无读条的常规拉怪上。
         if (victim->HasUnitState(UNIT_STATE_CASTING) && distToVictim >= 8.0f && distToVictim <= 25.0f && !me->HasUnitState(UNIT_STATE_ROOT))
         {
-            uint32 const charge = GetAppropriateRank(ProtectionWarriorSpells::CHARGE); 
-            if (charge && CanCast(victim, charge, false)) 
+            if (chargeCooldown == 0)
             {
-                if (ExecuteSpell(victim, charge, false)) 
-                    return;
+                uint32 const charge = GetAppropriateRank(ProtectionWarriorSpells::CHARGE); 
+                if (charge && CanCast(victim, charge, false)) 
+                {
+                    if (ExecuteSpell(victim, charge, false)) 
+                    {
+                        chargeCooldown = 15000;
+                        return;
+                    }
+                }
             }
-            uint32 const intercept = GetAppropriateRank(ProtectionWarriorSpells::INTERCEPT); 
-            if (intercept && CanCast(victim, intercept, false)) 
+
+            if (interceptCooldown == 0)
             {
-                if (ExecuteSpell(victim, intercept, false)) 
-                    return;
+                uint32 const intercept = GetAppropriateRank(ProtectionWarriorSpells::INTERCEPT); 
+                if (intercept && CanCast(victim, intercept, false)) 
+                {
+                    if (ExecuteSpell(victim, intercept, false)) 
+                    {
+                        interceptCooldown = 30000;
+                        return;
+                    }
+                }
             }
         }
 
@@ -236,22 +268,28 @@ public:
             float const distToUrgent = me->GetDistance(urgentTarget); 
 
             // 战神远距离冲锋/拦截优先贴脸打断控怪
-            if (distToUrgent >= 8.0f && distToUrgent <= 25.0f && !me->HasUnitState(UNIT_STATE_ROOT)) 
+            if (chargeCooldown == 0 && distToUrgent >= 8.0f && distToUrgent <= 25.0f && !me->HasUnitState(UNIT_STATE_ROOT)) 
             {
                 uint32 const charge = GetAppropriateRank(ProtectionWarriorSpells::CHARGE); 
                 if (charge && CanCast(urgentTarget, charge, false)) 
                 {
                     if (ExecuteSpell(urgentTarget, charge, false)) 
+                    {
+                        chargeCooldown = 15000;
                         return;
+                    }
                 }
             }
 
             // 远程嘲讽 (30 码, 强拉仇恨)
             uint32 const taunt = GetAppropriateRank(ProtectionWarriorSpells::TAUNT); 
-            if (taunt && CanCast(urgentTarget, taunt, false)) 
+            if (tauntCooldown == 0 && taunt && CanCast(urgentTarget, taunt, false)) 
             {
                 if (ExecuteSpell(urgentTarget, taunt, false)) 
+                {
+                    tauntCooldown = 8000;
                     return;
+                }
             }
         }
 
@@ -384,10 +422,108 @@ public:
                     ExecuteSpell(victim, heroicStrike, false); 
             }
         }
+        // 平砍驱动：ScriptedAI::UpdateAI 已被本类完整接管，引擎不会自动驱动平砍，
+        // 必须在决策流末帧显式调用，否则白字伤害与平砍产怒永久缺失。
+        DoMeleeAttackIfReady();
     }
 
 private:
     uint32 shoutCheckTimer{ 0 };
+
+    // =========================================================================
+    // 自管冷却登记
+    // -------------------------------------------------------------------------
+    // Creature 不参与引擎技能 CD 追踪 (Unit::HasSpellCooldown 恒 false)，
+    // 故 CanCast 中的冷却校验对本随从形同虚设，凡无「持续光环保护」的 CD 技能
+    // 必须由专精自行计时，否则会每一帧对同一技能空转重入、被底层反复拒放刷日志。
+    // =========================================================================
+    uint32 shieldBashCooldown{ 0 };
+    uint32 chargeCooldown{ 0 };
+    uint32 interceptCooldown{ 0 };
+    uint32 tauntCooldown{ 0 };
+    uint32 battleShoutRetryTimer{ 0 };
+
+    void UpdateWarriorTimers(uint32 diff)
+    {
+        auto Tick = [diff](uint32& timer) { timer = (timer > diff) ? (timer - diff) : 0; };
+
+        Tick(shieldBashCooldown);
+        Tick(chargeCooldown);
+        Tick(interceptCooldown);
+        Tick(tauntCooldown);
+        Tick(battleShoutRetryTimer);
+    }
+
+    // =========================================================================
+    // 坦克近战走位与 APF 势场避险 (铁律 21)
+    // -------------------------------------------------------------------------
+    // 本函数以同名成员刻意隐藏基类 AdaptiveBotAI::ManageMeleeCombat：
+    // 基类版本只要「场上存在任一危险禁区」就无条件下发 APF 航点，坦克会被反复
+    // 推离聚怪点位，造成仇恨丢失与站位漂移；坦克版本仅在自身真正踏入危险区
+    // (IsUnderDangerThreat) 时才接管走位。因基类该函数非 virtual，此名称隐藏
+    // 仅在坦克专精内部生效，不波及其他近战专精的既有行为。
+    // =========================================================================
+    void ManageMeleeCombat(Unit* victim)
+    {
+        if (!victim || !victim->IsAlive() || victim->GetMap() != me->GetMap())
+            return;
+
+        if (me->HasUnitState(UNIT_STATE_CASTING) || me->GetCurrentSpell(CURRENT_CHANNELED_SPELL))
+            return;
+
+        // ---- APF 势场紧急避险 (仅圆形火圈/毒池，正面顺劈由坦克本体硬接) ----
+        // 势场单步外推为 3.0 码定长，若服务端每 50ms 心跳都重下 MovePoint，
+        // 起跑动画会被无限掐断重置而表现为原地抽搐，故以 300ms 帧节流管控重算频率。
+        if (IsUnderDangerThreat(2.0f) && !me->HasUnitState(UNIT_STATE_CHARGING))
+        {
+            if (apfMoveUpdateTimer == 0 || me->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+            {
+                float nextX = 0.0f, nextY = 0.0f, nextZ = 0.0f;
+
+                // 第二参数 avoidFrontalCone = false：正面承伤聚怪是坦克本职，不规避锥形区；
+                // 第三参数 isTank = true：由势场底层豁免正面顺劈与友军防挤压斥力。
+                if (PotentialField::CalculateNextPosition(me, victim, 2.0f, false, true, activeDangerZones, nextX, nextY, nextZ))
+                {
+                    if (me->GetVictim() != victim || !me->HasUnitState(UNIT_STATE_MELEE_ATTACKING))
+                        me->Attack(victim, true);
+
+                    me->GetMotionMaster()->MovePoint(1, nextX, nextY, nextZ);
+                    apfMoveUpdateTimer = 300;
+                    return;
+                }
+            }
+            else
+            {
+                return; // 正在平滑执行上一个 APF 避险航点，不打断
+            }
+
+            // 势场未能给出有效落点但已进入近战范围：就地站桩挥砍，
+            // 严禁向下击穿 MoveChase 把坦克拉回火圈中心造成溜溜球折返。
+            if (me->IsWithinMeleeRange(victim))
+            {
+                if (me->GetVictim() != victim || !me->HasUnitState(UNIT_STATE_MELEE_ATTACKING))
+                    me->Attack(victim, true);
+
+                if (me->GetMotionMaster()->GetCurrentMovementGeneratorType() == POINT_MOTION_TYPE)
+                    me->GetMotionMaster()->Clear();
+
+                return;
+            }
+        }
+
+        // ---- 常规追击：坦克直线贴身硬刚，不追求背身位 ----
+        if (me->GetVictim() != victim || !me->HasUnitState(UNIT_STATE_MELEE_ATTACKING))
+            me->Attack(victim, true);
+
+        // 冲锋/拦截的 EFFECT_MOTION 期间严禁下发任何走位指令，
+        // 否则会当帧掐断突进路径，把坦克钉死在技能起手点原地空转。
+        if (me->HasUnitState(UNIT_STATE_CHARGING))
+            return;
+
+        MovementGeneratorType const moveType = me->GetMotionMaster()->GetCurrentMovementGeneratorType();
+        if (moveType != CHASE_MOTION_TYPE && moveType != POINT_MOTION_TYPE)
+            me->GetMotionMaster()->MoveChase(victim);
+    }
 
     uint32 GetTeamShoutSpell() const
     {
@@ -424,6 +560,11 @@ private:
     // 全局通用的怒吼维持 (战斗内外皆可调用)
     bool MaintainTeamShout()
     {
+        // 重试节流：同类 AP 增益 (圣骑士力量祝福等) 覆盖时底层会拒绝施放怒吼，
+        // 无节流守卫会在战斗内的每次 3 秒巡检中重复尝试并被拒绝，空转烧掉决策流。
+        if (battleShoutRetryTimer > 0)
+            return false;
+
         Player* master = GetMaster(); 
         uint32 const shoutSpell = GetTeamShoutSpell(); 
         if (!shoutSpell) 
@@ -445,6 +586,11 @@ private:
             {
                 if (ExecuteSpell(me, shoutSpell, true)) 
                     return true;
+            }
+            else
+            {
+                // 底层拒放 (多为同类 AP 增益覆盖)：置位重试节流，避免每帧空转重入。
+                battleShoutRetryTimer = 5000;
             }
         }
         return false;

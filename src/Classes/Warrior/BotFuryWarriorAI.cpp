@@ -464,10 +464,25 @@ private:
         // 缺失激怒时当帧立刻补前置，并在同一帧内完成后续判定——
         // 若在此 return false 让出决策流，当帧 P3 打击循环会立即把怒气压低，
         // 下一帧狂暴回复便会因怒气不足 15 点被底层拒绝，随从当场被卡死在濒死血线。
-        bool const hasEnrage = me->HasAura(FuryWarriorSpells::BERSERKER_RAGE) ||
-                               me->HasAura(FuryWarriorSpells::BLOODRAGE);
-        if (!hasEnrage && !TryTriggerEnrage())
-            return false;
+        bool hasEnrage = me->HasAura(FuryWarriorSpells::BERSERKER_RAGE) ||
+                         me->HasAura(FuryWarriorSpells::BLOODRAGE);
+
+        if (!hasEnrage)
+        {
+            // 触发式激怒为瞬发直放；TryTriggerEnrage 失败即代表狂暴之怒与血性狂暴
+            // 双双处于自管冷却中，此时强行施放狂暴回复必被底层以「缺少激怒」拒绝，
+            // 必须当帧让出，避免白烧 3 分钟 CD 与一次决策流。
+            if (!TryTriggerEnrage())
+                return false;
+
+            // 复核一次：激怒光环在免疫 / 驱散等特殊场景下可能并未实际落地，
+            // 未落地时严禁继续施放狂暴回复，否则同样会被底层直接拒绝。
+            hasEnrage = me->HasAura(FuryWarriorSpells::BERSERKER_RAGE) ||
+                        me->HasAura(FuryWarriorSpells::BLOODRAGE);
+
+            if (!hasEnrage)
+                return false;
+        }
 
         uint32 const enragedRegeneration = GetAppropriateRank(FuryWarriorSpells::ENRAGED_REGENERATION, false);
         if (enragedRegeneration && !me->HasAura(enragedRegeneration) &&
