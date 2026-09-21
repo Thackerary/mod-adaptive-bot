@@ -98,9 +98,6 @@ public:
     // 法系远程 (与猎人物理远程解耦)：伤害由法术强度与奥术乘数通道支撑
     bool IsRangedPhysicalBot() const override { return false; }
 
-    // 按专精契约固定 1.0x：不继承基类为法系远程预留的 2.0x ~ 3.3x 装备装等放大通道
-    float GetDamageDealtMultiplier() const override { return 1.0f; }
-
     // =========================================================================
     // 天赋依赖技能的最低等级契约
     // 注：基础法术 (奥冲/飞弹/寒冰箭/唤醒/法师护甲/冰箱/反制等) 严禁登记于此，

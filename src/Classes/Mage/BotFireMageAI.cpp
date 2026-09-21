@@ -107,8 +107,6 @@ public:
     // 法系远程 (与猎人物理远程解耦): 伤害由法术强度与火系乘数通道支撑
     bool IsRangedPhysicalBot() const override { return false; }
 
-    float GetDamageDealtMultiplier() const override { return 1.0f; }
-
     // =========================================================================
     // 天赋依赖技能的最低等级契约
     // 注: 3.3.5a 中纯天赋技能 DBC SpellLevel 恒为 0, GetAppropriateRank 无法降阶,
