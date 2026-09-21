@@ -47,7 +47,7 @@ namespace BloodDeathKnightSpells
     constexpr uint32 AURA_FROST_FEVER            = 55095; // 冰霜疫病
     constexpr uint32 AURA_BLOOD_PLAGUE           = 55078; // 暗影疫病
     constexpr uint32 WILL_OF_THE_NECROPOLIS      = 50150; // 大墓地的意志 (35% 血以下硬减伤)
-    constexpr uint32 VETERAN_OF_THE_THIRD_WAR    = 50034; // 三战老兵 (耐力/力量/护甲)
+    constexpr uint32 VETERAN_OF_THE_THIRD_WAR    = 50029; // 三战老兵 (耐力/力量/护甲)//修订
     constexpr uint32 TOUGHNESS                   = 49042; // 坚韧 (护甲提升)
     constexpr uint32 ANTICIPATION                = 55129; // 预知 (闪避提升)
 
