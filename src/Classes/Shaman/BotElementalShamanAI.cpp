@@ -351,7 +351,7 @@ private:
     // =========================================================================
     // 周围可攻击敌人计数器 (跨来源去重采样: 自身 + 主人/队友 + 随从集群)
     // =========================================================================
-    uint32 CountNearbyEnemies(float range)
+    uint32 CountNearbyEnemies(float range) const
     {
         std::vector<Unit*> enemies;
 
@@ -439,8 +439,14 @@ private:
         if (!me->IsWithinLOSInMap(target))
             return false;
 
-        SpellCastResult const result = me->CastSpell(target, spellId,
-            TRIGGERED_IGNORE_POWER_AND_REAGENT_COST | TRIGGERED_IGNORE_GCD | TRIGGERED_DONT_REPORT_CAST_ERROR);
+        // 致命坑位: TriggerCastFlags 未定义 operator|, 直接写 A | B | C 会被推导为 int,
+        // 从而匹配到 CastSpell 的 bool triggered 重载 (等价 TRIGGERED_FULL_MASK,
+        // 含 TRIGGERED_CAST_DIRECTLY 与 IGNORE_SPELL_AND_CATEGORY_CD), 会把读条强行
+        // 降为瞬发并绕过全部冷却。必须显式构造枚举类型以选中正确的 TriggerCastFlags 重载。
+        TriggerCastFlags const clearcastingFlags =
+            TriggerCastFlags(TRIGGERED_IGNORE_POWER_AND_REAGENT_COST | TRIGGERED_IGNORE_GCD | TRIGGERED_DONT_REPORT_CAST_ERROR);
+
+        SpellCastResult const result = me->CastSpell(target, spellId, clearcastingFlags);
         if (result != SPELL_CAST_OK)
             return false;
 
