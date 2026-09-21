@@ -86,9 +86,6 @@ public:
     // 法系远程 (与猎人物理远程解耦): 伤害由法术强度与暗影/火焰乘数通道支撑
     bool IsRangedPhysicalBot() const override { return false; }
 
-    // 固定 1.0x: 不继承基类为法系远程预留的 2.0x ~ 3.3x 装备装等放大通道
-    float GetDamageDealtMultiplier() const override { return 1.0f; }
-
     // 专精契约：恶魔术携带恶魔卫士（近战内核，与恶魔变形爆发期协同）
     GuardianVisualType GetPreferredGuardianVisualType() const override { return GUARDIAN_VISUAL_WARLOCK_FELGUARD; }
 
