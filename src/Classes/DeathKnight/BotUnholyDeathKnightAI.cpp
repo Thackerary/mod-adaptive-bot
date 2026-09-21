@@ -589,7 +589,7 @@ private:
 
                 // 3.3.5a 符文武器增效施放成功立即产出 25 符能
                 me->ModifyPower(POWER_RUNIC_POWER, RUNIC_POWER_PER_EMPOWER);
-                return true;
+                // 严禁 return true: Off-GCD，必须放行后续输出循环
             }
         }
 

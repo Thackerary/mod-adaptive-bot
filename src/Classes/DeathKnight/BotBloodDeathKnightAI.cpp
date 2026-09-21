@@ -257,6 +257,67 @@ private:
     }
 
     // =========================================================================
+    // 坦克近战走位与 APF 势场避险 (铁律 21)
+    // =========================================================================
+    void ManageMeleeCombat(Unit* victim)
+    {
+        if (!victim || !victim->IsAlive() || victim->GetMap() != me->GetMap())
+            return;
+
+        if (me->HasUnitState(UNIT_STATE_CASTING) || me->GetCurrentSpell(CURRENT_CHANNELED_SPELL))
+            return;
+
+        // ---- APF 势场紧急避火 ----
+        // 血 DK 为坦克，不应规避正面顺劈 (由势场底层传 isMelee=true, isTank=true 豁免)，
+        // 但必须躲开脚下的圆形火圈与毒池。
+        if (IsUnderDangerThreat(2.0f))
+        {
+            if (apfMoveUpdateTimer == 0 || me->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+            {
+                float nextX = 0.0f, nextY = 0.0f, nextZ = 0.0f;
+                // isTank = true，忽略正面锥形危险区，仅外推规避圆形环境伤害
+                if (PotentialField::CalculateNextPosition(me, victim, 2.0f, false, true, activeDangerZones, nextX, nextY, nextZ))
+                {
+                    if (me->GetVictim() != victim || !me->HasUnitState(UNIT_STATE_MELEE_ATTACKING))
+                        me->Attack(victim, true);
+
+                    me->GetMotionMaster()->MovePoint(1, nextX, nextY, nextZ);
+                    apfMoveUpdateTimer = 300;
+                    return;
+                }
+            }
+            else
+            {
+                return;
+            }
+
+            if (me->IsWithinMeleeRange(victim))
+            {
+                if (me->GetVictim() != victim || !me->HasUnitState(UNIT_STATE_MELEE_ATTACKING))
+                    me->Attack(victim, true);
+
+                if (me->GetMotionMaster()->GetCurrentMovementGeneratorType() == POINT_MOTION_TYPE)
+                    me->GetMotionMaster()->Clear();
+                return;
+            }
+        }
+
+        // 常规追击 (坦克无需绕背，直线贴脸)
+        if (me->GetVictim() != victim)
+            me->Attack(victim, true);
+
+        if (!me->HasUnitState(UNIT_STATE_MELEE_ATTACKING))
+            me->Attack(victim, true);
+
+        if (!me->HasUnitState(UNIT_STATE_CHARGING))
+        {
+            MovementGeneratorType const moveType = me->GetMotionMaster()->GetCurrentMovementGeneratorType();
+            if (moveType != CHASE_MOTION_TYPE && moveType != POINT_MOTION_TYPE)
+                me->GetMotionMaster()->MoveChase(victim);
+        }
+    }
+
+    // =========================================================================
     // 符能被动补给：低于阈值时平滑注入，模拟平砍与受击获取符能
     // =========================================================================
     void SupplementRunicPower()

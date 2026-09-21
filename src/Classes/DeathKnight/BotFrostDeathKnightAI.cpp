@@ -417,9 +417,8 @@ private:
         if (MaintainHornOfWinter())
             return;
 
-        // ---- P2: 爆发大招 (铜墙铁壁 / 符文武器增效) ----
-        if (TryBurstCooldowns(victim))
-            return;
+        // ---- P2: 爆发大招 (铜墙铁壁 / 符文武器增效, Off-GCD 严禁 return) ----
+        TryBurstCooldowns(victim);
 
         // ---- P3: 核心打击 FCFS ----
         PerformStrikeRotation(victim);
@@ -512,13 +511,13 @@ private:
     // =========================================================================
     // P2: 爆发大招
     // =========================================================================
-    bool TryBurstCooldowns(Unit* victim)
+    void TryBurstCooldowns(Unit* victim)
     {
         if (!victim || !IsBossOrEliteTarget(victim))
-            return false;
+            return;
 
         if (!me->IsWithinMeleeRange(victim))
-            return false;
+            return;
 
         // ---- 铜墙铁壁: 1 分钟 CD, +25% 护甲 / +20% 力量, 就绪即开 ----
         if (unbreakableArmorCooldown == 0 && HasTalent(FrostDeathKnightSpells::UNBREAKABLE_ARMOR) &&
@@ -528,7 +527,7 @@ private:
                 ExecuteSpell(me, FrostDeathKnightSpells::UNBREAKABLE_ARMOR, true))
             {
                 unbreakableArmorCooldown = CD_UNBREAKABLE_ARMOR;
-                return true;
+                // 严禁 return: 大招虽占 GCD，但必须当帧顺下解锁后续打击分支
             }
         }
 
@@ -548,11 +547,9 @@ private:
 
                 // 3.3.5a 符文武器增效施放成功立即产出 25 符能
                 me->ModifyPower(POWER_RUNIC_POWER, 250);
-                return true;
+                // 严禁 return: Off-GCD，必须放行后续输出循环
             }
         }
-
-        return false;
     }
 
     // =========================================================================
