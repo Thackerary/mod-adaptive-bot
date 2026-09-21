@@ -9,6 +9,7 @@
 #include "Creature.h"
 #include "SpellAuras.h"
 #include "Spell.h"
+#include "SpellMgr.h"
 #include "Chat.h"
 #include "Random.h"
 #include <algorithm>
@@ -436,8 +437,39 @@ private:
         if (!target || spellId == 0 || !me->HasAura(ElementalShamanSpells::AURA_CLEARCASTING))
             return false;
 
+        // 公共冷却守卫: 清晰预兆仅旁路法力消耗, 并不免除公共冷却。
+        // 缺此门禁时若前一个技能刚落地, 免费次数会被同帧连招顺序烧光。
+        if (gcdTimer > 0)
+            return false;
+
+        SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spellId);
+        if (!spellInfo)
+            return false;
+
+        // 射程与视线合法性校验: 与 CanCast 同口径, 杜绝超距 / 隔墙空放免费次数
+        float const maxRange = spellInfo->GetMaxRange(false);
+        if (maxRange > 0.0f && !me->IsWithinCombatRange(target, maxRange))
+            return false;
+
         if (!me->IsWithinLOSInMap(target))
             return false;
+
+        // 朝向对齐: 目标位移后若未转向, 引擎会以 SPELL_FAILED_UNIT_NOT_INFRONT 拒放
+        me->SetFacingToObject(target);
+
+        // 读条法术立定保障: 移动中施法会被引擎以 SPELL_FAILED_MOVING 拒放。
+        // (元素掌握生效期间法术转为瞬发, 此时无需刹停, 保留机动性)
+        int32 castTime = int32(spellInfo->CalcCastTime());
+        me->ModSpellCastTime(spellInfo, castTime);
+        bool const isInstant = (castTime <= 0 && !spellInfo->IsChanneled())
+                            || me->HasAura(ElementalShamanSpells::ELEMENTAL_MASTERY);
+        if (!isInstant)
+        {
+            if (me->GetMotionMaster()->GetCurrentMovementGeneratorType() == CHASE_MOTION_TYPE)
+                me->GetMotionMaster()->Clear();
+            if (me->isMoving())
+                me->StopMoving();
+        }
 
         // 致命坑位: TriggerCastFlags 未定义 operator|, 直接写 A | B | C 会被推导为 int,
         // 从而匹配到 CastSpell 的 bool triggered 重载 (等价 TRIGGERED_FULL_MASK,
@@ -450,15 +482,11 @@ private:
         if (result != SPELL_CAST_OK)
             return false;
 
-        // 充能型 Buff 扣减铁律 (铁律 10): 清晰预兆覆盖 2 次施法, 每次消费必须原地
-        // 削减 1 层, 严禁整层 RemoveAurasDueToSpell 吞掉剩余免费次数。
+        // 充能型光环扣减铁律 (铁律 10): 清晰预兆底层走 ProcCharges (共 2 次),
+        // 与 StackAmount 无关。SetAuraStack / RemoveAurasDueToSpell 会一次性吞掉
+        // 剩余的免费次数, 必须调用 DropCharge() 精确消费单次充能。
         if (Aura* clearcasting = me->GetAura(ElementalShamanSpells::AURA_CLEARCASTING))
-        {
-            if (clearcasting->GetStackAmount() > 1)
-                me->SetAuraStack(ElementalShamanSpells::AURA_CLEARCASTING, me, clearcasting->GetStackAmount() - 1);
-            else
-                me->RemoveAurasDueToSpell(ElementalShamanSpells::AURA_CLEARCASTING);
-        }
+            clearcasting->DropCharge();
 
         gcdTimer = CASTER_GCD; // 手工置位公共冷却 (triggered 通道绕过了引擎 GCD)
         return true;
@@ -493,8 +521,12 @@ private:
     // =========================================================================
     void PerformCombatAPL(Unit* victim)
     {
-        // ---- P0: 打断与极限自保 (Off-GCD 顺下, 严禁 return 中断当帧决策流) ----
-        TryEmergencySurvival(victim);
+        // ---- P0-a: 风剪压秒打断 (Off-GCD, 顺下不阻断当帧决策流) ----
+        TryWindShear(victim);
+
+        // ---- P0-b: 雷霆风暴 (占 GCD, 成功即当帧收束, 严禁继续顺下抢施法权) ----
+        if (TryThunderstorm())
+            return;
 
         // ---- P1: 爆发大招 ----
         if (TryBurstCooldowns(victim))
@@ -502,18 +534,6 @@ private:
 
         // ---- P2: 核心输出优先级 ----
         PerformDamageRotation(victim);
-    }
-
-    // =========================================================================
-    // P0: 打断与极限自保
-    // =========================================================================
-    void TryEmergencySurvival(Unit* victim)
-    {
-        // ---- 风剪: 阶段三记忆化压秒打断 (Off-GCD, 顺下不阻断输出) ----
-        TryWindShear(victim);
-
-        // ---- 雷霆风暴: 残蓝回蓝 + 被贴身击退自救 (占 GCD, 成功后当帧收束) ----
-        TryThunderstorm();
     }
 
     bool TryWindShear(Unit* victim)
