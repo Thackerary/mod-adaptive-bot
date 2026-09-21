@@ -11,6 +11,7 @@
 #include "Spell.h"
 #include "SpellMgr.h"
 #include "Chat.h"
+#include <algorithm>
 #include <cmath>
 
 class BotBeastMasteryHunterAI : public AdaptiveBotAI
@@ -512,12 +513,15 @@ private:
         if (!victim)
             return;
 
-        // ---- 胁迫: 目标正在读条/引导时的战术昏迷与压秒打断 (铁律 52) ----
+        // ---- 胁迫: 目标正在读条/引导时的战术昏迷与压秒打断 (接入阶段三记忆化判定) ----
         // 注: 19577 仅为宠物突进触发层, 真正落到敌对目标身上的是昏迷效果 24394,
         //     目标必须传 victim; 若对 victim 施放 19577 会被底层目标类型校验 100% 拒放,
         //     导致打断链路永久空转死锁。
+        //     时机判定改由基类 ShouldInterruptTarget 统一仲裁: 它会读取本随从对该
+        //     技能 learnedInterruptDelays 学到的压秒余量 (默认 350ms),
+        //     引导类法术则零延时抢断, 从而把 42 秒 CD 的胁迫收益最大化。
         if (intimidationCooldown == 0 && HasTalent(BeastMasteryHunterSpells::INTIMIDATION) &&
-            IsInterruptibleTarget(victim))
+            ShouldInterruptTarget(victim))
         {
             if (CanCast(victim, BeastMasteryHunterSpells::INTIMIDATION_STUN, true) &&
                 ExecuteSpell(victim, BeastMasteryHunterSpells::INTIMIDATION_STUN, true))
@@ -739,6 +743,28 @@ private:
 
         if (me->HasUnitState(UNIT_STATE_CASTING))
             return;
+
+        // ---- P0: APF 势场紧急避险 (火圈/毒池/顺劈强行接管走位) ----
+        // 仅当自身真正落入危险禁区时才由势场规划落点; 若火圈在别处而自身安全,
+        // 则坚决站桩读条, 杜绝被友军防挤压斥力推着移步而掐断稳固射击。
+        if (IsUnderDangerThreat(2.0f))
+        {
+            if (apfMoveUpdateTimer == 0 || me->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+            {
+                float nextX = 0.0f, nextY = 0.0f, nextZ = 0.0f;
+                float const optDist = std::clamp(me->GetDistance(victim), MIN_ENGAGE_DIST, IDEAL_SHOT_DIST);
+                if (PotentialField::CalculateNextPosition(me, victim, optDist, false, false, activeDangerZones, nextX, nextY, nextZ))
+                {
+                    me->GetMotionMaster()->MovePoint(1, nextX, nextY, nextZ);
+                    apfMoveUpdateTimer = 300;
+                    return;
+                }
+            }
+            else
+            {
+                return; // 正在平滑执行避险航点, 不进行路径打断
+            }
+        }
 
         me->SetFacingToObject(victim);
 

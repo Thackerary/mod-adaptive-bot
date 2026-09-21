@@ -519,15 +519,24 @@ private:
         if (!victim)
             return;
 
-        // ---- 沉默射击：打断敌方读条；无读条时作为爆发期免费额外伤害顺发 ----
+        // ---- 沉默射击：接入阶段三基类记忆化压秒打断仲裁引擎 (Off-GCD) ----
+        // 降阶参数必须传 false: SILENCING_SHOT 已在 GetTalentSpellMinLevel 登记 30 级门槛,
+        // 传 true 会旁路该门槛, 使未习得的低等级随从拿到满阶 ID 并被底层拒放。
+        // 打断时机交由 TryInterrupt -> ShouldInterruptTarget 依据 learnedInterruptDelays
+        // 压秒出手; 无读条可断时则回落到「急速射击爆发期顺发额外伤害」通道, 绝不空烧 CD。
         if (silencingShotCooldown == 0)
         {
-            uint32 const silencingShot = GetAppropriateRank(MarksmanshipHunterSpells::SILENCING_SHOT, true);
+            uint32 const silencingShot = GetAppropriateRank(MarksmanshipHunterSpells::SILENCING_SHOT, false);
             if (silencingShot)
             {
-                bool const shouldSilence = IsInterruptibleTarget(victim) || me->HasAura(MarksmanshipHunterSpells::RAPID_FIRE);
-                if (shouldSilence && CanCast(victim, silencingShot, true) &&
-                    ExecuteSpell(victim, silencingShot, true))
+                bool interrupted = false;
+                if (victim->HasUnitState(UNIT_STATE_CASTING) && TryInterrupt(victim, silencingShot))
+                {
+                    silencingShotCooldown = CD_SILENCING_SHOT;
+                    interrupted = true;
+                }
+                else if (!interrupted && me->HasAura(MarksmanshipHunterSpells::RAPID_FIRE) &&
+                         CanCast(victim, silencingShot, true) && ExecuteSpell(victim, silencingShot, true))
                 {
                     silencingShotCooldown = CD_SILENCING_SHOT;
                 }
@@ -553,7 +562,7 @@ private:
         bool const rapidFireDone = (rapidFireCooldown > 0) && !me->HasAura(MarksmanshipHunterSpells::RAPID_FIRE);
         if (readinessCooldown == 0 && rapidFireDone && chimeraShotCooldown > 0 && aimedShotCooldown > 0)
         {
-            uint32 const readiness = GetAppropriateRank(MarksmanshipHunterSpells::READINESS, true);
+            uint32 const readiness = GetAppropriateRank(MarksmanshipHunterSpells::READINESS, false);
             if (readiness && CanCast(me, readiness, true) && ExecuteSpell(me, readiness, true))
             {
                 readinessCooldown = CD_READINESS;
@@ -627,7 +636,7 @@ private:
         if (chimeraShotCooldown > 0 || !victim)
             return false;
 
-        uint32 const chimeraShot = GetAppropriateRank(MarksmanshipHunterSpells::CHIMERA_SHOT, true);
+        uint32 const chimeraShot = GetAppropriateRank(MarksmanshipHunterSpells::CHIMERA_SHOT, false);
         if (!chimeraShot)
             return false;
 
@@ -660,7 +669,7 @@ private:
         if (aimedShotCooldown > 0 || !victim)
             return false;
 
-        uint32 const aimedShot = GetAppropriateRank(MarksmanshipHunterSpells::AIMED_SHOT, true);
+        uint32 const aimedShot = GetAppropriateRank(MarksmanshipHunterSpells::AIMED_SHOT, false);
         if (!aimedShot || !CanCast(victim, aimedShot, true))
             return false;
 
@@ -796,6 +805,28 @@ private:
 
         if (me->HasUnitState(UNIT_STATE_CASTING))
             return;
+
+        // ---- P0: APF 势场紧急避险 (火圈/毒池/顺劈强行接管走位) ----
+        // 仅当自身真正落入危险禁区时才由势场规划落点; 若火圈在别处而自身安全,
+        // 则坚决站桩读条, 杜绝被友军防挤压斥力推着移步而掐断稳固射击。
+        if (IsUnderDangerThreat(2.0f))
+        {
+            if (apfMoveUpdateTimer == 0 || me->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+            {
+                float nextX = 0.0f, nextY = 0.0f, nextZ = 0.0f;
+                float const optDist = std::clamp(me->GetDistance(victim), RETREAT_EXIT_DIST, IDEAL_SHOT_DIST);
+                if (PotentialField::CalculateNextPosition(me, victim, optDist, false, false, activeDangerZones, nextX, nextY, nextZ))
+                {
+                    me->GetMotionMaster()->MovePoint(1, nextX, nextY, nextZ);
+                    apfMoveUpdateTimer = 300;
+                    return;
+                }
+            }
+            else
+            {
+                return; // 正在平滑执行避险航点, 不进行路径打断
+            }
+        }
 
         me->SetFacingToObject(victim);
 

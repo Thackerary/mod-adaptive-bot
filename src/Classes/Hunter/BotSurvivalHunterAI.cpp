@@ -11,6 +11,7 @@
 #include "Spell.h"
 #include "SpellMgr.h"
 #include "Chat.h"
+#include <algorithm>
 #include <cmath>
 
 class BotSurvivalHunterAI : public AdaptiveBotAI
@@ -615,7 +616,14 @@ private:
         if (!isFreeCast && explosiveShotCooldown > 0)
             return false;
 
-        uint32 const explosiveShot = GetAppropriateRank(SurvivalHunterSpells::EXPLOSIVE_SHOT, true);
+        // 降阶参数必须传 false: EXPLOSIVE_SHOT 已在 GetTalentSpellMinLevel 登记 60 级门槛,
+        // 传 true 会旁路该门槛, 使未习得的低等级随从拿到满阶 ID 并被底层拒放,
+        // 表现为每一帧空转重入且永远打不出爆炸射击。
+        // 同时补显式 HasTalent 门禁, 与黑箭保持一致的仲裁口径。
+        if (!HasTalent(SurvivalHunterSpells::EXPLOSIVE_SHOT))
+            return false;
+
+        uint32 const explosiveShot = GetAppropriateRank(SurvivalHunterSpells::EXPLOSIVE_SHOT, false);
         if (!explosiveShot || !CanCast(victim, explosiveShot, true))
             return false;
 
@@ -740,6 +748,28 @@ private:
 
         if (me->HasUnitState(UNIT_STATE_CASTING))
             return;
+
+        // ---- P0: APF 势场紧急避险 (火圈/毒池/顺劈强行接管走位) ----
+        // 仅当自身真正落入危险禁区时才由势场规划落点; 若火圈在别处而自身安全,
+        // 则坚决站桩读条, 杜绝被友军防挤压斥力推着移步而掐断稳固射击。
+        if (IsUnderDangerThreat(2.0f))
+        {
+            if (apfMoveUpdateTimer == 0 || me->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+            {
+                float nextX = 0.0f, nextY = 0.0f, nextZ = 0.0f;
+                float const optDist = std::clamp(me->GetDistance(victim), MIN_ENGAGE_DIST, IDEAL_SHOT_DIST);
+                if (PotentialField::CalculateNextPosition(me, victim, optDist, false, false, activeDangerZones, nextX, nextY, nextZ))
+                {
+                    me->GetMotionMaster()->MovePoint(1, nextX, nextY, nextZ);
+                    apfMoveUpdateTimer = 300;
+                    return;
+                }
+            }
+            else
+            {
+                return; // 正在平滑执行避险航点, 不进行路径打断
+            }
+        }
 
         me->SetFacingToObject(victim);
 
