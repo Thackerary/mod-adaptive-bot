@@ -52,6 +52,7 @@ class BotRestorationShamanAI : public AdaptiveBotAI
     static constexpr uint32 CD_NATURES_SWIFTNESS = 120000;
     static constexpr uint32 CD_TIDAL_FORCE       = 180000;
     static constexpr uint32 CD_MANA_TIDE_TOTEM   = 300000;
+    static constexpr uint32 CD_WIND_SHEAR        = 6000;
 
 public:
     explicit BotRestorationShamanAI(Creature* creature) : AdaptiveBotAI(creature) {}
@@ -171,7 +172,10 @@ public:
         if (victim && victim->IsAlive() && victim->GetMap() == me->GetMap() && me->GetVictim() != victim)
             me->Attack(victim, false); // 仅锚定敌对目标维持进战姿态，绝不开启近战追击
 
-        // ---- P0: 极限急救 (自然迅捷 + 瞬发治疗波原子连招) ----
+        // ---- P0-a: 压秒打断 (Off-GCD，阶段三记忆化判定，顺下不阻断治疗) ----
+        TryWindShear(victim);
+
+        // ---- P0-b: 极限急救 (自然迅捷 + 瞬发治疗波原子连招) ----
         if (TryEmergencyHeals()) return;
 
         // ---- P1: 常驻护盾与图腾矩阵维持 ----
@@ -209,6 +213,7 @@ private:
     uint32 naturesSwiftnessCooldown{ 0 };
     uint32 tidalForceCooldown{ 0 };
     uint32 manaTideCooldown{ 0 };
+    uint32 windShearCooldown{ 0 };
 
     // 图腾矩阵状态
     uint8  totemDeployIndex{ 0 };   // 0..TOTEM_COUNT-1 为展开游标，>=TOTEM_COUNT 表示已铺满
@@ -230,6 +235,7 @@ private:
         Tick(naturesSwiftnessCooldown);
         Tick(tidalForceCooldown);
         Tick(manaTideCooldown);
+        Tick(windShearCooldown);
         Tick(totemCastCooldown);
         Tick(totemRefreshTimer);
     }
@@ -240,6 +246,7 @@ private:
         naturesSwiftnessCooldown = 0;
         tidalForceCooldown = 0;
         manaTideCooldown = 0;
+        windShearCooldown = 0;
 
         totemDeployIndex = 0;
         hasTotemPos = false;
@@ -501,6 +508,25 @@ private:
         }
 
         return nullptr;
+    }
+
+    bool TryWindShear(Unit* victim)
+    {
+        if (!victim || windShearCooldown > 0)
+            return false;
+
+        uint32 const windShear = GetAppropriateRank(RestorationShamanSpells::WIND_SHEAR, false);
+        if (!windShear)
+            return false;
+
+        // 接入阶段三基类记忆化压秒打断仲裁引擎 (Off-GCD)
+        if (TryInterrupt(victim, windShear))
+        {
+            windShearCooldown = CD_WIND_SHEAR;
+            return true;
+        }
+
+        return false;
     }
 
     bool TryEmergencyHeals()
@@ -1017,6 +1043,29 @@ private:
     {
         if (me->HasUnitState(UNIT_STATE_CASTING))
             return;
+
+        // ---- 基础位: APF 势场紧急避险 (火圈/顺劈强行接管) ----
+        if (IsUnderDangerThreat(2.0f))
+        {
+            if (apfMoveUpdateTimer == 0 || me->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+            {
+                float nextX = 0.0f, nextY = 0.0f, nextZ = 0.0f;
+                Unit* avoidAnchor = groupSnapshot.mainTank ? groupSnapshot.mainTank : GetMaster();
+                if (avoidAnchor)
+                {
+                    if (PotentialField::CalculateNextPosition(me, avoidAnchor, IDEAL_FOLLOW_DIST, false, false, activeDangerZones, nextX, nextY, nextZ))
+                    {
+                        me->GetMotionMaster()->MovePoint(1, nextX, nextY, nextZ);
+                        apfMoveUpdateTimer = 300;
+                        return;
+                    }
+                }
+            }
+            else
+            {
+                return;
+            }
+        }
 
         Unit* anchor = groupSnapshot.mainTank;
         if (!anchor || !anchor->IsAlive())

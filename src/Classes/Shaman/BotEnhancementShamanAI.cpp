@@ -550,17 +550,12 @@ private:
         if (!victim || windShearCooldown > 0)
             return false;
 
-        if (!IsInterruptibleCast(victim))
-            return false;
-
-        if (!me->IsWithinDist(victim, WIND_SHEAR_RANGE) || !me->IsWithinLOSInMap(victim))
-            return false;
-
         uint32 const windShear = GetAppropriateRank(EnhancementShamanSpells::WIND_SHEAR, false);
-        if (!windShear || !CanCast(victim, windShear, true))
+        if (!windShear)
             return false;
 
-        if (ExecuteSpell(victim, windShear, true))
+        // 接入阶段三基类记忆化压秒打断仲裁引擎 (Off-GCD)
+        if (TryInterrupt(victim, windShear))
         {
             windShearCooldown = CD_WIND_SHEAR;
             return true;
@@ -982,6 +977,25 @@ private:
         // 铁律 38: 读条期间严禁下发任何走位指令, 否则读条会被同帧 MoveFollow 秒断
         if (me->HasUnitState(UNIT_STATE_CASTING))
             return;
+
+        // ---- P0: APF 势场紧急避险 (火圈/顺劈强行接管，规避背后盲区站桩吃火) ----
+        if (IsUnderDangerThreat(2.0f))
+        {
+            if (apfMoveUpdateTimer == 0 || me->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+            {
+                float nextX = 0.0f, nextY = 0.0f, nextZ = 0.0f;
+                if (PotentialField::CalculateNextPosition(me, victim, MELEE_FOLLOW_DIST, true, false, activeDangerZones, nextX, nextY, nextZ))
+                {
+                    me->GetMotionMaster()->MovePoint(1, nextX, nextY, nextZ);
+                    apfMoveUpdateTimer = 300;
+                    return;
+                }
+            }
+            else
+            {
+                return;
+            }
+        }
 
         me->SetFacingToObject(victim);
 
