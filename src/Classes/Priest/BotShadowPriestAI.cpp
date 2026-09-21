@@ -203,6 +203,17 @@ public:
         if (TryManaManagement(victim))
             return;
 
+        // ---- 战术打断：接入基类阶段三记忆化压秒打断仲裁引擎 ----
+        // 沉默为瞬发法术但仍占公共冷却，命中后当帧继续顺下不会产生额外施法：
+        // 后续 MaintainBuffs / TryShadowRotation 会被 ExecuteSpell 置位的
+        // gcdTimer 自然拦截，因此此处刻意不 return，把决策权留给本帧后续分支。
+        if (silenceCooldown == 0)
+        {
+            uint32 const silence = GetAppropriateRank(15487, false); // 沉默 (暗影天赋)
+            if (silence && TryInterrupt(victim, silence))
+                silenceCooldown = 45000;
+        }
+
         // ---- P1: 形态与常驻增益 ----
         if (MaintainBuffs())
             return;
@@ -221,6 +232,7 @@ private:
     uint32 shadowWordDeathCooldown{ 0 };
     uint32 shadowfiendCooldown{ 0 };
     uint32 dispersionCooldown{ 0 };
+    uint32 silenceCooldown{ 0 };
 
     // 贴身撤离姿态标记：处于该姿态时必须凭此标记主动重发走位指令，
     // 否则会永久粘在坦克身后而无法恢复 20 码稳定施法窗口。
@@ -237,6 +249,7 @@ private:
         Tick(shadowWordDeathCooldown);
         Tick(shadowfiendCooldown);
         Tick(dispersionCooldown);
+        Tick(silenceCooldown);
     }
 
     void ResetShadowTimers()
@@ -245,6 +258,7 @@ private:
         shadowWordDeathCooldown = 0;
         shadowfiendCooldown = 0;
         dispersionCooldown = 0;
+        silenceCooldown = 0;
 
         isRetreatingToTank = false;
     }

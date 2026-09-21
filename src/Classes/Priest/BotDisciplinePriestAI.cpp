@@ -40,6 +40,9 @@ class BotDisciplinePriestAI : public AdaptiveBotAI
     // M_PI 即锚点正后方：坦克背身位，可规避顺劈斩与正面吐息
     static constexpr float  BEHIND_ANGLE        = static_cast<float>(M_PI);
 
+    // 阶段三记忆化预警预读：高危机制落地前的抢铺窗口 (必须覆盖一次瞬发预铺 + 网络延迟)
+    static constexpr uint32 PREHEAL_LEAD_MS     = 1500;
+
 public:
     explicit BotDisciplinePriestAI(Creature* creature) : AdaptiveBotAI(creature) {}
 
@@ -160,6 +163,9 @@ public:
         if (TrySelfPreservation()) return;
         if (TryEmergencyHeals()) return;
 
+        // ---- P0.5: 阶段三记忆化预警预读 (高危机制落地前抢铺盾/HoT) ----
+        if (TryPredictivePreHoT()) return;
+
         // ---- P1: 常驻增益与真言术：盾预铺 ----
         if (sweepDue)
         {
@@ -190,6 +196,10 @@ private:
     // 贴脸避难状态标记：记录当前是否处于「紧抱坦克身侧」的应急姿态。
     // 仇恨解除后必须凭此标记主动重发跟随指令，否则戒律牧会永久粘在坦克身后吃顺劈与吐息
     bool isHuggingTank{ false };
+
+    // 阶段三记忆化预警预读的武装状态：判定本轮高危机制是否已完成预铺。
+    // 缺此标记会在 1500ms 窗口期内每帧重复抢铺，把救命 GCD 全部烧在预备动作上。
+    bool isPreHealing{ false };
 
     // =========================================================================
     // 队友状态巡检 (打地鼠雷达)
@@ -600,6 +610,107 @@ private:
     }
 
     // =========================================================================
+    // P0.5: 阶段三记忆化预警预读 (认知记忆在治疗侧的唯一落地形态)
+    // -------------------------------------------------------------------------
+    // 戒律牧没有可稳定作用于远程读条的硬打断 (心灵尖啸为近身恐惧)，
+    // 因此不消费 learnedInterruptDelays，而是消费同一份认知记忆的另一个维度
+    // ——危险禁区的 spellId 列表。基类 UpdateTimers 每帧纯 diff 驱动地追踪
+    // 当前敌方读条进度 (与打断 CD 无关)，本函数据此在「已学到的高危机制」
+    // 落地前提前 1500ms 给主坦抢铺真言术：盾，把治疗从被动打地鼠升级为主动预铺。
+    // 数据来源零新增：spellId 命中 activeDangerZones 即视为高危机制，
+    // 该列表由中层归因器在团灭时逆向提炼落库，战前由 PreloadBossKnowledge 预热灌入。
+    // =========================================================================
+    bool TryPredictivePreHoT()
+    {
+        if (!me->IsInCombat() || currentEnemyCastingSpellId == 0 || currentEnemyCastingTotalMs == 0)
+        {
+            isPreHealing = false;
+            return false;
+        }
+
+        bool isLearnedHazard = false;
+        for (auto const& zone : activeDangerZones)
+        {
+            if (zone.spellId == currentEnemyCastingSpellId)
+            {
+                isLearnedHazard = true;
+                break;
+            }
+        }
+
+        // 未命中记忆库的读条即普通技能 (平砍强化 / 杂兵小法术)，绝不预铺：
+        // 对每一发小读条都预铺会把法力烧空，反而失去真正高压期的续航。
+        if (!isLearnedHazard)
+        {
+            isPreHealing = false;
+            return false;
+        }
+
+        uint32 const remainingMs = (currentEnemyCastingTotalMs > currentEnemyCastingElapsedMs)
+            ? (currentEnemyCastingTotalMs - currentEnemyCastingElapsedMs) : 0;
+
+        // 尚未进入预警窗口：保持待机；本轮已完成预铺：严禁重复抢铺
+        if (remainingMs > PREHEAL_LEAD_MS || isPreHealing)
+            return false;
+
+        Unit* tank = groupSnapshot.mainTank;
+
+        // 排己与宠物排除：锚点退化为自身或指挥官宠物时无预铺意义
+        if (!tank || tank == me || !tank->IsAlive() || tank->ToPet() || !IsValidHealTarget(tank))
+            return false;
+
+        uint32 const shield = GetAppropriateRank(DisciplinePriestSpells::POWER_WORD_SHIELD, false);
+
+        // 优先盾：瞬发吸收量在机制落地前的边际收益最高。
+        // 灵魂虚弱期无法再次获得真言术：盾，必须严格校验，
+        // 否则会陷入「缺盾 -> 补盾 -> 被虚弱吃下 -> 下一帧依旧缺盾」的无效空转。
+        if (shield && !tank->HasAura(shield) && !tank->HasAura(DisciplinePriestSpells::WEAKENED_SOUL))
+        {
+            if (CanCast(tank, shield, true) && ExecuteSpell(tank, shield, true))
+            {
+                isPreHealing = true;
+
+                if (isDebugLogging)
+                    LOG_INFO("scripts", "[Bot: {}] 记忆化预警预读：高危机制 [{}] 落地前 {}ms，已为 [{}] 预铺真言术：盾。",
+                        me->GetName(), currentEnemyCastingSpellId, remainingMs, tank->GetName());
+                return true;
+            }
+        }
+
+        // 盾不可用 (灵魂虚弱 / 未习得 / 法力不足) 时的退化通道：瞬发 HoT 抢铺。
+        // 恢复在此仅作为预读兜底，不作为常规循环填充 (戒律天赋不强化 HoT)。
+        if (TryRenew(tank))
+        {
+            isPreHealing = true;
+
+            if (isDebugLogging)
+                LOG_INFO("scripts", "[Bot: {}] 记忆化预警预读：高危机制 [{}] 落地前 {}ms，已为 [{}] 预铺恢复。",
+                    me->GetName(), currentEnemyCastingSpellId, remainingMs, tank->GetName());
+            return true;
+        }
+
+        return false;
+    }
+
+    // 恢复：瞬发 HoT，仅作为预警预读的抢铺手段与盾被灵魂虚弱封锁时的退化选项
+    bool TryRenew(Unit* target)
+    {
+        uint32 const renew = GetAppropriateRank(DisciplinePriestSpells::RENEW, false);
+        if (!renew || !target || target->ToPet() || !IsValidHealTarget(target))
+            return false;
+
+        // 光环防顶守卫：已挂恢复时不再刷新，收益低于占用一个 GCD
+        if (target->HasAura(renew))
+            return false;
+
+        if (!CanCast(target, renew, true))
+            return false;
+
+        // 瞬发 HoT：允许在跑位途中直接施放，无需 StopMoving
+        return ExecuteSpell(target, renew, true);
+    }
+
+    // =========================================================================
     // P1-a: 主坦专属真言术：盾维护 (战时承伤核心)
     // -------------------------------------------------------------------------
     // 主坦的盾兼具「吸收尖刺伤害」与「降低治疗压力」双重收益，
@@ -865,14 +976,14 @@ private:
         return ExecuteSpell(target, flashHeal, true);
     }
 
-    bool TryPrayerOfMending()
+    bool TryPrayerOfMending(Unit* target)
     {
         uint32 const prayerOfMending = GetAppropriateRank(DisciplinePriestSpells::PRAYER_OF_MENDING, false);
         if (!prayerOfMending)
             return false;
 
-        // 愈合祷言瞬发且智能弹跳，挂在主坦身上可最大化弹跳收益 (每次受击触发一跳)
-        Unit* target = groupSnapshot.mainTank;
+        // 愈合祷言瞬发且智能弹跳，挂在主坦身上可最大化弹跳收益 (每次受击触发一跳)；
+        // 无独立主坦 (单人跟随 / 未识别出坦克) 时由调用方回落到正在掉血的成员
         if (!IsValidHealTarget(target) || target->ToPet())
             return false;
 
@@ -941,7 +1052,11 @@ private:
             // 让辅助技抢占残血救急的 GCD 会直接拖慢止血速度
             if (TryLadderShield(target)) return true;
             if (TryPenance(target)) return true;
-            if (TryPrayerOfMending()) return true;
+
+            // 弹跳锚点优先主坦 (受击最频繁)；无主坦时回落到当前最需要治疗的成员
+            Unit* pomTank = groupSnapshot.mainTank ? groupSnapshot.mainTank : target;
+            if (TryPrayerOfMending(pomTank)) return true;
+
             if (TryFlashHeal(target)) return true;
 
             return false;
@@ -962,7 +1077,10 @@ private:
         // 血量跌回 90% 以下才允许投入高耗蓝读条。
         // ---------------------------------------------------------------------
         if (TryLadderShield(target)) return true;
-        if (TryPrayerOfMending()) return true;
+
+        Unit* pomTarget = groupSnapshot.mainTank ? groupSnapshot.mainTank : target;
+        if (TryPrayerOfMending(pomTarget)) return true;
+
         if (hpPct < 90.0f && TryFlashHeal(target)) return true;
 
         return false;
