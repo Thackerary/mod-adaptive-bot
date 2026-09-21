@@ -26,6 +26,12 @@ namespace RestorationShamanSpells
     constexpr uint32 CLEANSE_SPIRIT      = 51886; // 净化灵魂 (40 级天赋, 解诅咒/中毒/疾病, 无法解魔法)
     constexpr uint32 CURE_TOXINS         = 526;   // 消毒术 (16 级基础法术, 仅解中毒/疾病, 无法解诅咒)
 
+    // ---------------- 打断体系 ----------------
+    // 风剪为唯一单 Rank 基础法术 (16 级可学, 无天赋门槛), 严禁登记进 GetTalentSpellMinLevel。
+    // 等级门禁由 DBC SpellLevel 经 GetAppropriateRank(..., false) 自动降阶/拒绝处理。
+    // 数值必须与 EnhancementShamanSpells::WIND_SHEAR 保持一致 (同职业共享法术 ID)。
+    constexpr uint32 WIND_SHEAR          = 57994; // 风剪 (近战打断 + 减仇恨, 6s CD)
+
     // ---------------- 图腾矩阵 (四大元素) ----------------
     constexpr uint32 STRENGTH_OF_EARTH_TOTEM = 58643; // 大地之力图腾 (土)
     constexpr uint32 FLAMETONGUE_TOTEM       = 58656; // 火舌图腾 (火)
