@@ -760,7 +760,9 @@ private:
 
         // 手工消费节能施法光环并置位能量职业的 1000ms 公共冷却
         // (triggered 施法不会自动扣减光环，也不会自行占 GCD)
-        me->RemoveAurasDueToSpell(FeralCatDruidSpells::AURA_CLEARCASTING);
+        if (Aura* clearcasting = me->GetAura(FeralCatDruidSpells::AURA_CLEARCASTING))
+            clearcasting->DropCharge();
+
         gcdTimer = 1000;
         AddComboPoints(victim, 1);
         return true;
