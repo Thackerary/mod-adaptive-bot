@@ -515,11 +515,11 @@ private:
         if (!victim)
             return;
 
-        // ---- 法术反制：打断敌方读条 (Off-GCD，不允许挤占当帧输出窗口) ----
-        if (counterspellCooldown == 0 && IsInterruptibleTarget(victim))
+        // ---- 法术反制：接入阶段三基类记忆化压秒打断仲裁引擎 (Off-GCD) ----
+        if (counterspellCooldown == 0)
         {
             uint32 const counterspell = GetAppropriateRank(ArcaneMageSpells::COUNTERSPELL, false);
-            if (counterspell && CanCast(victim, counterspell, true) && ExecuteSpell(victim, counterspell, true))
+            if (counterspell && TryInterrupt(victim, counterspell))
                 counterspellCooldown = CD_COUNTERSPELL;
         }
 
@@ -782,6 +782,26 @@ private:
 
         if (me->HasUnitState(UNIT_STATE_CASTING))
             return;
+
+        // ---- P0: APF 势场紧急避险 (火圈/顺劈强行接管) ----
+        if (IsUnderDangerThreat(2.0f))
+        {
+            if (apfMoveUpdateTimer == 0 || me->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+            {
+                float nextX = 0.0f, nextY = 0.0f, nextZ = 0.0f;
+                float const optDist = std::clamp(me->GetDistance(victim), 15.0f, IDEAL_SHOT_DIST);
+                if (PotentialField::CalculateNextPosition(me, victim, optDist, false, false, activeDangerZones, nextX, nextY, nextZ))
+                {
+                    me->GetMotionMaster()->MovePoint(1, nextX, nextY, nextZ);
+                    apfMoveUpdateTimer = 300;
+                    return;
+                }
+            }
+            else
+            {
+                return;
+            }
+        }
 
         me->SetFacingToObject(victim);
 

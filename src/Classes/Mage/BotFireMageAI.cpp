@@ -240,10 +240,7 @@ public:
         // ---- P0: 极限自保与脱困 (铁律 21) ----
         if (TrySurvival(victim)) return;
 
-        // ---- P1: 压秒打断 (铁律 52, Off-GCD) ----
-        if (TryInterrupt(victim)) return;
-
-        // ---- P2: 增益维持与法力续航 ----
+        // ---- P1: 增益维持与法力续航 ----
         if (MaintainMoltenArmor()) return;
         if (TryManaMaintenance()) return;
 
@@ -500,29 +497,7 @@ private:
         return false;
     }
 
-    // =========================================================================
-    // P1: 压秒打断 (Off-GCD, 铁律 52)
-    // =========================================================================
-    bool TryInterrupt(Unit* victim)
-    {
-        if (counterspellCooldown > 0 || !victim)
-            return false;
-
-        if (!IsInterruptibleTarget(victim))
-            return false;
-
-        uint32 const counterspell = GetAppropriateRank(FireMageSpells::COUNTERSPELL, false);
-        if (!counterspell || !CanCast(victim, counterspell, true))
-            return false;
-
-        if (ExecuteSpell(victim, counterspell, true))
-        {
-            counterspellCooldown = CD_COUNTERSPELL;
-            return true;
-        }
-
-        return false;
-    }
+    // 已接入基类 TryInterrupt(victim, spellId)，移除单参数遮蔽函数
 
     // =========================================================================
     // P2: 增益维持与法力续航
@@ -592,6 +567,14 @@ private:
     {
         if (!victim)
             return;
+
+        // ---- 法术反制：接入阶段三基类记忆化压秒打断仲裁引擎 (Off-GCD) ----
+        if (counterspellCooldown == 0)
+        {
+            uint32 const counterspell = GetAppropriateRank(FireMageSpells::COUNTERSPELL, false);
+            if (counterspell && TryInterrupt(victim, counterspell))
+                counterspellCooldown = CD_COUNTERSPELL;
+        }
 
         // ---- 镜像: 首领/精英战起手召唤分身, 爆发同时压低初始仇恨 ----
         if (mirrorImageCooldown == 0 && IsEliteOrBossTarget(victim) && victim->GetHealthPct() > 50.0f)
@@ -856,6 +839,26 @@ private:
 
         if (me->HasUnitState(UNIT_STATE_CASTING))
             return;
+
+        // ---- P0: APF 势场紧急避险 (火圈/顺劈强行接管) ----
+        if (IsUnderDangerThreat(2.0f))
+        {
+            if (apfMoveUpdateTimer == 0 || me->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+            {
+                float nextX = 0.0f, nextY = 0.0f, nextZ = 0.0f;
+                float const optDist = std::clamp(me->GetDistance(victim), MIN_ENGAGE_DIST, IDEAL_SHOT_DIST);
+                if (PotentialField::CalculateNextPosition(me, victim, optDist, false, false, activeDangerZones, nextX, nextY, nextZ))
+                {
+                    me->GetMotionMaster()->MovePoint(1, nextX, nextY, nextZ);
+                    apfMoveUpdateTimer = 300;
+                    return;
+                }
+            }
+            else
+            {
+                return;
+            }
+        }
 
         me->SetFacingToObject(victim);
 
