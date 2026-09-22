@@ -14,6 +14,10 @@
 class Player;
 class Creature;
 
+// 契合职业位掩码：将 Classes 枚举（1 = 战士 … 11 = 德鲁伊）映射为无符号位。
+// 采用内联移位而非查表，保证在 constexpr GUILD_CONFIGS 静态初始化阶段即可求值。
+#define GUILD_CLASS_MASK(cls) (1U << ((cls) - 1))
+
 // 十大冒险者公会枚举
 enum AdventureGuildType : uint8
 {
@@ -50,6 +54,8 @@ struct GuildPetConfig
     char const* name;      // 公会全称（界面与提示文案）
     bool isAllianceOnly;   // 是否仅招募联盟
     bool isHordeOnly;      // 是否仅招募部落
+    uint32 compatibleClassMask; // 契合职业掩码：非契合职业无法激活战术光环
+    uint32 auraSpellId;         // 专属战术光环 SpellID (全队共享，0 为无光环)
 };
 
 // 单指挥官的内存实时契约记账单
@@ -65,6 +71,7 @@ struct BotHireContract
     uint32 graceRecoveryCheckTimer{ 0 };// 宽限期资金自愈检测节流器 (2000ms)
     bool reminded30Min{ false };        // 30 分钟催缴预警已发送标记
     bool reminded10Min{ false };        // 10 分钟紧急催缴已发送标记
+    uint32 auraSyncTimer{ 0 };          // 公会战术光环动态同步节流计时器 (2000ms)
 
     // 契约独立击杀去重环：PlayerScript 侧与随从 AI 侧是两条独立上报通道，
     // 同一次击杀会被回调两次，必须设闸防双重计费。
@@ -100,21 +107,51 @@ public:
     static constexpr uint32 GRACE_WARN_10MIN_MS          = 10 * 60 * 1000; // 10 分钟紧急催缴阶梯
     static constexpr float  BREACH_PENALTY_RATE          = 1.15f;          // 违约滞纳金 15%
     static constexpr uint64 DAILY_SUPPLY_COOLDOWN_SECONDS = 20 * 60 * 60;  // 每日补给冷却 (20 小时宽限)
+    static constexpr uint32 AURA_SYNC_INTERVAL_MS        = 2000;           // 公会战术光环动态同步周期
 
     /// @brief 十大冒险者公会专属使魔配置表（creatureEntry 采用全新独立高段 70201-70210，
     ///        与暴雪原生伴侣宠物 Entry 彻底解耦，杜绝任何形式的数据污染）。
     static constexpr std::array<GuildPetConfig, 10> GUILD_CONFIGS =
     {{
-        { GUILD_EXPLORERS_LEAGUE,     7560,  8496,  70201, "铁炉堡探险者协会",     true,  false },
-        { GUILD_SI7_MERCENARIES,      8491,  10674, 70202, "暴风城军情七处",       true,  false },
-        { GUILD_SILVER_COVENANT,      8485,  10673, 70203, "达拉然银色盟约",       true,  false },
-        { GUILD_WARSONG_OFFENSIVE,    10393, 12643, 70204, "战歌远征突击队",       false, true  },
-        { GUILD_SUNREAVERS,           27445, 33050, 70205, "夺日者议会",           false, true  },
-        { GUILD_DEATHSTALKERS,        10392, 12642, 70206, "幽暗城死亡猎手狂怒社", false, true  },
-        { GUILD_ARGENT_CRUSADE,       44982, 63317, 70207, "银色北伐军先锋营",     false, false },
-        { GUILD_UNDERBELLY_SYNDICATE, 43698, 59250, 70208, "达拉然下水道黑市行会", false, false },
-        { GUILD_CENARION_EXPEDITION,  44794, 61773, 70209, "塞纳里奥议会/远征队",  false, false },
-        { GUILD_STEAMWHEEDLE_CARTEL,  11026, 13548, 70210, "热砂财阀雇佣行",       false, false }
+        // 1. 探险者: 战/猎/骑/贼 -> 勘探迅捷 (全队地下城移速 +5%)
+        { GUILD_EXPLORERS_LEAGUE,     7560,  8496,  70201, "铁炉堡探险者协会",     true,  false,
+          GUILD_CLASS_MASK(1) | GUILD_CLASS_MASK(3) | GUILD_CLASS_MASK(2) | GUILD_CLASS_MASK(4), 58857 },
+
+        // 2. 军情七处: 贼/猎/法/术/牧 -> 斩首赏金 (全队 3% 破甲)
+        { GUILD_SI7_MERCENARIES,      8491,  10674, 70202, "暴风城军情七处",       true,  false,
+          GUILD_CLASS_MASK(4) | GUILD_CLASS_MASK(3) | GUILD_CLASS_MASK(8) | GUILD_CLASS_MASK(9) | GUILD_CLASS_MASK(5), 73878 },
+
+        // 3. 银色盟约: 法/牧/猎/骑 -> 魔枢谐振 (全队法力消耗 -3%)
+        { GUILD_SILVER_COVENANT,      8485,  10673, 70203, "达拉然银色盟约",       true,  false,
+          GUILD_CLASS_MASK(8) | GUILD_CLASS_MASK(5) | GUILD_CLASS_MASK(3) | GUILD_CLASS_MASK(2), 61316 },
+
+        // 4. 战歌远征队: 战/萨/猎/贼 -> 战歌怒火 (全队物理攻强 +3%)
+        { GUILD_WARSONG_OFFENSIVE,    10393, 12643, 70204, "战歌远征突击队",       false, true,
+          GUILD_CLASS_MASK(1) | GUILD_CLASS_MASK(7) | GUILD_CLASS_MASK(3) | GUILD_CLASS_MASK(4), 65987 },
+
+        // 5. 夺日者: 法/骑/术/牧 -> 魔能共鸣 (全队法术暴击 +2%)
+        { GUILD_SUNREAVERS,           27445, 33050, 70205, "夺日者议会",           false, true,
+          GUILD_CLASS_MASK(8) | GUILD_CLASS_MASK(2) | GUILD_CLASS_MASK(9) | GUILD_CLASS_MASK(5), 23645 },
+
+        // 6. 死亡猎手: 贼/术/DK/牧 -> 凋零契约 (全队受暗影/自然伤害降低 5%)
+        { GUILD_DEATHSTALKERS,        10392, 12642, 70206, "幽暗城死亡猎手狂怒社", false, true,
+          GUILD_CLASS_MASK(4) | GUILD_CLASS_MASK(9) | GUILD_CLASS_MASK(6) | GUILD_CLASS_MASK(5), 32049 },
+
+        // 7. 银色北伐军: 骑/战/牧/DK -> 圣光避难所 (全队受治疗效果 +4%)
+        { GUILD_ARGENT_CRUSADE,       44982, 63317, 70207, "银色北伐军先锋营",     false, false,
+          GUILD_CLASS_MASK(2) | GUILD_CLASS_MASK(1) | GUILD_CLASS_MASK(5) | GUILD_CLASS_MASK(6), 65634 },
+
+        // 8. 下水道黑市: 全职业开放，无战术光环 (纯个人修理与道具特权)
+        { GUILD_UNDERBELLY_SYNDICATE, 43698, 59250, 70208, "达拉然下水道黑市行会", false, false,
+          0xFFFFFFFF, 0 },
+
+        // 9. 塞纳里奥: 德/萨/猎 -> 荒野赐福 (全队微量常驻全属性加成)
+        { GUILD_CENARION_EXPEDITION,  44794, 61773, 70209, "塞纳里奥议会/远征队",  false, false,
+          GUILD_CLASS_MASK(11) | GUILD_CLASS_MASK(7) | GUILD_CLASS_MASK(3), 48470 },
+
+        // 10. 热砂财阀: 全职业开放，无战术光环 (全能商业补位)
+        { GUILD_STEAMWHEEDLE_CARTEL,  11026, 13548, 70210, "热砂财阀雇佣行",       false, false,
+          0xFFFFFFFF, 0 }
     }};
 
     static GuildPetConfig const* GetGuildConfig(uint8 guildId);
@@ -146,6 +183,21 @@ public:
     bool SetPlayerGuild(Player* player, uint8 guildId);
     bool LeavePlayerGuild(Player* player); // 退会：前置清算 + 彻底销毁使魔
     void LoadGuildMembershipsFromDB();
+
+    /// @brief 职业契合度门禁：判断指定职业是否为该公会认可的正统编制。
+    ///        非契合职业加入公会后，自身无法激活战术光环，全队亦不得享受其光环加持。
+    static bool IsPlayerClassAffiliated(uint8 guildId, uint8 playerClass);
+
+    /// @brief 查询公会专属战术光环 SpellID（0 表示该公会无战术光环）。
+    static uint32 GetGuildAuraSpellId(uint8 guildId);
+
+    /// @brief 全队公会战术光环动态同步：归集队内应生效的光环合集后，对指挥官与
+    ///        所有存活随从做差量增删。同公会天然去重（集合语义），异公会完全叠加。
+    ///        严禁在持有 _lock 的临界区内调用（内部会遍历 Unit 并施加/移除光环）。
+    void UpdateTeamGuildAuras(Player* player);
+
+    /// @brief 剥离全队公会战术光环：退会 / 登出 / 强制遣散等会籍失效路径的收尾动作。
+    void ClearTeamGuildAuras(Player* player);
 
     /// @brief 服务端伴侣召唤法术重定向：把 10 个公会使魔的召唤目标 Entry
     ///        就地改写为独立高段模版 70201-70210，无需改动客户端 DBC。

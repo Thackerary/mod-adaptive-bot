@@ -16,6 +16,7 @@
 #include "SpellInfo.h"
 #include "SpellMgr.h"
 #include <algorithm>
+#include <unordered_set>
 #include <vector>
 
 BotGuildEscrowMgr* BotGuildEscrowMgr::Instance()
@@ -219,6 +220,25 @@ uint8 BotGuildEscrowMgr::GetBotGuildIdFromEntry(uint32 entry)
     return GUILD_NONE;
 }
 
+bool BotGuildEscrowMgr::IsPlayerClassAffiliated(uint8 guildId, uint8 playerClass)
+{
+    GuildPetConfig const* cfg = GetGuildConfig(guildId);
+    if (!cfg)
+        return false;
+
+    // 职业掩码为 0 属于配置遗漏，一律判为不契合，宁可少给光环也不放行非法加成。
+    if (cfg->compatibleClassMask == 0)
+        return false;
+
+    return (cfg->compatibleClassMask & GUILD_CLASS_MASK(playerClass)) != 0;
+}
+
+uint32 BotGuildEscrowMgr::GetGuildAuraSpellId(uint8 guildId)
+{
+    GuildPetConfig const* cfg = GetGuildConfig(guildId);
+    return cfg ? cfg->auraSpellId : 0;
+}
+
 uint8 BotGuildEscrowMgr::GetPlayerGuildId(ObjectGuid const& playerGuid)
 {
     std::lock_guard<std::mutex> lock(_lock);
@@ -326,6 +346,10 @@ bool BotGuildEscrowMgr::LeavePlayerGuild(Player* player)
         player->DestroyItemCount(cfg->itemId, 1, true);
         player->removeSpell(cfg->spellId, SPEC_MASK_ALL, false);
     }
+
+    // 退会即失去会籍：本人贡献的战术光环必须立刻从全队剥离。
+    // 队友若仍需该加成，只能依赖队伍中该公会的正统随从继续提供。
+    ClearTeamGuildAuras(player);
 
     if (player->GetSession())
         ChatHandler(player->GetSession()).PSendSysMessage(
@@ -699,6 +723,114 @@ bool BotGuildEscrowMgr::SettleCurrentBill(Player* player, BillingReason reason)
     return true;
 }
 
+void BotGuildEscrowMgr::UpdateTeamGuildAuras(Player* player)
+{
+    if (!player)
+        return;
+
+    // -------------------------------------------------------------------------
+    // 1. 归集「本帧队伍应激活的公会战术光环」合集
+    //    以 SpellID 集合承载，天然完成同公会去重：多名同会随从、或契合玩家
+    //    搭配同会随从，最终都只会在集合里留下 1 个条目，绝不会线性叠加。
+    // -------------------------------------------------------------------------
+    std::unordered_set<uint32> activeAuras;
+
+    // A. 指挥官贡献判定（职业契合度门禁的核心落点）：
+    //    只有职业契合该公会的玩家才能激活并共享其战术光环；不契合者自身
+    //    拿不到光环，全队也不享受该玩家会籍所对应的加成——此时若队内没有
+    //    该公会的正统随从，该光环将在整支队伍中彻底缺席（惩罚成立）。
+    uint8 const playerGuildId = GetPlayerGuildId(player->GetGUID());
+    if (playerGuildId != GUILD_NONE)
+    {
+        if (IsPlayerClassAffiliated(playerGuildId, player->getClass()))
+        {
+            if (uint32 const aura = GetGuildAuraSpellId(playerGuildId))
+                activeAuras.insert(aura);
+        }
+    }
+
+    // B. 随从贡献判定：随从由模版 Entry 逆向反解原生公会，属正统精锐编制，
+    //    只要在队且存活，必然为全队贡献其原生公会的战术光环（不受指挥官会籍影响）。
+    std::vector<AdaptiveBotAI*> const botGroup = BotCommandScript::CollectBotGroup(player);
+    for (AdaptiveBotAI* bot : botGroup)
+    {
+        if (!bot || !bot->GetBotCreature() || !bot->GetBotCreature()->IsAlive())
+            continue;
+
+        uint8 const botGuildId = GetBotGuildIdFromEntry(bot->GetBotCreature()->GetEntry());
+        if (uint32 const aura = GetGuildAuraSpellId(botGuildId))
+            activeAuras.insert(aura);
+    }
+
+    // -------------------------------------------------------------------------
+    // 2. 收集队伍受惠目标：指挥官本人 + 全部存活随从
+    //    注意：个人专属福利（补给药水箱、晶水点心、修理折扣、人形怪金币加成）
+    //    绝不进入此列表，它们仅属于指挥官个人账户或特定实体。
+    // -------------------------------------------------------------------------
+    std::vector<Unit*> teamUnits;
+    teamUnits.push_back(player);
+    for (AdaptiveBotAI* bot : botGroup)
+    {
+        if (bot && bot->GetBotCreature() && bot->GetBotCreature()->IsAlive())
+            teamUnits.push_back(bot->GetBotCreature());
+    }
+
+    // -------------------------------------------------------------------------
+    // 3. 差量应用与清理：应有的挂上，不该有的摘掉。
+    //    遍历全表而非仅遍历 activeAuras，才能覆盖「随从阵亡 / 退队 / 转公会」
+    //    导致某光环本帧不应再存在时的反向清理，避免残留加成。
+    // -------------------------------------------------------------------------
+    for (Unit* target : teamUnits)
+    {
+        if (!target)
+            continue;
+
+        for (auto const& cfg : GUILD_CONFIGS)
+        {
+            if (cfg.auraSpellId == 0)
+                continue;
+
+            bool const shouldHave = (activeAuras.find(cfg.auraSpellId) != activeAuras.end());
+            bool const hasAura = target->HasAura(cfg.auraSpellId);
+
+            if (shouldHave && !hasAura)
+                target->AddAura(cfg.auraSpellId, target);
+            else if (!shouldHave && hasAura)
+                target->RemoveAurasDueToSpell(cfg.auraSpellId);
+        }
+    }
+}
+
+void BotGuildEscrowMgr::ClearTeamGuildAuras(Player* player)
+{
+    if (!player)
+        return;
+
+    // 解散/登出/退会等路径下队伍可能已不复存在，故此处不校验存活状态，
+    // 只要实体句柄仍可解析就必须摘净光环，杜绝残留加成穿透会籍失效边界。
+    std::vector<AdaptiveBotAI*> const botGroup = BotCommandScript::CollectBotGroup(player);
+
+    std::vector<Unit*> teamUnits;
+    teamUnits.push_back(player);
+    for (AdaptiveBotAI* bot : botGroup)
+    {
+        if (bot && bot->GetBotCreature())
+            teamUnits.push_back(bot->GetBotCreature());
+    }
+
+    for (Unit* unit : teamUnits)
+    {
+        if (!unit)
+            continue;
+
+        for (auto const& cfg : GUILD_CONFIGS)
+        {
+            if (cfg.auraSpellId != 0 && unit->HasAura(cfg.auraSpellId))
+                unit->RemoveAurasDueToSpell(cfg.auraSpellId);
+        }
+    }
+}
+
 void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
 {
     if (!player)
@@ -763,6 +895,7 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
     bool shouldSettle = false;
     BillingReason settleReason = BILLING_REASON_PERIODIC;
     bool shouldForceDisband = false;
+    bool syncAuras = false;
     bool send30MinWarning = false;
     bool send10MinWarning = false;
     uint32 breachDebt = 0;
@@ -795,6 +928,16 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
             contract.lastMapId = currentMapId;
             shouldSettle = true;
             settleReason = BILLING_REASON_MAP_CHANGE;
+        }
+
+        // 公会战术光环同步节流：此处仅推进计时器与置位标记，
+        // 真正的 AddAura / RemoveAurasDueToSpell 一律挪到锁外执行，
+        // 与 _lock 彻底解耦以规避锁序倒置死锁。
+        contract.auraSyncTimer += diff;
+        if (contract.auraSyncTimer >= AURA_SYNC_INTERVAL_MS)
+        {
+            contract.auraSyncTimer = 0;
+            syncAuras = true;
         }
 
         // 双轨驱动之二：20 分钟周期轮询静默划扣。
@@ -903,6 +1046,10 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
             ChatHandler(player->GetSession()).PSendSysMessage(
                 "|cffff0000【公会制裁】1 小时宽限期已过，由于恶意欠薪，您的冒险队伍已被强制解散，您已被列入艾泽拉斯公会失信人黑名单！|r");
 
+        // 制裁先行剥离光环：必须在随从遣返之前摘除全队战术光环，
+        // 否则随从离队后光环会因队伍清空而永久残留，形成「赖账仍享加成」漏洞。
+        ClearTeamGuildAuras(player);
+
         // 强制全队归巢：此时契约已被摘除，DoDisband 内部的尾款结清会自动跳过
         BotCommandScript::DoDisband(player);
         return;
@@ -910,6 +1057,11 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
 
     if (shouldSettle)
         SettleCurrentBill(player, settleReason);
+
+    // 光环动态同步：置于全部记账与制裁分支之后。上方强制遣散通道已 return，
+    // 绝不会在已解散的队伍上补挂光环。
+    if (syncAuras)
+        UpdateTeamGuildAuras(player);
 }
 
 // -----------------------------------------------------------------------------
@@ -945,6 +1097,10 @@ void BotGuildEscrowPlayerScript::OnPlayerLogout(Player* player)
     // 注意：DoDisband 内部是「清算成功才注销契约」，此处不得再无条件 RemoveContract，
     // 否则金币不足的玩家只要登出一次即可赖掉全部欠款。
     BotCommandScript::DoDisband(player);
+
+    // 登出即脱离战术协同：补一次全队光环剥离，防止随从在下线瞬间带着
+    // 上一秒同步上来的公会光环置留于世界，直到下一轮 2 秒周期才被清理。
+    sBotGuildEscrowMgr->ClearTeamGuildAuras(player);
 
     // 离线防蒸发兜底：若因金币不足未能当场结清，内存契约此刻仍然存在，
     // 必须立即把欠款固化进数据库。否则服务器在玩家离线期间重启时，
