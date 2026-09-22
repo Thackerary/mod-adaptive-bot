@@ -10,6 +10,7 @@
 #include <array>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 
 class Player;
 class Creature;
@@ -226,6 +227,7 @@ private:
 
     std::unordered_map<ObjectGuid, uint8>  _guildMemberships;    // GUID -> 所属公会 ID
     std::unordered_map<ObjectGuid, uint64> _lastSupplyClaimTime; // GUID -> 上次领取补给时间戳
+    std::unordered_set<ObjectGuid>         _pendingAuraCleanup;  // GUID -> 契约注销后待收尾的残留战术光环标记
 };
 
 #define sBotGuildEscrowMgr BotGuildEscrowMgr::Instance()

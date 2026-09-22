@@ -165,6 +165,13 @@ void BotGuildEscrowMgr::RemoveContract(ObjectGuid const& playerGuid)
     std::lock_guard<std::mutex> lock(_lock);
     _activeContracts.erase(playerGuid);
     _contractProbeTimers.erase(playerGuid);
+
+    // 登记一次性光环收尾：契约注销点分散在手动解散（DoDisband）/ 退会 / 登出 /
+    // 制裁等多条路径，且注销瞬间随从往往尚未遣返——当场同步会被仍在队的随从
+    // 重新点亮光环，变成「清完再挂上」的空转。故此处只挂标记，交由后续首个
+    // 玩家更新帧在随从彻底离队之后做一次幂等差量同步，确保任何注销路径都
+    // 不留残留战术光环（对已自行清理过光环的路径同样无害，属幂等空操作）。
+    _pendingAuraCleanup.insert(playerGuid);
 }
 
 bool BotGuildEscrowMgr::HasActiveContract(ObjectGuid const& playerGuid)
@@ -839,6 +846,26 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
     ObjectGuid const guid = player->GetGUID();
 
     // -------------------------------------------------------------------------
+    // 契约注销后的一次性光环收尾（登记点见 RemoveContract）。
+    // 契约注销分散在手动解散 / 退会 / 登出 / 制裁等多条路径，这些路径的注销点
+    // 不在本函数内，回收分支根本不会执行；若不设此兜底出口，契约一注销便再无
+    // 任何帧能进入契约驱动逻辑，随从贡献的外会战术光环将永久残留。
+    // 空集快路径刻意不取锁：写入方（RemoveContract）同样运行于世界主线程，
+    // 只有真正存在待收尾标记时才进入临界区摘除并执行差量同步。
+    // -------------------------------------------------------------------------
+    if (!_pendingAuraCleanup.empty())
+    {
+        bool needAuraCleanup = false;
+        {
+            std::lock_guard<std::mutex> lock(_lock);
+            needAuraCleanup = (_pendingAuraCleanup.erase(guid) != 0);
+        }
+
+        if (needAuraCleanup)
+            UpdateTeamGuildAuras(player);
+    }
+
+    // -------------------------------------------------------------------------
     // 契约自愈探针：招募入口不在本模块职责内，故由世界经济体自适应补建账户。
     // 每 1 秒低频巡检一次，指挥官已带兵但契约缺失时自动开户，杜绝漏单。
     // -------------------------------------------------------------------------
@@ -898,6 +925,7 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
     bool syncAuras = false;
     bool send30MinWarning = false;
     bool send10MinWarning = false;
+    bool shouldRecycleContract = false; // 空契约本帧注销标记（收尾动作一律推迟至锁外）
     uint32 breachDebt = 0;
     uint32 warningDueCopper = 0;
 
@@ -909,16 +937,6 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
             return;
 
         BotHireContract& contract = it->second;
-
-        // 空契约自愈回收：既已无随从可供计件、又无未结佣金、且未处于追缴宽限期，
-        // 说明该契约已彻底停摆（随从被遣散 / 团灭未归 / 解散流程中断）。
-        // 若不摘除，_activeContracts 会随历史 GUID 无界驻留，构成常驻内存泄漏。
-        if (!contract.inGracePeriod && contract.pendingCopper == 0 && !hasBots)
-        {
-            _activeContracts.erase(it);
-            _contractProbeTimers.erase(guid);
-            return;
-        }
 
         // 双轨驱动之一：切图强制结算（进出副本 / 跨大陆传送）。
         // 以地图 ID 变化为判据而非依赖不存在的 OnMapChanged 钩子。
@@ -1012,6 +1030,33 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
                 }
             }
         }
+
+        // 空契约自愈回收：既已无随从可供计件、又无未结佣金、且未处于追缴宽限期，
+        // 说明该契约已彻底停摆（随从被遣散 / 团灭未归 / 解散流程中断）。
+        // 若不摘除，_activeContracts 会随历史 GUID 无界驻留，构成常驻内存泄漏。
+        //
+        // 刻意置于临界区末尾而非开头：本判定会析构契约元素，令 contract 引用当场
+        // 失效。放在末尾可保证 erase 是本作用域对契约的最后一次访问，杜绝悬垂引用；
+        // 同时只置位标记、绝不提前 return，把「剥离残留战术光环」这类必须脱离
+        // _lock 执行的收尾动作交给锁外统一出口，避免被早退整段跳过。
+        if (!contract.inGracePeriod && contract.pendingCopper == 0 && !hasBots)
+        {
+            _activeContracts.erase(it);
+            _contractProbeTimers.erase(guid);
+            shouldRecycleContract = true;
+        }
+    }
+
+    // 核心修复点：空契约自愈回收帧必须在锁外补一次全队战术光环差量同步。
+    // 随从解散瞬间，其原生公会光环（战歌 3% 攻强 / 北伐军 4% 受疗 / 军情七处
+    // 3% 破甲等）仍挂在指挥官身上；而契约一旦注销，本函数后续再也不会进入契约
+    // 驱动逻辑，这些光环将永久残留，形成「解散随从即可白嫖外会战术光环」漏洞。
+    // 此处刻意选用差量同步而非无差别剥离：差量同步会摘净全部由随从贡献的光环，
+    // 同时保留指挥官自身职业契合的公会光环（个人会籍福利不因队伍解散而失效）。
+    if (shouldRecycleContract)
+    {
+        UpdateTeamGuildAuras(player);
+        return;
     }
 
     // 催缴消息一律在锁外下发：ChatHandler 会触发会话层副作用，
