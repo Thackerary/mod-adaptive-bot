@@ -182,8 +182,8 @@ bool BotGuildEscrowMgr::HasActiveContract(ObjectGuid const& playerGuid)
 
 float BotGuildEscrowMgr::CalculateGuildDiscount(uint8 playerGuildId, uint8 botGuildId, bool isCrossFaction)
 {
-    // 同公会享受 7.5 折内部津贴
-    if (playerGuildId != GUILD_NONE && playerGuildId == botGuildId)
+    // // 同公会享受 7.5 折内部津贴（特判排除热砂财阀：地精在商言商，作为开放 31 系全专精的全能商业行会，绝不设内部折扣）
+    if (playerGuildId != GUILD_NONE && playerGuildId == botGuildId && playerGuildId != GUILD_STEAMWHEEDLE_CARTEL)
         return 0.75f;
 
     // 跨阵营中介加收 20%

@@ -174,16 +174,24 @@ void BotGuildReceptionistScript::ShowGuildDetail(Player* player, Creature* creat
     {
         if (player->GetSession())
         {
-            ChatHandler(player->GetSession()).PSendSysMessage(
-                "【公会前台】{}：入会后可领取专属通信使魔，并享受随从雇佣 7.5 折内部津贴。", cfg->name);
-
-            // 职业契合度前置提醒：非契合职业入会后无法为队伍激活本会战术光环。
-            // 若不在入会前讲清，玩家会误以为「入会即得光环」而产生落差投诉。
-            if (!sBotGuildEscrowMgr->IsPlayerClassAffiliated(guildId, player->getClass()))
+			if (guildId == GUILD_STEAMWHEEDLE_CARTEL)
             {
                 ChatHandler(player->GetSession()).PSendSysMessage(
-                    "|cffff8000【契合度警示】您的职业与本公会的战术风格不符。入会后仍可享受 7.5 折佣金津贴与每日行军补给，但您本人无法为队伍激活本公会的专属战术光环（需依赖本会正统随从提供）。|r");
+                    "【公会前台】{}：入会后可领取专属通信使魔；开放全部 31 系专精无门槛雇佣。在商言商，本会不设内部折扣（常驻 1.0x 原价结算）。", cfg->name);
             }
+            else
+			{
+				ChatHandler(player->GetSession()).PSendSysMessage("【公会前台】{}：入会后可领取专属通信使魔，并享受随从雇佣 7.5 折内部津贴。", cfg->name);
+
+				// 职业契合度前置提醒：非契合职业入会后无法为队伍激活本会战术光环。
+				// 若不在入会前讲清，玩家会误以为「入会即得光环」而产生落差投诉。
+				if (!sBotGuildEscrowMgr->IsPlayerClassAffiliated(guildId, player->getClass()))
+				{
+					ChatHandler(player->GetSession()).PSendSysMessage(
+						"|cffff8000【契合度警示】您的职业与本公会的战术风格不符。入会后仍可享受 7.5 折佣金津贴与每日行军补给，但您本人无法为队伍激活本公会的专属战术光环（需依赖本会正统随从提供）。|r");
+				}
+			}
+            
         }
 
         AddGossipItemFor(player, GOSSIP_ICON_CHAT, "确认加入该公会。", GOSSIP_SENDER_MAIN,
