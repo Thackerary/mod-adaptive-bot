@@ -384,7 +384,7 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
     {
         CharacterDatabase.Execute(
             "REPLACE INTO character_bot_escrow (guid, is_bankrupt, debt_copper, updated_time) VALUES ({}, 1, {}, {})",
-            guid.GetCounter(), breachDebt, static_cast<uint64>(GameTime::GetGameTime()));
+            guid.GetCounter(), breachDebt, static_cast<uint64>(GameTime::GetGameTime().count()));
 
         if (player->GetSession())
             ChatHandler(player->GetSession()).PSendSysMessage(
