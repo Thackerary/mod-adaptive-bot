@@ -53,6 +53,28 @@ struct BotHireContract
     uint32 graceRecoveryCheckTimer{ 0 };// 宽限期资金自愈检测节流器 (2000ms)
     bool reminded30Min{ false };        // 30 分钟催缴预警已发送标记
     bool reminded10Min{ false };        // 10 分钟紧急催缴已发送标记
+
+    // 契约独立击杀去重环：PlayerScript 侧与随从 AI 侧是两条独立上报通道，
+    // 同一次击杀会被回调两次，必须设闸防双重计费。
+    // 关键：该环绝不能做成跨指挥官的全局环——组队时同一只怪的击杀会同时
+    // 上报给队内每一位带队玩家，全局环会把第二位及之后的指挥官判为「重复」
+    // 而整场免单；下沉到契约后，每位指挥官各自独立判定，互不干扰。
+    // 定长环形缓冲零堆分配，32 槽位足以覆盖同帧双路回调的错位窗口。
+    std::array<ObjectGuid, 32> recentKilledGuids{};
+    uint8 recentKilledIdx{ 0 };
+
+    bool IsDuplicateKill(ObjectGuid const& guid)
+    {
+        for (auto const& recent : recentKilledGuids)
+        {
+            if (recent == guid)
+                return true;
+        }
+
+        recentKilledGuids[recentKilledIdx % recentKilledGuids.size()] = guid;
+        ++recentKilledIdx;
+        return false;
+    }
 };
 
 class BotGuildEscrowMgr
@@ -95,14 +117,6 @@ private:
     std::unordered_map<ObjectGuid, BotHireContract> _activeContracts;
     std::unordered_map<ObjectGuid, uint32> _contractProbeTimers; // 开户探针节流器
     std::unordered_map<ObjectGuid, uint32> _bankruptDebts;       // GUID -> 欠款金额(铜)
-
-    // 击杀全局定长去重环：PlayerScript 侧与随从 AI 侧是两条独立上报通道，
-    // 同一次击杀会被回调两次。若不设闸，任何非治疗阵容都会被双重计费。
-    // 定长环形缓冲零堆分配，扩容至 64 槽位后，即便 AoE 一波清掉数十个目标，
-    // 两条通道的回调错位也不会把已计费的击杀挤出窗口而造成重复累加。
-    std::array<ObjectGuid, 64> _recentKilledGuids{};
-    uint8 _recentKilledIdx{ 0 };
-    bool IsDuplicateKill(ObjectGuid const& guid);
 };
 
 #define sBotGuildEscrowMgr BotGuildEscrowMgr::Instance()

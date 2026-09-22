@@ -182,19 +182,6 @@ float BotGuildEscrowMgr::CalculateGuildDiscount(uint8 playerGuildId, uint8 botGu
     return 1.0f;
 }
 
-bool BotGuildEscrowMgr::IsDuplicateKill(ObjectGuid const& guid)
-{
-    for (auto const& recent : _recentKilledGuids)
-    {
-        if (recent == guid)
-            return true;
-    }
-
-    _recentKilledGuids[_recentKilledIdx % _recentKilledGuids.size()] = guid;
-    ++_recentKilledIdx;
-    return false;
-}
-
 void BotGuildEscrowMgr::AccumulateKillFee(Player* player, Creature* killed)
 {
     if (!player || !killed)
@@ -207,16 +194,18 @@ void BotGuildEscrowMgr::AccumulateKillFee(Player* player, Creature* killed)
 
     ObjectGuid const guid = player->GetGUID();
 
-    // 先确认契约存在，避免为无关玩家白跑一次随从总线加锁与拷贝
-    if (!HasActiveContract(guid))
-        return;
-
-    // 全局防双通道重复计费：PlayerScript::OnPlayerCreatureKill 与
-    // AdaptiveBotAI::KilledUnit 会对同一次击杀各上报一次。去重环由 _lock 守护，
-    // 判定与写入在同一临界区内完成，杜绝同帧并发穿透。
+    // 契约存在性确认 + 去重判定合并为一次加锁：
+    // 早期版本先 HasActiveContract() 再单独加锁去重，同一逻辑帧内要抢两遍 _lock。
+    // 去重环归属契约本体后，同一次临界区即可完成「契约在否」与「是否重杀」双裁决，
+    // 判定与写入原子完成，杜绝同帧双通道并发穿透。
     {
         std::lock_guard<std::mutex> lock(_lock);
-        if (IsDuplicateKill(killed->GetGUID()))
+
+        auto it = _activeContracts.find(guid);
+        if (it == _activeContracts.end())
+            return;
+
+        if (it->second.IsDuplicateKill(killed->GetGUID()))
             return;
     }
 
@@ -422,8 +411,10 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
             return;
         }
 
-        // 无契约且未带兵：立刻回收探针槽位，避免世界常驻期为所有历史 GUID 无界驻留
-        if (BotCommandScript::CollectBotGroup(player).empty())
+        // 无契约且未带兵：立刻回收探针槽位，避免世界常驻期为所有历史 GUID 无界驻留。
+        // 改用 O(1) 只读探针：CollectBotGroup 会拷贝整份快照，在每秒触发的
+        // 开户判定路径上属于纯浪费的堆分配。
+        if (!AdaptiveBotAI::HasMasterBots(guid))
         {
             std::lock_guard<std::mutex> lock(_lock);
             _contractProbeTimers.erase(guid);
@@ -433,9 +424,11 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
         StartContract(player);
     }
 
-    // 随从存在性快照：必须在获取 _lock 之前完成随从总线的加锁与遍历，
+    // 随从存在性快照：必须在获取 _lock 之前完成随从总线的加锁，
     // 否则会在 _lock 内部嵌套 s_botRegistryMutex 形成锁序倒置。
-    bool const hasBots = !BotCommandScript::CollectBotGroup(player).empty();
+    // 此处使用零堆分配的 HasMasterBots 而非 CollectBotGroup，
+    // 既保留「锁外取样」的正确顺序，又彻底消除每秒心跳的 vector 抖动。
+    bool const hasBots = AdaptiveBotAI::HasMasterBots(guid);
 
     bool shouldSettle = false;
     BillingReason settleReason = BILLING_REASON_PERIODIC;

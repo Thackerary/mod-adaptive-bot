@@ -240,6 +240,17 @@ public:
         }
     }
 
+    /// @brief 轻量级只读随从存在性检查（零堆内存分配，无 vector 拷贝开销）。
+    ///        CollectBotGroup() 会为调用方拷贝整份随从快照，在每秒心跳级的
+    ///        空契约裁决路径上会造成持续的堆分配抖动；此处仅做一次哈希查找，
+    ///        专供「这笔契约是否还该存在」这类只需布尔结论的场景使用。
+    [[nodiscard]] static bool HasMasterBots(ObjectGuid const& masterGuid)
+    {
+        std::lock_guard<std::mutex> lock(s_botRegistryMutex);
+        auto it = s_masterBotRegistry.find(masterGuid);
+        return it != s_masterBotRegistry.end() && !it->second.empty();
+    }
+
     Unit* GetGroupTank()
     {
         Player* master = GetMaster();
