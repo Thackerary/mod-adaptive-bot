@@ -93,6 +93,38 @@ void BotGuildEscrowMgr::ClearBankruptcy(Player* player)
             "【公会信托】您已成功结清欠款（{}金 {}银 {}铜），公会信用恢复正常！", gold, silver, copper);
 }
 
+void BotGuildEscrowMgr::PersistUnpaidDebtOnLogout(Player* player)
+{
+    if (!player)
+        return;
+
+    ObjectGuid const guid = player->GetGUID();
+    uint32 unpaidCopper = 0;
+
+    {
+        std::lock_guard<std::mutex> lock(_lock);
+
+        auto it = _activeContracts.find(guid);
+        if (it == _activeContracts.end() || it->second.pendingCopper == 0)
+            return;
+
+        // 离线欠费与宽限期超时同口径：加收 15% 滞纳金后直接转为失信欠款。
+        // 内存契约不落盘，一旦服务器在玩家离线期间重启，这条在途账单就会
+        // 随进程一起蒸发，等价于用「登出 + 重启」白嫖整场随从。故此处立即固化。
+        unpaidCopper = static_cast<uint32>(static_cast<float>(it->second.pendingCopper) * BREACH_PENALTY_RATE);
+        _bankruptDebts[guid] = unpaidCopper;
+        _activeContracts.erase(it);
+        _contractProbeTimers.erase(guid);
+    }
+
+    CharacterDatabase.Execute(
+        "REPLACE INTO character_bot_escrow (guid, is_bankrupt, debt_copper, updated_time) VALUES ({}, 1, {}, {})",
+        guid.GetCounter(), unpaidCopper, static_cast<uint64>(GameTime::GetGameTime().count()));
+
+    LOG_INFO("scripts", ">> [AdaptiveBot] 玩家 [{}] 离线未结清佣金，已将 {} 铜欠款固化至失信数据库。",
+        player->GetName(), unpaidCopper);
+}
+
 void BotGuildEscrowMgr::StartContract(Player* player)
 {
     if (!player)
@@ -207,14 +239,19 @@ void BotGuildEscrowMgr::AccumulateKillFee(Player* player, Creature* killed)
     else
         baseRateCopper = 1500; // 80 级基准 15 银
 
-    // 2. 怪物类型权重
+    // 2. 怪物类型权重：团本首领 60x，5 人本首领 20x，精英与团本杂兵 3x，普通怪 1x。
+    //    此前把「处于团本地图」直接等同于「首领」，导致团本里每一只杂兵都按 60x
+    //    结算，一趟小怪清场就能制造出天价账单。首领身份必须只看 isWorldBoss /
+    //    IsDungeonBoss，团本地图仅作为杂兵的 3x 判据。
     float typeMultiplier = 1.0f;
-    if (killed->isWorldBoss() || (killed->GetMap() && killed->GetMap()->IsRaid()))
-        typeMultiplier = 60.0f; // 团本 Boss: 60x (~9G)
+    bool const isRaidMap = (killed->GetMap() && killed->GetMap()->IsRaid());
+
+    if (killed->isWorldBoss() || (isRaidMap && killed->IsDungeonBoss()))
+        typeMultiplier = 60.0f; // 团本首领: 60x (~9G)
     else if (killed->IsDungeonBoss())
-        typeMultiplier = 20.0f; // 5人本 Boss: 20x (~3G)
-    else if (killed->isElite())
-        typeMultiplier = 3.0f;  // 精英怪: 3x
+        typeMultiplier = 20.0f; // 5 人本首领: 20x (~3G)
+    else if (killed->isElite() || isRaidMap)
+        typeMultiplier = 3.0f;  // 精英怪及团本普通杂兵: 3x (~45S)
 
     // 3. 累加随从全员佣金 (按各自会籍计算折扣)
     //    TODO(阶段四): 接入玩家真实公会归属与随从会籍；当前双方的 SetMaster()
@@ -585,6 +622,12 @@ void BotGuildEscrowPlayerScript::OnPlayerLogout(Player* player)
     // 注意：DoDisband 内部是「清算成功才注销契约」，此处不得再无条件 RemoveContract，
     // 否则金币不足的玩家只要登出一次即可赖掉全部欠款。
     BotCommandScript::DoDisband(player);
+
+    // 离线防蒸发兜底：若因金币不足未能当场结清，内存契约此刻仍然存在，
+    // 必须立即把欠款固化进数据库。否则服务器在玩家离线期间重启时，
+    // 这条仅存于内存的在途账单会随进程一起消失，变相成为「登出逃单」通道。
+    if (sBotGuildEscrowMgr->HasActiveContract(player->GetGUID()))
+        sBotGuildEscrowMgr->PersistUnpaidDebtOnLogout(player);
 }
 
 void BotGuildEscrowPlayerScript::OnPlayerCreatureKill(Player* killer, Creature* killed)

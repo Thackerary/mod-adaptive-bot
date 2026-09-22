@@ -82,6 +82,7 @@ public:
     bool IsBankrupt(ObjectGuid const& playerGuid);
     void ClearBankruptcy(Player* player);
     void LoadBankruptcyFromDB();
+    void PersistUnpaidDebtOnLogout(Player* player); // 离线欠费防蒸发落盘
 
     // 费率折扣计算
     static float CalculateGuildDiscount(uint8 playerGuildId, uint8 botGuildId, bool isCrossFaction);

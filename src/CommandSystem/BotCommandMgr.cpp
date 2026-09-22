@@ -121,7 +121,8 @@ void BotCommandScript::DoAssemble(Player* player)
         botCreature->GetMotionMaster()->MoveFollow(player, 2.5f, player->GetAngle(botCreature));
     }
 
-    ChatHandler(player->GetSession()).PSendSysMessage("【随从调度】全员已强制传送集合至您身边。");
+    if (player->GetSession())
+        ChatHandler(player->GetSession()).PSendSysMessage("【随从调度】全员已强制传送集合至您身边。");
 }
 
 bool BotCommandScript::HandleDisband(ChatHandler* handler)
@@ -138,7 +139,7 @@ void BotCommandScript::DoDisband(Player* player)
 {
     // 主动解散：在遣返随从前结清最后一笔尾款。
     // 仅当清算成功才注销契约；若玩家当场金币不足，则保留契约与宽限期倒计时，
-    // 由 5 分钟追缴通道继续处理，杜绝「解散即赖账」。
+    // 由 1 小时追缴通道继续处理，杜绝「解散即赖账」。
     if (player && sBotGuildEscrowMgr->HasActiveContract(player->GetGUID()))
     {
         if (sBotGuildEscrowMgr->SettleCurrentBill(player, BILLING_REASON_DISBAND))
@@ -194,7 +195,8 @@ void BotCommandScript::DoDisband(Player* player)
         }
     }
 
-    ChatHandler(player->GetSession()).PSendSysMessage("【随从调度】冒险队伍已解散，随从已重置归巢。");
+    if (player->GetSession())
+        ChatHandler(player->GetSession()).PSendSysMessage("【随从调度】冒险队伍已解散，随从已重置归巢。");
 }
 
 bool BotCommandScript::HandleRest(ChatHandler* handler)
@@ -215,7 +217,8 @@ void BotCommandScript::DoRest(Player* player)
     // 表现为 50ms 内站起-坐下无限抽搐的视觉故障。
     if (player->IsInCombat())
     {
-        ChatHandler(player->GetSession()).PSendSysMessage("【随从调度】战斗中无法就地休息！");
+        if (player->GetSession())
+            ChatHandler(player->GetSession()).PSendSysMessage("【随从调度】战斗中无法就地休息！");
         return;
     }
 
@@ -262,10 +265,13 @@ void BotCommandScript::DoRest(Player* player)
         }
     }
 
-    if (newRestState)
-        ChatHandler(player->GetSession()).PSendSysMessage("【随从调度】全队进入就地休息状态，锁死索敌并休整。");
-    else
-        ChatHandler(player->GetSession()).PSendSysMessage("【随从调度】全队已解除休息，恢复待命作战状态。");
+    if (player->GetSession())
+    {
+        if (newRestState)
+            ChatHandler(player->GetSession()).PSendSysMessage("【随从调度】全队进入就地休息状态，锁死索敌并休整。");
+        else
+            ChatHandler(player->GetSession()).PSendSysMessage("【随从调度】全队已解除休息，恢复待命作战状态。");
+    }
 }
 
 bool BotCommandScript::HandleStack(ChatHandler* handler)
@@ -388,17 +394,20 @@ void BotCommandScript::DoFormation(Player* player, BotFormationType formation)
         botCreature->GetMotionMaster()->MovePoint(1001, destX, destY, destZ);
     }
 
-    switch (formation)
+    if (player->GetSession())
     {
-        case BotFormationType::STACK:
-            ChatHandler(player->GetSession()).PSendSysMessage("【随从调度】阵型切换：【密集集合阵】（集中承伤与团补）。");
-            break;
-        case BotFormationType::FAN:
-            ChatHandler(player->GetSession()).PSendSysMessage("【随从调度】阵型切换：【弧形推进阵】（正面迎敌，避侧后顺劈）。");
-            break;
-        case BotFormationType::SPREAD:
-            ChatHandler(player->GetSession()).PSendSysMessage("【随从调度】阵型切换：【极限分散阵】（双层交错，防点名范围伤害）。");
-            break;
+        switch (formation)
+        {
+            case BotFormationType::STACK:
+                ChatHandler(player->GetSession()).PSendSysMessage("【随从调度】阵型切换：【密集集合阵】（集中承伤与团补）。");
+                break;
+            case BotFormationType::FAN:
+                ChatHandler(player->GetSession()).PSendSysMessage("【随从调度】阵型切换：【弧形推进阵】（正面迎敌，避侧后顺劈）。");
+                break;
+            case BotFormationType::SPREAD:
+                ChatHandler(player->GetSession()).PSendSysMessage("【随从调度】阵型切换：【极限分散阵】（双层交错，防点名范围伤害）。");
+                break;
+        }
     }
 }
 
