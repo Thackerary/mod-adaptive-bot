@@ -78,52 +78,56 @@ GUILDS = [
     {
         "id": 1, "name": "探险者协会", "subname": "铁炉堡探险者协会", "faction_side": "ALLIANCE",
         "hubs": ["Ironforge", "TheStormPeaks", "BoreanTundra_Alliance", "HowlingFjord_Alliance"],
-        "preferred_specs": [1, 2, 17, 18, 19, 23, 24, 25]  # 战、猎、法
+        "preferred_specs": [1, 2, 18, 19, 25]  #  防御战士、武器战士、生存猎人、射击猎人、冰霜法师,物理/远程突击,残缺：无专职治疗。     勘探队抗揍且输出暴力，但下本必须外聘治疗。
     },
     {
         "id": 2, "name": "军情七处", "subname": "暴风城军情七处", "faction_side": "ALLIANCE",
         "hubs": ["Stormwind", "Redridge", "Duskwood", "GrizzlyHills_Alliance"],
-        "preferred_specs": [14, 15, 16, 17, 18, 19, 28]  # 潜行者、射手、暗牧
+        "preferred_specs": [14, 15, 16, 18, 28]  #  刺杀潜行者、战斗潜行者、敏锐潜行者、射击猎人、暗影牧师,暗影/潜行斩首,残缺：无坦克、无持续群体治疗。 纯单体爆发与潜行绞肉机，极度脆皮。
     },
     {
         "id": 3, "name": "银色盟约", "subname": "达拉然银色盟约", "faction_side": "ALLIANCE",
         "hubs": ["Dalaran_SilverCovenant", "CrystalsongForest", "Icecrown_Tournament"],
-        "preferred_specs": [4, 5, 6, 23, 24, 25, 26, 27]  # 骑、法、牧
+        "preferred_specs": [5, 6, 18, 23, 24]  # 神圣圣骑士、惩戒圣骑士、射击猎人、奥术法师、火焰法师,高阶法术/神圣支援,残缺：无硬坦（仅有惩戒/神圣骑）。 法系AOE天花板，但前排抗击打能力较弱。
     },
     {
         "id": 4, "name": "战歌远征队", "subname": "战歌远征突击队", "faction_side": "HORDE",
         "hubs": ["Orgrimmar", "WarsongHold", "GrizzlyHills_Horde", "Barrens_Crossroads"],
-        "preferred_specs": [1, 2, 3, 20, 21, 22, 17, 18]  # 战、萨、猎
+        "preferred_specs": [1, 2, 3, 17, 21]  # 防御战士、狂暴战士、武器战士、兽王猎人、增强萨满,部落蛮荒近战,残缺：无专职治疗、无远程纯法师。 物理菜刀队巅峰，但面对法术AOE Boss时缺乏回复。
+
     },
     {
         "id": 5, "name": "夺日者", "subname": "夺日者议会", "faction_side": "HORDE",
         "hubs": ["Silvermoon", "Dalaran_Sunreavers", "Icecrown_Tournament"],
-        "preferred_specs": [4, 5, 6, 23, 24, 25, 29, 30, 31]  # 骑、法、术
+        "preferred_specs": [4, 5, 24, 25, 31]  # 防护圣骑士、神圣圣骑士、火焰法师、冰霜法师、毁灭术士,辛多雷魔能轰炸,残缺：无物理物理近战/盗贼/猎人。 完美的法系阵地战组合，但惧怕物理切入和打断。
+
     },
     {
         "id": 6, "name": "死亡猎手", "subname": "幽暗城死亡猎手狂怒社", "faction_side": "HORDE",
         "hubs": ["Undercity", "TarrenMill", "HowlingFjord_Horde", "Dragonblight_Venomspite"],
-        "preferred_specs": [7, 8, 9, 14, 15, 16, 28, 29, 30, 31]  # 死骑、刺客、暗术
+        "preferred_specs": [7, 8, 14, 28, 29]  # 鲜血死亡骑士、冰霜死亡骑士、刺杀潜行者、痛苦术士、暗影牧师,死疽与暗影腐蚀,残缺：无传统治疗（靠血DK和暗牧吸血维持）。 极强的生存续航与单体毒药压制，但缺少爆发群伤。
+
     },
     {
         "id": 7, "name": "银色北伐军", "subname": "银色北伐军先锋营", "faction_side": "NEUTRAL",
         "hubs": ["LightsHopeChapel", "Icecrown_Vanguard", "Icecrown_Tournament", "ZulDrak_Crusade"],
-        "preferred_specs": [4, 5, 6, 7, 8, 9, 26, 27]  # 骑士、死骑、牧师
+        "preferred_specs": [1, 4, 5, 27, 9]  # 防护圣骑士、神圣圣骑士、神圣牧师、防护战士、邪恶死亡骑士,圣光铁壁防线,残缺：无远程法系爆发（无法师/术士）。 全服最硬的坦克与治疗集群，但推进速度较慢。
+
     },
     {
         "id": 8, "name": "下水道黑市", "subname": "达拉然下水道黑市行会", "faction_side": "NEUTRAL",
         "hubs": ["Dalaran_Underbelly", "Gadgetzan", "BootyBay", "Ratchet"],
-        "preferred_specs": [14, 15, 16, 29, 30, 31, 3, 8]  # 刺客、术士、亡命徒
+        "preferred_specs": [15, 16, 20, 30, 31]  # 战斗潜行者、敏锐潜行者、恶魔学识术士、毁灭术士、元素萨满,黑市违约绞肉机,残缺：无主坦、无圣职治疗。 纯高风险高回报的 DPS 组合，靠召唤恶魔和元素硬撑。
     },
     {
         "id": 9, "name": "塞纳里奥议会", "subname": "塞纳里奥远征队", "faction_side": "NEUTRAL",
         "hubs": ["Moonglade", "CenarionHold", "CenarionRefuge", "BoreanTundra_Cenarion"],
-        "preferred_specs": [10, 11, 12, 13, 20, 21, 22, 19]  # 德鲁伊、萨满、生存猎
+        "preferred_specs": [10, 11, 12, 13, 22]  # 守护德鲁伊、野性德鲁伊、平衡德鲁伊、恢复德鲁伊、恢复萨满,自然生态循环,残缺：无重甲战士与潜行物理爆发。 拥有全游戏最强的自给自足能力（熊T+猫DPS+奶德/奶萨），但泛用性受限。
     },
     {
         "id": 10, "name": "热砂财阀", "subname": "热砂财阀雇佣行", "faction_side": "NEUTRAL",
         "hubs": ["BootyBay", "Gadgetzan", "Ratchet", "Everlook", "Area52"],
-        "preferred_specs": list(range(1, 32))  # 全能商业雇佣
+        "preferred_specs": list(range(1, 32))  # 全能商业雇佣,万能商业外包代价：雇佣费率常驻 1.0x~1.2x，无同会折扣。 作为全能补位池，专门用来填补玩家阵容中缺少的最后一个职业。
     }
 ]
 
