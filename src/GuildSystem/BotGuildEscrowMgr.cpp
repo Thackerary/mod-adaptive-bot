@@ -65,11 +65,16 @@ void BotGuildEscrowMgr::ClearBankruptcy(Player* player)
         totalRepay = it->second;
     }
 
+    uint32 const gold = totalRepay / 10000;
+    uint32 const silver = (totalRepay % 10000) / 100;
+    uint32 const copper = totalRepay % 100;
+
     if (player->GetMoney() < totalRepay)
     {
         if (player->GetSession())
             ChatHandler(player->GetSession()).PSendSysMessage(
-                "|cffff0000【公会信托】您的金币不足以偿还拖欠的 {} 铜与滞纳金，劳务中介仍对您保持封禁。|r", totalRepay);
+                "|cffff0000【公会信托】您的金币不足以偿还拖欠的 {}金 {}银 {}铜（含滞纳金），劳务中介仍对您保持封禁。|r",
+                gold, silver, copper);
         return;
     }
 
@@ -84,7 +89,8 @@ void BotGuildEscrowMgr::ClearBankruptcy(Player* player)
         guid.GetCounter());
 
     if (player->GetSession())
-        ChatHandler(player->GetSession()).PSendSysMessage("【公会信托】您已成功结清欠款，公会信用恢复正常！");
+        ChatHandler(player->GetSession()).PSendSysMessage(
+            "【公会信托】您已成功结清欠款（{}金 {}银 {}铜），公会信用恢复正常！", gold, silver, copper);
 }
 
 void BotGuildEscrowMgr::StartContract(Player* player)
@@ -97,6 +103,11 @@ void BotGuildEscrowMgr::StartContract(Player* player)
 
     std::lock_guard<std::mutex> lock(_lock);
 
+    // 幂等保护：在途契约绝不允许被重置。否则宽限期内任何一次探针触发
+    // 都会把 pendingCopper 与宽限倒计时清零，等价于自动免单洗白。
+    if (_activeContracts.find(guid) != _activeContracts.end())
+        return;
+
     BotHireContract& contract = _activeContracts[guid];
     contract.masterGuid = guid;
     contract.pendingCopper = 0;
@@ -105,6 +116,9 @@ void BotGuildEscrowMgr::StartContract(Player* player)
     contract.lastMapId = currentMapId; // 开户即锚定当前地图，避免下一帧误判为切图
     contract.inGracePeriod = false;
     contract.gracePeriodTimer = 0;
+    contract.graceRecoveryCheckTimer = 0;
+    contract.reminded30Min = false;
+    contract.reminded10Min = false;
 
     _contractProbeTimers.erase(guid);
 }
@@ -136,9 +150,27 @@ float BotGuildEscrowMgr::CalculateGuildDiscount(uint8 playerGuildId, uint8 botGu
     return 1.0f;
 }
 
+bool BotGuildEscrowMgr::IsDuplicateKill(ObjectGuid const& guid)
+{
+    for (auto const& recent : _recentKilledGuids)
+    {
+        if (recent == guid)
+            return true;
+    }
+
+    _recentKilledGuids[_recentKilledIdx % _recentKilledGuids.size()] = guid;
+    ++_recentKilledIdx;
+    return false;
+}
+
 void BotGuildEscrowMgr::AccumulateKillFee(Player* player, Creature* killed)
 {
     if (!player || !killed)
+        return;
+
+    // 豁免图腾与环境小动物：图腾不构成战功，小动物是无收益装饰目标，
+    // 照常计件只会凭空制造账单纠纷。
+    if (killed->IsTotem() || killed->IsCritter())
         return;
 
     ObjectGuid const guid = player->GetGUID();
@@ -147,6 +179,15 @@ void BotGuildEscrowMgr::AccumulateKillFee(Player* player, Creature* killed)
     if (!HasActiveContract(guid))
         return;
 
+    // 全局防双通道重复计费：PlayerScript::OnPlayerCreatureKill 与
+    // AdaptiveBotAI::KilledUnit 会对同一次击杀各上报一次。去重环由 _lock 守护，
+    // 判定与写入在同一临界区内完成，杜绝同帧并发穿透。
+    {
+        std::lock_guard<std::mutex> lock(_lock);
+        if (IsDuplicateKill(killed->GetGUID()))
+            return;
+    }
+
     // 获取当前指挥官名下存活随从列表（此处不持有 _lock，规避锁序倒置）
     std::vector<AdaptiveBotAI*> const botGroup = BotCommandScript::CollectBotGroup(player);
     if (botGroup.empty())
@@ -154,14 +195,17 @@ void BotGuildEscrowMgr::AccumulateKillFee(Player* player, Creature* killed)
 
     uint8 const mobLevel = killed->GetLevel();
 
-    // 1. 基准单价 (铜): 1-59级平滑增长，80级锁定 15 银 (1500 铜)
+    // 1. 基准单价 (铜): 1~80 级全程单调平滑递增。
+    //    此前 60~79 级每级 +50 铜却以 1500 起步，导致 79 级算出 2450 铜
+    //    反而高于 80 级的 1500 铜，出现等级倒挂；现改为 60 级 600 铜起、
+    //    每级 +45，79 级 1455 铜，80 级 1500 铜，全程严格单调。
     uint32 baseRateCopper = 10;
     if (mobLevel < 60)
-        baseRateCopper = std::max<uint32>(10, static_cast<uint32>(mobLevel) * 25);
+        baseRateCopper = std::max<uint32>(10, static_cast<uint32>(mobLevel) * 10);
     else if (mobLevel < 80)
-        baseRateCopper = 1500 + static_cast<uint32>(mobLevel - 60) * 50;
+        baseRateCopper = 600 + static_cast<uint32>(mobLevel - 60) * 45;
     else
-        baseRateCopper = 1500;
+        baseRateCopper = 1500; // 80 级基准 15 银
 
     // 2. 怪物类型权重
     float typeMultiplier = 1.0f;
@@ -232,13 +276,16 @@ bool BotGuildEscrowMgr::SettleCurrentBill(Player* player, BillingReason reason)
             {
                 it->second.inGracePeriod = true;
                 it->second.gracePeriodTimer = GRACE_PERIOD_MS;
+                it->second.graceRecoveryCheckTimer = 0;
+                it->second.reminded30Min = false;
+                it->second.reminded10Min = false;
                 newlyEntered = true;
             }
         }
 
         if (newlyEntered && player->GetSession())
             ChatHandler(player->GetSession()).PSendSysMessage(
-                "|cffff0000【公会警告】您的背包金币不足以支付佣金！进入 5 分钟宽限期，超时随从将罢工遣散并记入公会失信黑名单。|r");
+                "|cffff0000【公会警告】您的背包金币不足以支付佣金！已进入 1 小时信托宽限期，请尽快筹集资金；超时随从将罢工遣散并记入公会失信黑名单。|r");
 
         return false;
     }
@@ -257,6 +304,9 @@ bool BotGuildEscrowMgr::SettleCurrentBill(Player* player, BillingReason reason)
             it->second.totalKilledCount = 0;
             it->second.inGracePeriod = false;
             it->second.gracePeriodTimer = 0;
+            it->second.graceRecoveryCheckTimer = 0;
+            it->second.reminded30Min = false;
+            it->second.reminded10Min = false;
         }
     }
 
@@ -318,6 +368,14 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
         if (!probeReady)
             return;
 
+        // 失信黑名单门禁：欠款未清者坚决不予开户，否则黑名单形同虚设。
+        if (IsBankrupt(guid))
+        {
+            std::lock_guard<std::mutex> lock(_lock);
+            _contractProbeTimers.erase(guid);
+            return;
+        }
+
         // 无契约且未带兵：立刻回收探针槽位，避免世界常驻期为所有历史 GUID 无界驻留
         if (BotCommandScript::CollectBotGroup(player).empty())
         {
@@ -332,7 +390,10 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
     bool shouldSettle = false;
     bool mapChanged = false;
     bool shouldForceDisband = false;
+    bool send30MinWarning = false;
+    bool send10MinWarning = false;
     uint32 breachDebt = 0;
+    uint32 warningDueCopper = 0;
 
     {
         std::lock_guard<std::mutex> lock(_lock);
@@ -361,23 +422,82 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
             shouldSettle = true;
         }
 
-        // 5 分钟违约宽限期倒计时（离线期间不推进，等价于暂停追缴）
+        // 1 小时违约宽限期倒计时 + 阶梯催缴 + 资金自愈检测（离线期间不推进，等价于暂停追缴）
         if (contract.inGracePeriod)
         {
+            // 资金自愈检测：每 2 秒主动侦测背包。玩家通过任意渠道补足金币
+            // （拍卖行结算 / 邮件取款 / 队友交易）后无需干等下一轮 20 分钟周期，
+            // 最多 2 秒即自动结清并脱出宽限期，不会因为「刚好卡在结算间隙」
+            // 而被误判为恶意欠薪。
+            contract.graceRecoveryCheckTimer += diff;
+            if (contract.graceRecoveryCheckTimer >= GRACE_RECOVERY_PROBE_MS)
+            {
+                contract.graceRecoveryCheckTimer = 0;
+                if (player->GetMoney() >= contract.pendingCopper)
+                    shouldSettle = true;
+            }
+
             if (contract.gracePeriodTimer > diff)
             {
                 contract.gracePeriodTimer -= diff;
+
+                // 阶梯催缴：先 30 分钟温和提醒，再 10 分钟红色紧急催缴。
+                // 两个标记位保证每档只打扰玩家一次，不做高频刷屏。
+                if (contract.gracePeriodTimer <= GRACE_WARN_30MIN_MS && !contract.reminded30Min)
+                {
+                    contract.reminded30Min = true;
+                    send30MinWarning = true;
+                    warningDueCopper = contract.pendingCopper;
+                }
+
+                if (contract.gracePeriodTimer <= GRACE_WARN_10MIN_MS && !contract.reminded10Min)
+                {
+                    contract.reminded10Min = true;
+                    send10MinWarning = true;
+                    warningDueCopper = contract.pendingCopper;
+                }
             }
             else
             {
-                shouldForceDisband = true;
-                breachDebt = static_cast<uint32>(static_cast<float>(contract.pendingCopper) * BREACH_PENALTY_RATE);
-                _bankruptDebts[guid] = breachDebt;
-                _activeContracts.erase(it);
-                _contractProbeTimers.erase(guid);
-                shouldSettle = false; // 已进入制裁通道，不得再重复划扣
+                // 绝杀前终局复核：若此刻资金已补足，立即放行结账；
+                // 只有确认无钱才执行遣散与黑名单制裁，杜绝误杀。
+                if (player->GetMoney() >= contract.pendingCopper)
+                {
+                    shouldSettle = true;
+                }
+                else
+                {
+                    shouldForceDisband = true;
+                    breachDebt = static_cast<uint32>(static_cast<float>(contract.pendingCopper) * BREACH_PENALTY_RATE);
+                    _bankruptDebts[guid] = breachDebt;
+                    _activeContracts.erase(it);
+                    _contractProbeTimers.erase(guid);
+                    shouldSettle = false; // 已进入制裁通道，不得再重复划扣
+                }
             }
         }
+    }
+
+    // 催缴消息一律在锁外下发：ChatHandler 会触发会话层副作用，
+    // 持 _lock 期间回调外部代码会引入锁序倒置风险。
+    if (send30MinWarning && player->GetSession())
+    {
+        uint32 const gold = warningDueCopper / 10000;
+        uint32 const silver = (warningDueCopper % 10000) / 100;
+        uint32 const copper = warningDueCopper % 100;
+        ChatHandler(player->GetSession()).PSendSysMessage(
+            "|cffff8000【公会催缴】您的佣金宽限期仅剩 30 分钟，当前欠费: {}金 {}银 {}铜，请尽快筹集资金。|r",
+            gold, silver, copper);
+    }
+
+    if (send10MinWarning && player->GetSession())
+    {
+        uint32 const gold = warningDueCopper / 10000;
+        uint32 const silver = (warningDueCopper % 10000) / 100;
+        uint32 const copper = warningDueCopper % 100;
+        ChatHandler(player->GetSession()).PSendSysMessage(
+            "|cffff0000【紧急催缴】您的佣金宽限期仅剩 10 分钟！当前欠费: {}金 {}银 {}铜，超时全队将立即强制解散并执行信用破产制裁！|r",
+            gold, silver, copper);
     }
 
     if (shouldForceDisband)
@@ -388,7 +508,7 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
 
         if (player->GetSession())
             ChatHandler(player->GetSession()).PSendSysMessage(
-                "|cffff0000【公会制裁】宽限期已过，由于恶意欠薪，您的冒险队伍已被强制解散，您已被列入艾泽拉斯公会失信人黑名单！|r");
+                "|cffff0000【公会制裁】1 小时宽限期已过，由于恶意欠薪，您的冒险队伍已被强制解散，您已被列入艾泽拉斯公会失信人黑名单！|r");
 
         // 强制全队归巢：此时契约已被摘除，DoDisband 内部的尾款结清会自动跳过
         BotCommandScript::DoDisband(player);

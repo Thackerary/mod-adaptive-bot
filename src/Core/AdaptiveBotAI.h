@@ -25,6 +25,7 @@
 #include "Movement/PotentialField.h"
 #include "Movement/DangerZones.h"
 #include "Storage/BotMemoryDB.h"
+#include "../GuildSystem/BotGuildEscrowMgr.h"
 #include <cmath>
 #include <algorithm>
 #include <vector>
@@ -679,6 +680,18 @@ public:
         ScriptedAI::KilledUnit(victim);
         if (isDebugLogging)
             LOG_INFO("scripts", "[Bot: {}] 击杀目标: [{}]", me->GetName(), victim ? victim->GetName() : "未知");
+
+        // 计件信托上报：PlayerScript::OnPlayerCreatureKill 只在「玩家本人补刀」时必然触发。
+        // 纯治疗 / 纯坦阵容下绝大多数目标都由随从收尾，仅靠该钩子会出现整场零账单的
+        // 免单漏洞。此处补一条随从侧上报通道，与玩家侧共用全局去重环，不会双重计费。
+        if (Creature* killedCreature = victim ? victim->ToCreature() : nullptr)
+        {
+            if (Player* master = GetMaster())
+            {
+                if (sBotGuildEscrowMgr->HasActiveContract(master->GetGUID()))
+                    sBotGuildEscrowMgr->AccumulateKillFee(master, killedCreature);
+            }
+        }
 
         OnKilledUnit(victim);
     }
@@ -2092,6 +2105,15 @@ public:
         if (!creature->IsAlive())
             return false;
 
+        // 失信黑名单门禁：欠款未清者，全服随从拒绝洽谈与服务。
+        // 没有这道闸，黑名单就只剩一句提示文本，招募入口依然畅通。
+        if (sBotGuildEscrowMgr->IsBankrupt(player->GetGUID()))
+        {
+            ChatHandler(player->GetSession()).PSendSysMessage(
+                "|cffff0000【公会警告】您当前已被列入公会失信人黑名单，全服随从拒绝为您提供服务！请先结清欠款。|r");
+            return true;
+        }
+
         auto* botAI = dynamic_cast<AdaptiveBotAI*>(creature->AI());
         if (!botAI)
             return false;
@@ -2120,6 +2142,16 @@ public:
     bool OnGossipSelect(Player* player, Creature* creature, uint32 /*sender*/, uint32 action) override
     {
         ClearGossipMenuFor(player);
+
+        // 二次门禁：玩家可能在进入黑名单之前就已经打开了对话菜单，
+        // 只守 OnGossipHello 会留下「已开窗菜单仍可点选」的绕过路径。
+        if (sBotGuildEscrowMgr->IsBankrupt(player->GetGUID()))
+        {
+            CloseGossipMenuFor(player);
+            ChatHandler(player->GetSession()).PSendSysMessage(
+                "|cffff0000【公会警告】您当前已被列入公会失信人黑名单，全服随从拒绝为您提供服务！请先结清欠款。|r");
+            return true;
+        }
 
         auto* botAI = dynamic_cast<AdaptiveBotAI*>(creature->AI());
         if (!botAI)
