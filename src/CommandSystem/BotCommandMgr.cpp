@@ -329,5 +329,5 @@ void BotCommandScript::DoFormation(Player* player, BotFormationType formation)
 
 void AddSC_BotCommandMgr()
 {
-    new BotCommandMgrPlayerScript();
+    new BotCommandScript();
 }
