@@ -229,6 +229,13 @@ uint8 BotGuildEscrowMgr::GetBotGuildIdFromEntry(uint32 entry)
 
 bool BotGuildEscrowMgr::IsPlayerClassAffiliated(uint8 guildId, uint8 playerClass)
 {
+    // 防御下溢：魔兽 3.3.5a 职业 ID 范围为 1 (战士) ~ 11 (德鲁伊)。
+    // 若传入 0，GUILD_CLASS_MASK 宏内的 (cls - 1) 会以无符号整数下溢成
+    // 0xFFFFFFFF，移位量随即溢出位宽，属未定义行为；大于 11 的非法 ID
+    // 同样应直接拒绝，而非信任调用方自行保证入参合法性。
+    if (playerClass == 0 || playerClass > 11)
+        return false;
+
     GuildPetConfig const* cfg = GetGuildConfig(guildId);
     if (!cfg)
         return false;
@@ -850,20 +857,22 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
     // 契约注销分散在手动解散 / 退会 / 登出 / 制裁等多条路径，这些路径的注销点
     // 不在本函数内，回收分支根本不会执行；若不设此兜底出口，契约一注销便再无
     // 任何帧能进入契约驱动逻辑，随从贡献的外会战术光环将永久残留。
-    // 空集快路径刻意不取锁：写入方（RemoveContract）同样运行于世界主线程，
-    // 只有真正存在待收尾标记时才进入临界区摘除并执行差量同步。
+    //
+    // 加锁范围必须完整覆盖 .empty() 判空：容器判空同样是一次读取，与写入方
+    // RemoveContract 的 insert 并发时构成数据竞争。虽然多数部署下两者都落在
+    // 世界主线程，但多线程地图更新（Multi-Threaded Map Updates）模式下不同
+    // 地图线程可能并发进入，故不再保留任何形式的锁外判空快路径。
+    // 判空与摘除合并为单次临界区内的原子读改，避免"判完即变"的 TOCTOU 窗口。
     // -------------------------------------------------------------------------
-    if (!_pendingAuraCleanup.empty())
+    bool needAuraCleanup = false;
     {
-        bool needAuraCleanup = false;
-        {
-            std::lock_guard<std::mutex> lock(_lock);
+        std::lock_guard<std::mutex> lock(_lock);
+        if (!_pendingAuraCleanup.empty())
             needAuraCleanup = (_pendingAuraCleanup.erase(guid) != 0);
-        }
-
-        if (needAuraCleanup)
-            UpdateTeamGuildAuras(player);
     }
+
+    if (needAuraCleanup)
+        UpdateTeamGuildAuras(player);
 
     // -------------------------------------------------------------------------
     // 契约自愈探针：招募入口不在本模块职责内，故由世界经济体自适应补建账户。
