@@ -120,6 +120,9 @@ public:
     static GuildPetConfig const* GetGuildConfig(uint8 guildId);
     static GuildPetConfig const* GetGuildConfigByCreature(uint32 creatureEntry);
 
+    // 随从原生公会反解：由 Phase 1 模版 Entry 公式逆向推导真实会籍
+    static uint8 GetBotGuildIdFromEntry(uint32 entry);
+
     static BotGuildEscrowMgr* Instance();
 
     // 内存契约生命周期

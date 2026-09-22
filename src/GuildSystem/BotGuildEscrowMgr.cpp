@@ -206,6 +206,19 @@ GuildPetConfig const* BotGuildEscrowMgr::GetGuildConfigByCreature(uint32 creatur
     return nullptr;
 }
 
+uint8 BotGuildEscrowMgr::GetBotGuildIdFromEntry(uint32 entry)
+{
+    // Phase 1 模版 Entry 公式：71000 + gid * 31 + spec_id (gid: 1~10, spec_id: 1~31)
+    // Entry 范围为 71032 ~ 71341
+    if (entry >= 71032 && entry <= 71341)
+    {
+        uint32 const gid = (entry - 71001) / 31;
+        if (gid >= 1 && gid <= 10)
+            return static_cast<uint8>(gid);
+    }
+    return GUILD_NONE;
+}
+
 uint8 BotGuildEscrowMgr::GetPlayerGuildId(ObjectGuid const& playerGuid)
 {
     std::lock_guard<std::mutex> lock(_lock);
@@ -543,12 +556,13 @@ void BotGuildEscrowMgr::AccumulateKillFee(Player* player, Creature* killed)
     else if (killed->isElite() || isRaidMap)
         typeMultiplier = 3.0f;  // 精英怪及团本普通杂兵: 3x (~45S)
 
-    // 3. 累加随从全员佣金 (按各自会籍计算折扣)
-    //    阶段四落地：玩家会籍由公会前台正式登记（GetPlayerGuildId 实时查询）。
-    //    随从由该公会派出，故其会籍天然等同于指挥官会籍；若此处仍把 botGuildId
-    //    写成 GUILD_NONE，则 CalculateGuildDiscount 的首个分支（双方会籍非空且
-    //    相等）恒为假，7.5 折内部津贴将永远不会生效，退会文案也会与事实不符。
-    //    散人（GUILD_NONE）因首个分支的"非空"前置条件不成立，仍按原价结算。
+    // 3. 累加随从全员佣金 (按各自真实原生会籍与阵营立场阶梯计价)
+    //    阶段四落地：玩家会籍由公会前台正式登记（GetPlayerGuildId 实时查询），
+    //    随从会籍则必须由实体 Entry 反解原生归属，而绝不能沿用指挥官会籍——
+    //    否则任意公会都会退化为「自己雇自己」，0.75x 内部津贴变成永久常驻，
+    //    不同公会/跨阵营的阶梯定价彻底失去意义。
+    //    阵营判定同理：随从入队时 SetMaster 已把阵营刷为玩家阵营，
+    //    运行时 GetFaction() 比对恒为同阵营，只能改看模版上的原生阵营属性。
     uint8 const playerGuildId = GetPlayerGuildId(guid);
     uint32 totalMobFee = 0;
 
@@ -557,8 +571,21 @@ void BotGuildEscrowMgr::AccumulateKillFee(Player* player, Creature* killed)
         if (!bot || !bot->GetBotCreature() || !bot->GetBotCreature()->IsAlive())
             continue;
 
-        uint8 const botGuildId = playerGuildId;
-        bool const isCrossFaction = (bot->GetBotCreature()->GetFaction() != player->GetFaction());
+        // 1. 真实反解随从原生的公会会籍
+        uint32 const botEntry = bot->GetBotCreature()->GetEntry();
+        uint8 const botGuildId = GetBotGuildIdFromEntry(botEntry);
+
+        // 2. 真实反解随从原生阵营立场（规避 SetMaster 带来的同阵营污染）
+        bool isCrossFaction = false;
+        if (GuildPetConfig const* botGuildCfg = GetGuildConfig(botGuildId))
+        {
+            if (player->GetTeamId() == TEAM_ALLIANCE && botGuildCfg->isHordeOnly)
+                isCrossFaction = true;
+            else if (player->GetTeamId() == TEAM_HORDE && botGuildCfg->isAllianceOnly)
+                isCrossFaction = true;
+        }
+
+        // 3. 计算阶梯折扣：同公会 0.75x，跨阵营 1.20x，常规 1.00x
         float const discount = CalculateGuildDiscount(playerGuildId, botGuildId, isCrossFaction);
 
         totalMobFee += static_cast<uint32>(static_cast<float>(baseRateCopper) * typeMultiplier * discount);
