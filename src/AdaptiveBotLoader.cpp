@@ -46,6 +46,10 @@ void AddSC_BotCommandMgr();
 // Phase 3 计件账单与信托结算核心（动态计件 / 双轨结算 / 信用黑名单）
 void AddSC_BotGuildEscrowMgr();
 
+// Phase 4 公会前台接待员与随身公会使魔交互终端（入会 / 退会 / 远程号令 / 每日补给）
+void AddSC_BotGuildReceptionist();
+void AddSC_BotGuildPetScript();
+
 // 模块总入口：函数名必须严格匹配 "Add" + 模块目录名(连字符变下划线) + "Scripts"
 void Addmod_adaptive_botScripts()
 {
@@ -83,4 +87,6 @@ void Addmod_adaptive_botScripts()
     AddSC_bot_guardian();
     AddSC_BotCommandMgr();
     AddSC_BotGuildEscrowMgr();
+    AddSC_BotGuildReceptionist();
+    AddSC_BotGuildPetScript();
 }

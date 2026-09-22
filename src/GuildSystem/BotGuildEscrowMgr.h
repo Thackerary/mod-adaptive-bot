@@ -40,6 +40,18 @@ enum BillingReason : uint8
     BILLING_REASON_MANUAL       // 玩家手动结算
 };
 
+// 公会使魔配置条目：itemId / spellId / creatureEntry 三元组取自 3.3.5a 真实数据链
+struct GuildPetConfig
+{
+    uint8  guildId;        // 公会 ID (AdventureGuildType)
+    uint32 itemId;         // 背包实物道具 ID (item_template)
+    uint32 spellId;        // 伴侣召唤法术 ID (Spell.dbc / 法术书)
+    uint32 creatureEntry;  // 使魔实体 Entry (creature_template)
+    char const* name;      // 公会全称（界面与提示文案）
+    bool isAllianceOnly;   // 是否仅招募联盟
+    bool isHordeOnly;      // 是否仅招募部落
+};
+
 // 单指挥官的内存实时契约记账单
 struct BotHireContract
 {
@@ -87,6 +99,25 @@ public:
     static constexpr uint32 GRACE_WARN_30MIN_MS          = 30 * 60 * 1000; // 30 分钟催缴预警阶梯
     static constexpr uint32 GRACE_WARN_10MIN_MS          = 10 * 60 * 1000; // 10 分钟紧急催缴阶梯
     static constexpr float  BREACH_PENALTY_RATE          = 1.15f;          // 违约滞纳金 15%
+    static constexpr uint64 DAILY_SUPPLY_COOLDOWN_SECONDS = 20 * 60 * 60;  // 每日补给冷却 (20 小时宽限)
+
+    /// @brief 十大冒险者公会专属使魔配置表（guildId 与枚举一一对应）。
+    static constexpr std::array<GuildPetConfig, 10> GUILD_CONFIGS =
+    {{
+        { GUILD_EXPLORERS_LEAGUE,     7560,  8496,  2671,  "铁炉堡探险者协会",     true,  false },
+        { GUILD_SI7_MERCENARIES,      8491,  10674, 7384,  "暴风城军情七处",       true,  false },
+        { GUILD_SILVER_COVENANT,      8485,  10673, 7385,  "达拉然银色盟约",       true,  false },
+        { GUILD_WARSONG_OFFENSIVE,    10393, 12643, 7390,  "战歌远征突击队",       false, true  },
+        { GUILD_SUNREAVERS,           27445, 33050, 18839, "夺日者议会",           false, true  },
+        { GUILD_DEATHSTALKERS,        10392, 12642, 7387,  "幽暗城死亡猎手狂怒社", false, true  },
+        { GUILD_ARGENT_CRUSADE,       44982, 63317, 33238, "银色北伐军先锋营",     false, false },
+        { GUILD_UNDERBELLY_SYNDICATE, 43698, 59250, 31575, "达拉然下水道黑市行会", false, false },
+        { GUILD_CENARION_EXPEDITION,  44794, 61773, 32791, "塞纳里奥议会/远征队",  false, false },
+        { GUILD_STEAMWHEEDLE_CARTEL,  11026, 13548, 7394,  "热砂财阀雇佣行",       false, false }
+    }};
+
+    static GuildPetConfig const* GetGuildConfig(uint8 guildId);
+    static GuildPetConfig const* GetGuildConfigByCreature(uint32 creatureEntry);
 
     static BotGuildEscrowMgr* Instance();
 
@@ -106,6 +137,20 @@ public:
     void LoadBankruptcyFromDB();
     void PersistUnpaidDebtOnLogout(Player* player); // 离线欠费防蒸发落盘
 
+    // 会籍管理（公会前台）
+    uint8 GetPlayerGuildId(ObjectGuid const& playerGuid);
+    bool SetPlayerGuild(Player* player, uint8 guildId);
+    bool LeavePlayerGuild(Player* player); // 退会：前置清算 + 彻底销毁使魔
+    void LoadGuildMembershipsFromDB();
+
+    // 每日行军补给
+    bool CanClaimDailySupply(ObjectGuid const& playerGuid);
+    void RecordDailySupplyClaim(ObjectGuid const& playerGuid);
+
+    // 契约只读快照（供随身使魔终端展示待结佣金与宽限倒计时）
+    bool GetContractSnapshot(ObjectGuid const& playerGuid, uint32& pendingCopper, uint32& killedCount,
+                             bool& inGracePeriod, uint32& graceRemainingMs);
+
     // 费率折扣计算
     static float CalculateGuildDiscount(uint8 playerGuildId, uint8 botGuildId, bool isCrossFaction);
 
@@ -117,6 +162,9 @@ private:
     std::unordered_map<ObjectGuid, BotHireContract> _activeContracts;
     std::unordered_map<ObjectGuid, uint32> _contractProbeTimers; // 开户探针节流器
     std::unordered_map<ObjectGuid, uint32> _bankruptDebts;       // GUID -> 欠款金额(铜)
+
+    std::unordered_map<ObjectGuid, uint8>  _guildMemberships;    // GUID -> 所属公会 ID
+    std::unordered_map<ObjectGuid, uint64> _lastSupplyClaimTime; // GUID -> 上次领取补给时间戳
 };
 
 #define sBotGuildEscrowMgr BotGuildEscrowMgr::Instance()

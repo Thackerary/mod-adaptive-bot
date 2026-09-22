@@ -182,6 +182,208 @@ float BotGuildEscrowMgr::CalculateGuildDiscount(uint8 playerGuildId, uint8 botGu
     return 1.0f;
 }
 
+GuildPetConfig const* BotGuildEscrowMgr::GetGuildConfig(uint8 guildId)
+{
+    for (auto const& cfg : GUILD_CONFIGS)
+    {
+        if (cfg.guildId == guildId)
+            return &cfg;
+    }
+    return nullptr;
+}
+
+GuildPetConfig const* BotGuildEscrowMgr::GetGuildConfigByCreature(uint32 creatureEntry)
+{
+    for (auto const& cfg : GUILD_CONFIGS)
+    {
+        if (cfg.creatureEntry == creatureEntry)
+            return &cfg;
+    }
+    return nullptr;
+}
+
+uint8 BotGuildEscrowMgr::GetPlayerGuildId(ObjectGuid const& playerGuid)
+{
+    std::lock_guard<std::mutex> lock(_lock);
+
+    auto it = _guildMemberships.find(playerGuid);
+    return (it != _guildMemberships.end()) ? it->second : static_cast<uint8>(GUILD_NONE);
+}
+
+bool BotGuildEscrowMgr::SetPlayerGuild(Player* player, uint8 guildId)
+{
+    if (!player)
+        return false;
+
+    GuildPetConfig const* cfg = GetGuildConfig(guildId);
+    if (!cfg)
+        return false;
+
+    // 阵营准入审核：联盟专属公会拒绝部落指挥官，部落专属公会反之。
+    if (cfg->isAllianceOnly && player->GetTeamId() != TEAM_ALLIANCE)
+        return false;
+    if (cfg->isHordeOnly && player->GetTeamId() != TEAM_HORDE)
+        return false;
+
+    ObjectGuid const guid = player->GetGUID();
+
+    {
+        std::lock_guard<std::mutex> lock(_lock);
+
+        // 已有会籍者不得静默覆盖：转投必须显式走退会流程，否则旧公会的
+        // 使魔道具与津贴状态会与新会籍并存，形成双重福利漏洞。
+        if (_guildMemberships.find(guid) != _guildMemberships.end())
+            return false;
+
+        _guildMemberships[guid] = guildId;
+        _lastSupplyClaimTime[guid] = 0;
+    }
+
+    CharacterDatabase.Execute(
+        "REPLACE INTO character_bot_guild_member (guid, guild_id, join_time, last_supply_time) VALUES ({}, {}, {}, 0)",
+        guid.GetCounter(), static_cast<uint32>(guildId), static_cast<uint64>(GameTime::GetGameTime().count()));
+
+    return true;
+}
+
+bool BotGuildEscrowMgr::LeavePlayerGuild(Player* player)
+{
+    if (!player)
+        return false;
+
+    ObjectGuid const guid = player->GetGUID();
+
+    // 门禁 1：名下仍有随从时禁止退会，避免产生无主随从与失联契约。
+    if (AdaptiveBotAI::HasMasterBots(guid))
+    {
+        if (player->GetSession())
+            ChatHandler(player->GetSession()).PSendSysMessage(
+                "|cffff0000【公会前台】您当前仍带领着公会随从，必须先完全解散队伍方可办理退会！|r");
+        return false;
+    }
+
+    // 门禁 2：存在在途佣金时必须当场结清，金币不足则拒绝退会（杜绝"退会逃单"）。
+    if (HasActiveContract(guid))
+    {
+        if (!SettleCurrentBill(player, BILLING_REASON_DISBAND))
+        {
+            if (player->GetSession())
+                ChatHandler(player->GetSession()).PSendSysMessage(
+                    "|cffff0000【公会前台】您当前存在未结清的佣金账单，金币不足无法办理退会！|r");
+            return false;
+        }
+
+        RemoveContract(guid);
+    }
+
+    uint8 currentGuildId = GUILD_NONE;
+    {
+        std::lock_guard<std::mutex> lock(_lock);
+
+        auto it = _guildMemberships.find(guid);
+        if (it == _guildMemberships.end())
+            return false;
+
+        currentGuildId = it->second;
+        _guildMemberships.erase(it);
+        _lastSupplyClaimTime.erase(guid);
+    }
+
+    CharacterDatabase.Execute("DELETE FROM character_bot_guild_member WHERE guid = {}", guid.GetCounter());
+
+    // 使魔彻底回收三连：解除召唤实体、驱散召唤光环、追缴实物道具、注销法术书技能。
+    // 缺任何一环都留下绕过路径——只清实体则光环残留会在重登时自动再召唤；
+    // 只清光环则实物道具仍在背包可无限次使用。
+    if (player->GetMiniPet())
+        player->RemoveMiniPet();
+
+    if (GuildPetConfig const* cfg = GetGuildConfig(currentGuildId))
+    {
+        player->RemoveAurasDueToSpell(cfg->spellId);
+        player->DestroyItemCount(cfg->itemId, 1, true);
+        player->removeSpell(cfg->spellId, SPEC_MASK_ALL, false);
+    }
+
+    if (player->GetSession())
+        ChatHandler(player->GetSession()).PSendSysMessage(
+            "【公会前台】您已成功退出公会。专属通信使魔已被收回注销，7.5 折公会津贴同步失效。");
+
+    return true;
+}
+
+void BotGuildEscrowMgr::LoadGuildMembershipsFromDB()
+{
+    std::unordered_map<ObjectGuid, uint8>  loadedGuilds;
+    std::unordered_map<ObjectGuid, uint64> loadedSupplies;
+
+    QueryResult result = CharacterDatabase.Query("SELECT guid, guild_id, last_supply_time FROM character_bot_guild_member");
+    if (result)
+    {
+        do
+        {
+            Field* fields = result->Fetch();
+            ObjectGuid const guid = ObjectGuid::Create<HighGuid::Player>(fields[0].Get<uint32>());
+            loadedGuilds[guid] = fields[1].Get<uint8>();
+            loadedSupplies[guid] = fields[2].Get<uint64>();
+        } while (result->NextRow());
+    }
+
+    std::lock_guard<std::mutex> lock(_lock);
+    _guildMemberships.swap(loadedGuilds);
+    _lastSupplyClaimTime.swap(loadedSupplies);
+
+    LOG_INFO("server.loading", ">> [AdaptiveBot] 已载入 {} 条冒险者公会会籍记录。", _guildMemberships.size());
+}
+
+bool BotGuildEscrowMgr::CanClaimDailySupply(ObjectGuid const& playerGuid)
+{
+    uint64 const now = static_cast<uint64>(GameTime::GetGameTime().count());
+
+    std::lock_guard<std::mutex> lock(_lock);
+
+    // 非会员不享有公会的行军补给福利。
+    if (_guildMemberships.find(playerGuid) == _guildMemberships.end())
+        return false;
+
+    auto it = _lastSupplyClaimTime.find(playerGuid);
+    if (it == _lastSupplyClaimTime.end() || it->second == 0)
+        return true;
+
+    // 采用 20 小时冷却而非严格 24 小时：玩家若每天固定在相近时段上线，
+    // 严格 24 小时会因日历漂移逐日挤出可领取窗口，最终永久错过一天。
+    // 20 小时既守住"每日仅一次"的节奏，又保留 4 小时的容错余量。
+    return now >= (it->second + DAILY_SUPPLY_COOLDOWN_SECONDS);
+}
+
+void BotGuildEscrowMgr::RecordDailySupplyClaim(ObjectGuid const& playerGuid)
+{
+    uint64 const now = static_cast<uint64>(GameTime::GetGameTime().count());
+
+    {
+        std::lock_guard<std::mutex> lock(_lock);
+        _lastSupplyClaimTime[playerGuid] = now;
+    }
+
+    CharacterDatabase.Execute("UPDATE character_bot_guild_member SET last_supply_time = {} WHERE guid = {}",
+        now, playerGuid.GetCounter());
+}
+
+bool BotGuildEscrowMgr::GetContractSnapshot(ObjectGuid const& playerGuid, uint32& pendingCopper, uint32& killedCount,
+                                            bool& inGracePeriod, uint32& graceRemainingMs)
+{
+    std::lock_guard<std::mutex> lock(_lock);
+
+    auto it = _activeContracts.find(playerGuid);
+    if (it == _activeContracts.end())
+        return false;
+
+    pendingCopper = it->second.pendingCopper;
+    killedCount = it->second.totalKilledCount;
+    inGracePeriod = it->second.inGracePeriod;
+    graceRemainingMs = it->second.gracePeriodTimer;
+    return true;
+}
+
 void BotGuildEscrowMgr::AccumulateKillFee(Player* player, Creature* killed)
 {
     if (!player || !killed)
@@ -243,10 +445,12 @@ void BotGuildEscrowMgr::AccumulateKillFee(Player* player, Creature* killed)
         typeMultiplier = 3.0f;  // 精英怪及团本普通杂兵: 3x (~45S)
 
     // 3. 累加随从全员佣金 (按各自会籍计算折扣)
-    //    TODO(阶段四): 接入玩家真实公会归属与随从会籍；当前双方的 SetMaster()
-    //    会把随从阵营同步为指挥官阵营，故 isCrossFaction 恒为 false，
-    //    折扣系数实际恒为原价，接口形态已就位、不阻塞后续接入。
-    uint8 const playerGuildId = GUILD_NONE;
+    //    阶段四落地：玩家会籍由公会前台正式登记（GetPlayerGuildId 实时查询）。
+    //    随从由该公会派出，故其会籍天然等同于指挥官会籍；若此处仍把 botGuildId
+    //    写成 GUILD_NONE，则 CalculateGuildDiscount 的首个分支（双方会籍非空且
+    //    相等）恒为假，7.5 折内部津贴将永远不会生效，退会文案也会与事实不符。
+    //    散人（GUILD_NONE）因首个分支的"非空"前置条件不成立，仍按原价结算。
+    uint8 const playerGuildId = GetPlayerGuildId(guid);
     uint32 totalMobFee = 0;
 
     for (AdaptiveBotAI* bot : botGroup)
@@ -254,7 +458,7 @@ void BotGuildEscrowMgr::AccumulateKillFee(Player* player, Creature* killed)
         if (!bot || !bot->GetBotCreature() || !bot->GetBotCreature()->IsAlive())
             continue;
 
-        uint8 const botGuildId = GUILD_NONE;
+        uint8 const botGuildId = playerGuildId;
         bool const isCrossFaction = (bot->GetBotCreature()->GetFaction() != player->GetFaction());
         float const discount = CalculateGuildDiscount(playerGuildId, botGuildId, isCrossFaction);
 
@@ -649,6 +853,7 @@ BotGuildEscrowWorldScript::BotGuildEscrowWorldScript() : WorldScript("BotGuildEs
 void BotGuildEscrowWorldScript::OnStartup()
 {
     sBotGuildEscrowMgr->LoadBankruptcyFromDB();
+    sBotGuildEscrowMgr->LoadGuildMembershipsFromDB();
 }
 
 void AddSC_BotGuildEscrowMgr()
