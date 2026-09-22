@@ -11,7 +11,10 @@
 #include "GameTime.h"
 #include "Log.h"
 #include "ObjectAccessor.h"
+#include "ObjectMgr.h"
 #include "Player.h"
+#include "SpellInfo.h"
+#include "SpellMgr.h"
 #include <algorithm>
 #include <vector>
 
@@ -340,6 +343,95 @@ void BotGuildEscrowMgr::LoadGuildMembershipsFromDB()
     _lastSupplyClaimTime.swap(loadedSupplies);
 
     LOG_INFO("server.loading", ">> [AdaptiveBot] 已载入 {} 条冒险者公会会籍记录。", _guildMemberships.size());
+}
+
+namespace
+{
+    /// @brief 对单条法术执行「召唤实体」重定向，并沿触发链向下透传。
+    ///        3.3.5a 伴侣法术普遍是两层结构：外壳法术挂 SPELL_EFFECT_TRIGGER_SPELL，
+    ///        真正的 SPELL_EFFECT_SUMMON（MiscValue = 实体 Entry）挂在内核法术上，
+    ///        只改外壳的 MiscValue 完全无效，故必须沿链下沉；
+    ///        depth 上限用于阻断环形/自触发的畸形法术链。
+    ///        同时严格限定只改「召唤类」效果：伴侣法术上常并存光环、加属性等其它效果，
+    ///        盲改首个 MiscValue > 0 的效果会连带破坏这些逻辑。
+    /// @return 是否至少成功改写了一处召唤目标。
+    bool RedirectSummonChain(SpellInfo const* spellInfo, uint32 creatureEntry, uint8 depth = 0)
+    {
+        if (!spellInfo || depth > 3)
+            return false;
+
+        bool patched = false;
+        std::array<uint32, MAX_SPELL_EFFECTS> triggeredSpells{};
+
+        for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
+        {
+            SpellEffectInfo const& effect = spellInfo->Effects[i];
+
+            if (effect.Effect == SPELL_EFFECT_SUMMON || effect.Effect == SPELL_EFFECT_SUMMON_PET)
+            {
+                if (effect.MiscValue > 0)
+                {
+                    const_cast<SpellEffectInfo&>(effect).MiscValue = static_cast<int32>(creatureEntry);
+                    patched = true;
+                }
+                continue;
+            }
+
+            if (effect.Effect == SPELL_EFFECT_TRIGGER_SPELL && effect.TriggerSpell != 0)
+                triggeredSpells[i] = effect.TriggerSpell;
+        }
+
+        for (uint32 triggerSpellId : triggeredSpells)
+        {
+            if (triggerSpellId != 0)
+                patched |= RedirectSummonChain(sSpellMgr->GetSpellInfo(triggerSpellId), creatureEntry, depth + 1);
+        }
+
+        return patched;
+    }
+}
+
+void BotGuildEscrowMgr::RedirectGuildPetSpells()
+{
+    uint32 redirected = 0;
+
+    for (auto const& cfg : GUILD_CONFIGS)
+    {
+        // 前置安全闸：独立高段模版必须已由 world 库导入。
+        // 若 SQL 尚未执行就把伴侣法术重定向到并不存在的 Entry，召唤会当场失败、
+        // 该公会的通信使魔将彻底无法召出。宁可保留原版召唤物，也绝不打坏玩家功能。
+        if (!sObjectMgr->GetCreatureTemplate(cfg.creatureEntry))
+        {
+            LOG_ERROR("server.loading",
+                ">> [AdaptiveBot] 公会 [{}] 的使魔模版 {} 不存在，已跳过法术重定向（请先执行 data/sql/db_world/base_bot_guild_pets.sql）。",
+                cfg.name, cfg.creatureEntry);
+            continue;
+        }
+
+        SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(cfg.spellId);
+        if (!spellInfo)
+        {
+            LOG_ERROR("server.loading", ">> [AdaptiveBot] 公会 [{}] 的使魔召唤法术 {} 不存在，已跳过重定向。",
+                cfg.name, cfg.spellId);
+            continue;
+        }
+
+        if (RedirectSummonChain(spellInfo, cfg.creatureEntry))
+        {
+            ++redirected;
+            LOG_DEBUG("scripts", ">> [AdaptiveBot] 法术 {} 的召唤目标已重定向至独立实体 {}（{}）。",
+                cfg.spellId, cfg.creatureEntry, cfg.name);
+        }
+        else
+        {
+            LOG_ERROR("server.loading",
+                ">> [AdaptiveBot] 公会 [{}] 的召唤法术 {} 未找到可重定向的召唤效果（含触发链），使魔将维持原版外观。",
+                cfg.name, cfg.spellId);
+        }
+    }
+
+    LOG_INFO("server.loading", ">> [AdaptiveBot] 已完成 {}/{} 种公会通信使魔的伴侣召唤法术重定向（Entry 70201-70210）。",
+        redirected, GUILD_CONFIGS.size());
 }
 
 bool BotGuildEscrowMgr::CanClaimDailySupply(ObjectGuid const& playerGuid)
@@ -861,6 +953,7 @@ void BotGuildEscrowWorldScript::OnStartup()
 {
     sBotGuildEscrowMgr->LoadBankruptcyFromDB();
     sBotGuildEscrowMgr->LoadGuildMembershipsFromDB();
+    sBotGuildEscrowMgr->RedirectGuildPetSpells(); // 动态重定向使魔伴侣法术至独立高段 Entry
 }
 
 void AddSC_BotGuildEscrowMgr()

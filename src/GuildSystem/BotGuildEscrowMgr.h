@@ -101,19 +101,20 @@ public:
     static constexpr float  BREACH_PENALTY_RATE          = 1.15f;          // 违约滞纳金 15%
     static constexpr uint64 DAILY_SUPPLY_COOLDOWN_SECONDS = 20 * 60 * 60;  // 每日补给冷却 (20 小时宽限)
 
-    /// @brief 十大冒险者公会专属使魔配置表（guildId 与枚举一一对应）。
+    /// @brief 十大冒险者公会专属使魔配置表（creatureEntry 采用全新独立高段 70201-70210，
+    ///        与暴雪原生伴侣宠物 Entry 彻底解耦，杜绝任何形式的数据污染）。
     static constexpr std::array<GuildPetConfig, 10> GUILD_CONFIGS =
     {{
-        { GUILD_EXPLORERS_LEAGUE,     7560,  8496,  2671,  "铁炉堡探险者协会",     true,  false },
-        { GUILD_SI7_MERCENARIES,      8491,  10674, 7384,  "暴风城军情七处",       true,  false },
-        { GUILD_SILVER_COVENANT,      8485,  10673, 7385,  "达拉然银色盟约",       true,  false },
-        { GUILD_WARSONG_OFFENSIVE,    10393, 12643, 7390,  "战歌远征突击队",       false, true  },
-        { GUILD_SUNREAVERS,           27445, 33050, 18839, "夺日者议会",           false, true  },
-        { GUILD_DEATHSTALKERS,        10392, 12642, 7387,  "幽暗城死亡猎手狂怒社", false, true  },
-        { GUILD_ARGENT_CRUSADE,       44982, 63317, 33238, "银色北伐军先锋营",     false, false },
-        { GUILD_UNDERBELLY_SYNDICATE, 43698, 59250, 31575, "达拉然下水道黑市行会", false, false },
-        { GUILD_CENARION_EXPEDITION,  44794, 61773, 32791, "塞纳里奥议会/远征队",  false, false },
-        { GUILD_STEAMWHEEDLE_CARTEL,  11026, 13548, 7394,  "热砂财阀雇佣行",       false, false }
+        { GUILD_EXPLORERS_LEAGUE,     7560,  8496,  70201, "铁炉堡探险者协会",     true,  false },
+        { GUILD_SI7_MERCENARIES,      8491,  10674, 70202, "暴风城军情七处",       true,  false },
+        { GUILD_SILVER_COVENANT,      8485,  10673, 70203, "达拉然银色盟约",       true,  false },
+        { GUILD_WARSONG_OFFENSIVE,    10393, 12643, 70204, "战歌远征突击队",       false, true  },
+        { GUILD_SUNREAVERS,           27445, 33050, 70205, "夺日者议会",           false, true  },
+        { GUILD_DEATHSTALKERS,        10392, 12642, 70206, "幽暗城死亡猎手狂怒社", false, true  },
+        { GUILD_ARGENT_CRUSADE,       44982, 63317, 70207, "银色北伐军先锋营",     false, false },
+        { GUILD_UNDERBELLY_SYNDICATE, 43698, 59250, 70208, "达拉然下水道黑市行会", false, false },
+        { GUILD_CENARION_EXPEDITION,  44794, 61773, 70209, "塞纳里奥议会/远征队",  false, false },
+        { GUILD_STEAMWHEEDLE_CARTEL,  11026, 13548, 70210, "热砂财阀雇佣行",       false, false }
     }};
 
     static GuildPetConfig const* GetGuildConfig(uint8 guildId);
@@ -142,6 +143,11 @@ public:
     bool SetPlayerGuild(Player* player, uint8 guildId);
     bool LeavePlayerGuild(Player* player); // 退会：前置清算 + 彻底销毁使魔
     void LoadGuildMembershipsFromDB();
+
+    /// @brief 服务端伴侣召唤法术重定向：把 10 个公会使魔的召唤目标 Entry
+    ///        就地改写为独立高段模版 70201-70210，无需改动客户端 DBC。
+    ///        必须在数据库（world）载入完成后的世界启动阶段调用一次。
+    void RedirectGuildPetSpells();
 
     // 每日行军补给
     bool CanClaimDailySupply(ObjectGuid const& playerGuid);
