@@ -1920,6 +1920,16 @@ public:
             }
         }
 
+        // 战斗期阵型锁脱落保险丝：DamageTaken / JustEngagedWith 只覆盖「自身被攻击」
+        // 与「引擎主动拉入战斗」两条路径。治疗与远程随从常年站在后方，队友开怪时
+        // 既不会被摸到、也未必立刻收到引擎的协助通知，阵型锁会滞留到战斗结束，
+        // 期间无法跟随移动、无法进入 APF 避火走位，等于被钉死在原地。
+        // 故此处以「是否处于交战状态」作为兜底判据，任何专精一旦进战立即解锁。
+        if (me->IsInCombat() && isHoldingFormation)
+        {
+            isHoldingFormation = false;
+        }
+
         // 就地休息强力补给：每 1 秒恢复 5% 最大生命值与 5% 最大法力值（能量固定 10 点）。
         // UpdateTimers 每帧驱动，故以 restRegenTimer 按秒节流，避免按帧结算瞬间回满。
         if (isResting && !me->IsInCombat())

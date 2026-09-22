@@ -96,7 +96,17 @@ void BotCommandScript::DoAssemble(Player* player)
 
         float const destX = masterX + spreadRadius * std::cos(targetAngle);
         float const destY = masterY + spreadRadius * std::sin(targetAngle);
-        float const destZ = masterZ;
+
+        // 高度校准：集合点直接沿用指挥官 Z 轴，在斜坡/楼梯/台阶上会让随从
+        // 卡进地面或悬空（NearTeleportTo 不做地形修正）。统一由地图地表接口
+        // 取落点真实地面 Z，取不到有效地面时才回退指挥官 Z。
+        float destZ = masterZ;
+        if (Map* map = player->GetMap())
+        {
+            float const groundZ = map->GetHeight(player->GetPhaseMask(), destX, destY, masterZ, true, 50.0f);
+            if (groundZ > INVALID_HEIGHT)
+                destZ = groundZ;
+        }
 
         bot->isResting = false;
         bot->isHoldingFormation = false;
@@ -146,14 +156,25 @@ void BotCommandScript::DoDisband(Player* player)
         botCreature->GetMotionMaster()->Clear();
         botCreature->RestoreFaction();
 
-        float homeX, homeY, homeZ, homeO;
-        botCreature->GetHomePosition(homeX, homeY, homeZ, homeO);
-        botCreature->NearTeleportTo(homeX, homeY, homeZ, homeO);
-        botCreature->GetMotionMaster()->MoveIdle();
+        // 副本安全保护：随从的 home position 记录的是大世界（mapId 0/530 等）坐标，
+        // 在副本内解散时若照搬执行 NearTeleportTo，会把随从丢进当前副本地图中
+        // 一块无地形的虚空（或直接触发传送失败卡住），且副本退出后不再自动归位。
+        // 副本内直接销毁实体，由玩家下次在大世界重整队伍时重新刷新。
+        if (botCreature->GetMap() && botCreature->GetMap()->IsDungeon())
+        {
+            botCreature->DespawnOrUnsummon();
+        }
+        else
+        {
+            float homeX, homeY, homeZ, homeO;
+            botCreature->GetHomePosition(homeX, homeY, homeZ, homeO);
+            botCreature->NearTeleportTo(homeX, homeY, homeZ, homeO);
+            botCreature->GetMotionMaster()->MoveIdle();
 
-        if (botCreature->GetCreatureTemplate())
-            botCreature->SetLevel(botCreature->GetCreatureTemplate()->minlevel);
-        botCreature->SetHealth(botCreature->GetMaxHealth());
+            if (botCreature->GetCreatureTemplate())
+                botCreature->SetLevel(botCreature->GetCreatureTemplate()->minlevel);
+            botCreature->SetHealth(botCreature->GetMaxHealth());
+        }
 
         if (!bot->guardianGuid.IsEmpty())
         {
@@ -163,7 +184,7 @@ void BotCommandScript::DoDisband(Player* player)
         }
     }
 
-    ChatHandler(player->GetSession()).PSendSysMessage("【随从调度】冒险队伍已解散，随从已传送回所属驻地。");
+    ChatHandler(player->GetSession()).PSendSysMessage("【随从调度】冒险队伍已解散，随从已重置归巢。");
 }
 
 bool BotCommandScript::HandleRest(ChatHandler* handler)
@@ -178,6 +199,16 @@ bool BotCommandScript::HandleRest(ChatHandler* handler)
 
 void BotCommandScript::DoRest(Player* player)
 {
+    // 战时门禁保护：指挥官身处交战中心时坚决拒绝就地休整。
+    // 若放行，随从会被强制 CombatStop 并切坐姿，但引擎在同一帧内
+    // 又会因协助仇恨把它重新拖回战斗，下一次 UpdateTimers 心跳再解除休息，
+    // 表现为 50ms 内站起-坐下无限抽搐的视觉故障。
+    if (player->IsInCombat())
+    {
+        ChatHandler(player->GetSession()).PSendSysMessage("【随从调度】战斗中无法就地休息！");
+        return;
+    }
+
     std::vector<AdaptiveBotAI*> const botGroup = CollectBotGroup(player);
     if (botGroup.empty())
         return;
@@ -300,22 +331,33 @@ void BotCommandScript::DoFormation(Player* player, BotFormationType formation)
             }
             case BotFormationType::FAN:
             {
-                // 弧形推进阵：指挥官正面 12 码处展开 120 度扇面
-                float const sweepAngle = static_cast<float>(2.0 * M_PI / 3.0); // 120度
-                float const startAngle = masterO - (sweepAngle * 0.5f);
-                float const step = (count > 1) ? (sweepAngle / (count - 1)) : 0.0f;
-                float const targetAngle = startAngle + step * i;
+                // 弧形推进阵：指挥官正面 12 码处展开 120 度扇面。
+                // 单人时若沿用 startAngle = masterO - 60°，会落到正前方偏左 60° 的
+                // 位置；单随从没有「阵列居中」的几何需求，必须直接对齐正前方。
+                float targetAngle = masterO;
+                if (count > 1)
+                {
+                    float const sweepAngle = static_cast<float>(2.0 * M_PI / 3.0); // 120度
+                    float const startAngle = masterO - (sweepAngle * 0.5f);
+                    float const step = sweepAngle / (count - 1);
+                    targetAngle = startAngle + step * i;
+                }
                 destX = masterX + 12.0f * std::cos(targetAngle);
                 destY = masterY + 12.0f * std::sin(targetAngle);
                 break;
             }
             case BotFormationType::SPREAD:
             {
-                // 极限分散阵：指挥官后方 180 度双层同心弧（偶数内圈 8 码，奇数外圈 16 码）
-                float const sweepAngle = static_cast<float>(M_PI);
-                float const startAngle = masterO + static_cast<float>(M_PI * 0.5);
-                float const step = (count > 1) ? (sweepAngle / (count - 1)) : 0.0f;
-                float const targetAngle = startAngle + step * i;
+                // 极限分散阵：指挥官后方 180 度双层同心弧（偶数内圈 8 码，奇数外圈 16 码）。
+                // 单人时同样绕开「弧线起点」的偏移，直接落在正后方 8 码。
+                float targetAngle = masterO + static_cast<float>(M_PI);
+                if (count > 1)
+                {
+                    float const sweepAngle = static_cast<float>(M_PI);
+                    float const startAngle = masterO + static_cast<float>(M_PI * 0.5);
+                    float const step = sweepAngle / (count - 1);
+                    targetAngle = startAngle + step * i;
+                }
                 float const radius = (i % 2 == 0) ? 8.0f : 16.0f;
                 destX = masterX + radius * std::cos(targetAngle);
                 destY = masterY + radius * std::sin(targetAngle);
