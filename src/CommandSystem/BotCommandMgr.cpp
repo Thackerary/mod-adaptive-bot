@@ -6,6 +6,7 @@
 #include "AdaptiveBotAI.h"
 #include "Chat.h"
 #include "Creature.h"
+#include "Map.h"
 #include "ObjectAccessor.h"
 #include <algorithm>
 #include <cmath>
@@ -98,6 +99,7 @@ void BotCommandScript::DoAssemble(Player* player)
         float const destZ = masterZ;
 
         bot->isResting = false;
+        bot->isHoldingFormation = false;
         botCreature->CombatStop(true);
         botCreature->GetMotionMaster()->Clear();
         bot->apfMoveUpdateTimer = 0;
@@ -135,6 +137,7 @@ void BotCommandScript::DoDisband(Player* player)
             continue;
 
         bot->isResting = false;
+        bot->isHoldingFormation = false;
         bot->UnregisterFromMaster();
         bot->masterGuid.Clear();
         botCreature->CombatStop(true);
@@ -198,6 +201,10 @@ void BotCommandScript::DoRest(Player* player)
         if (!botCreature || !botCreature->IsAlive() || botCreature->GetMap() != player->GetMap())
             continue;
 
+        // 休息指令优先级高于阵型保持：必须在切入休整的同一时刻解除阵型锁，
+        // 否则 rest 之后随从仍被 isHoldingFormation 挡在跟随巡检之外，
+        // 解除休息时无法自动归队。
+        bot->isHoldingFormation = false;
         bot->isResting = newRestState;
         if (newRestState)
         {
@@ -271,6 +278,7 @@ void BotCommandScript::DoFormation(Player* player, BotFormationType formation)
             continue;
 
         bot->isResting = false;
+        bot->isHoldingFormation = true;
         float destX = masterX;
         float destY = masterY;
 
@@ -310,7 +318,17 @@ void BotCommandScript::DoFormation(Player* player, BotFormationType formation)
             }
         }
 
-        botCreature->GetMotionMaster()->MovePoint(1001, destX, destY, masterZ);
+        // 高度校准：直接沿用指挥官 Z 轴会让斜坡/楼梯上的阵型落点穿模或悬空，
+        // 改由地图地表高度接口解算落点真实地面 Z，取不到有效地面时回退指挥官 Z。
+        float destZ = masterZ;
+        if (Map* map = player->GetMap())
+        {
+            float const groundZ = map->GetHeight(player->GetPhaseMask(), destX, destY, masterZ, true, 50.0f);
+            if (groundZ > INVALID_HEIGHT)
+                destZ = groundZ;
+        }
+
+        botCreature->GetMotionMaster()->MovePoint(1001, destX, destY, destZ);
     }
 
     switch (formation)

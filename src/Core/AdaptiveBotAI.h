@@ -60,6 +60,12 @@ public:
     ///        一切技能释放意图，仅保留普通跟随/待命行为。
     bool isResting{ false };
 
+    /// @brief 阵型保持标记。
+    ///        由宏观战术指挥系统 (.bot stack/fan/spread) 置位：处于阵型点位期间
+    ///        禁止 UpdateFollowMaster 的常规 6 码跟随抢占，否则每秒巡检会把
+    ///        刚计算好的阵型坐标整体冲刷回跟随队形（仅 >45 码防丢失瞬移保留）。
+    bool isHoldingFormation{ false };
+
     // 伴随型战斗护卫（Combat Guardian）实时句柄与保活轮询计时器
     ObjectGuid guardianGuid;
     uint32 guardianCheckTimer{ 0 };
@@ -84,6 +90,7 @@ public:
     uint32 tankSampleTimer{ 0 };
     uint32 otCheckTimer{ 0 };
     uint32 apfMoveUpdateTimer{ 0 }; // APF 势场走位决策节流器 (300ms 防抖)
+    uint32 restRegenTimer{ 0 };     // 就地休息强力补给心跳节流器 (1000ms)
 
     // 当前感知到的动态危险斥力源（由战后归因逆向提炼，供 APF 势场避险消费）
     std::vector<DangerZone> activeDangerZones;
@@ -295,6 +302,8 @@ public:
         manaRegenTimer = 0;
         wasInCombat = false;
         isResting = false;
+        isHoldingFormation = false;
+        restRegenTimer = 0;
         combatTimerMs = 0;
         tankSampleTimer = 0;
         otCheckTimer = 0;
@@ -598,6 +607,14 @@ public:
 
     void DamageTaken(Unit* attacker, uint32& damage, DamageEffectType damagetype, SpellSchoolMask damageSchoolMask) override
     {
+        // 受击唤醒保险丝：休息态为纯门禁标记，若不在受击瞬间解除，
+        // 被巡逻怪偷袭的随从会因锁死索敌与技能而原地挨打直至阵亡。
+        if (isResting)
+        {
+            isResting = false;
+            me->HandleEmoteCommand(EMOTE_STATE_STAND);
+        }
+
         damage = static_cast<uint32>(damage * GetDamageTakenMultiplier());
 
         if (me->IsInCombat())
@@ -665,6 +682,14 @@ public:
 
     void JustEngagedWith(Unit* who) override
     {
+        // 同上：引擎因协助/受击把随从拖入战斗时，同样必须立即解除休息门禁，
+        // 否则随从会以「休整中」姿态在战斗中彻底挂机。
+        if (isResting)
+        {
+            isResting = false;
+            me->HandleEmoteCommand(EMOTE_STATE_STAND);
+        }
+
         ScriptedAI::JustEngagedWith(who);
 
         // 阶段三：无论开怪是由 TryEngageCombat 主动发起，还是引擎因受击/协助
@@ -1760,6 +1785,28 @@ public:
         if (me->GetMap() != master->GetMap())
             return;
 
+        // 处于就地休息或保持阵型状态下，禁止常规 6 码跟随抢占：
+        // 阵型成员一旦被拉回跟随队形，三大阵型的几何外推结果会被每秒巡检整体冲刷。
+        // 仅在指挥官脱离过远 (>45 码) 跨区域时保留防丢失瞬移，并顺势解除两类锁定。
+        if (isResting || isHoldingFormation)
+        {
+            if (me->GetDistance(master) > 45.0f)
+            {
+                if (isDebugLogging)
+                    LOG_INFO("scripts", "[Bot: {}] 休息/阵型保持中仍严重脱离 (>45码)，执行防丢失瞬移并解除锁定。", me->GetName());
+
+                isHoldingFormation = false;
+                isResting = false;
+
+                float const x = master->GetPositionX() - 2.0f * std::cos(master->GetOrientation());
+                float const y = master->GetPositionY() - 2.0f * std::sin(master->GetOrientation());
+                float const z = master->GetPositionZ();
+                me->NearTeleportTo(x, y, z, master->GetOrientation());
+                me->GetMotionMaster()->Clear();
+            }
+            return;
+        }
+
         if (me->GetPhaseMask() != master->GetPhaseMask())
             me->SetPhaseMask(master->GetPhaseMask(), true);
 
@@ -1860,6 +1907,29 @@ public:
                 if (me->GetPower(POWER_MANA) < me->GetMaxPower(POWER_MANA))
                     me->ModifyPower(POWER_MANA, addMana);
             }
+        }
+
+        // 就地休息强力补给：每 1 秒恢复 5% 最大生命值与 5% 最大法力值（能量固定 10 点）。
+        // UpdateTimers 每帧驱动，故以 restRegenTimer 按秒节流，避免按帧结算瞬间回满。
+        if (isResting && !me->IsInCombat())
+        {
+            restRegenTimer += diff;
+            if (restRegenTimer >= 1000)
+            {
+                restRegenTimer -= 1000;
+
+                if (me->GetHealth() < me->GetMaxHealth())
+                    me->ModifyHealth(std::max<int32>(1, static_cast<int32>(me->GetMaxHealth() * 5 / 100)));
+
+                if (me->getPowerType() == POWER_MANA && me->GetPower(POWER_MANA) < me->GetMaxPower(POWER_MANA))
+                    me->ModifyPower(POWER_MANA, static_cast<int32>(me->GetMaxPower(POWER_MANA) * 5 / 100));
+                else if (me->getPowerType() == POWER_ENERGY && me->GetPower(POWER_ENERGY) < me->GetMaxPower(POWER_ENERGY))
+                    me->ModifyPower(POWER_ENERGY, 10);
+            }
+        }
+        else
+        {
+            restRegenTimer = 0;
         }
 
         // 危险禁区生命周期仅在战斗中自然消退；脱战与跑尸阶段挂起倒计时。
