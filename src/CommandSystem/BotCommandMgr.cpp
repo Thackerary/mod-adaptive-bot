@@ -3,6 +3,7 @@
  */
 
 #include "BotCommandMgr.h"
+#include "../GuildSystem/BotGuildEscrowMgr.h"
 #include "AdaptiveBotAI.h"
 #include "Chat.h"
 #include "Creature.h"
@@ -135,6 +136,15 @@ bool BotCommandScript::HandleDisband(ChatHandler* handler)
 
 void BotCommandScript::DoDisband(Player* player)
 {
+    // 主动解散：在遣返随从前结清最后一笔尾款。
+    // 仅当清算成功才注销契约；若玩家当场金币不足，则保留契约与宽限期倒计时，
+    // 由 5 分钟追缴通道继续处理，杜绝「解散即赖账」。
+    if (player && sBotGuildEscrowMgr->HasActiveContract(player->GetGUID()))
+    {
+        if (sBotGuildEscrowMgr->SettleCurrentBill(player, BILLING_REASON_DISBAND))
+            sBotGuildEscrowMgr->RemoveContract(player->GetGUID());
+    }
+
     std::vector<AdaptiveBotAI*> const botGroup = CollectBotGroup(player);
     if (botGroup.empty())
         return;

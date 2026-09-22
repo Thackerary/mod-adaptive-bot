@@ -1,0 +1,469 @@
+/*
+ * Copyright (C) 2016+ AzerothCore <www.azerothcore.org>, released under GNU AGPL v3 license
+ */
+
+#include "BotGuildEscrowMgr.h"
+#include "AdaptiveBotAI.h"
+#include "../CommandSystem/BotCommandMgr.h"
+#include "Chat.h"
+#include "Creature.h"
+#include "DatabaseEnv.h"
+#include "GameTime.h"
+#include "Log.h"
+#include "Player.h"
+#include <algorithm>
+#include <vector>
+
+BotGuildEscrowMgr* BotGuildEscrowMgr::Instance()
+{
+    static BotGuildEscrowMgr instance;
+    return &instance;
+}
+
+void BotGuildEscrowMgr::LoadBankruptcyFromDB()
+{
+    std::unordered_map<ObjectGuid, uint32> loaded;
+
+    QueryResult result = CharacterDatabase.Query("SELECT guid, debt_copper FROM character_bot_escrow WHERE is_bankrupt = 1");
+    if (result)
+    {
+        do
+        {
+            Field* fields = result->Fetch();
+            ObjectGuid const guid = ObjectGuid::Create<HighGuid::Player>(fields[0].Get<uint32>());
+            loaded[guid] = fields[1].Get<uint32>();
+        } while (result->NextRow());
+    }
+
+    std::lock_guard<std::mutex> lock(_lock);
+    _bankruptDebts.swap(loaded);
+
+    LOG_INFO("server.loading", ">> [AdaptiveBot] 已载入 {} 条佣兵失信黑名单记录。", _bankruptDebts.size());
+}
+
+bool BotGuildEscrowMgr::IsBankrupt(ObjectGuid const& playerGuid)
+{
+    std::lock_guard<std::mutex> lock(_lock);
+    return _bankruptDebts.find(playerGuid) != _bankruptDebts.end();
+}
+
+void BotGuildEscrowMgr::ClearBankruptcy(Player* player)
+{
+    if (!player)
+        return;
+
+    ObjectGuid const guid = player->GetGUID();
+
+    // 全程锁内只做账务读改，消息下发与扣款动作一律在锁外执行
+    uint32 totalRepay = 0;
+    {
+        std::lock_guard<std::mutex> lock(_lock);
+        auto it = _bankruptDebts.find(guid);
+        if (it == _bankruptDebts.end())
+            return;
+
+        totalRepay = it->second;
+    }
+
+    if (player->GetMoney() < totalRepay)
+    {
+        if (player->GetSession())
+            ChatHandler(player->GetSession()).PSendSysMessage(
+                "|cffff0000【公会信托】您的金币不足以偿还拖欠的 {} 铜与滞纳金，劳务中介仍对您保持封禁。|r", totalRepay);
+        return;
+    }
+
+    player->ModifyMoney(-static_cast<int64>(totalRepay));
+
+    {
+        std::lock_guard<std::mutex> lock(_lock);
+        _bankruptDebts.erase(guid);
+    }
+
+    CharacterDatabase.Execute("UPDATE character_bot_escrow SET is_bankrupt = 0, debt_copper = 0 WHERE guid = {}",
+        guid.GetCounter());
+
+    if (player->GetSession())
+        ChatHandler(player->GetSession()).PSendSysMessage("【公会信托】您已成功结清欠款，公会信用恢复正常！");
+}
+
+void BotGuildEscrowMgr::StartContract(Player* player)
+{
+    if (!player)
+        return;
+
+    ObjectGuid const guid = player->GetGUID();
+    uint32 const currentMapId = player->GetMapId();
+
+    std::lock_guard<std::mutex> lock(_lock);
+
+    BotHireContract& contract = _activeContracts[guid];
+    contract.masterGuid = guid;
+    contract.pendingCopper = 0;
+    contract.totalKilledCount = 0;
+    contract.periodicTimer = 0;
+    contract.lastMapId = currentMapId; // 开户即锚定当前地图，避免下一帧误判为切图
+    contract.inGracePeriod = false;
+    contract.gracePeriodTimer = 0;
+
+    _contractProbeTimers.erase(guid);
+}
+
+void BotGuildEscrowMgr::RemoveContract(ObjectGuid const& playerGuid)
+{
+    std::lock_guard<std::mutex> lock(_lock);
+    _activeContracts.erase(playerGuid);
+    _contractProbeTimers.erase(playerGuid);
+}
+
+bool BotGuildEscrowMgr::HasActiveContract(ObjectGuid const& playerGuid)
+{
+    std::lock_guard<std::mutex> lock(_lock);
+    return _activeContracts.find(playerGuid) != _activeContracts.end();
+}
+
+float BotGuildEscrowMgr::CalculateGuildDiscount(uint8 playerGuildId, uint8 botGuildId, bool isCrossFaction)
+{
+    // 同公会享受 7.5 折内部津贴
+    if (playerGuildId != GUILD_NONE && playerGuildId == botGuildId)
+        return 0.75f;
+
+    // 跨阵营中介加收 20%
+    if (isCrossFaction)
+        return 1.20f;
+
+    // 常规原价
+    return 1.0f;
+}
+
+void BotGuildEscrowMgr::AccumulateKillFee(Player* player, Creature* killed)
+{
+    if (!player || !killed)
+        return;
+
+    ObjectGuid const guid = player->GetGUID();
+
+    // 先确认契约存在，避免为无关玩家白跑一次随从总线加锁与拷贝
+    if (!HasActiveContract(guid))
+        return;
+
+    // 获取当前指挥官名下存活随从列表（此处不持有 _lock，规避锁序倒置）
+    std::vector<AdaptiveBotAI*> const botGroup = BotCommandScript::CollectBotGroup(player);
+    if (botGroup.empty())
+        return;
+
+    uint8 const mobLevel = killed->GetLevel();
+
+    // 1. 基准单价 (铜): 1-59级平滑增长，80级锁定 15 银 (1500 铜)
+    uint32 baseRateCopper = 10;
+    if (mobLevel < 60)
+        baseRateCopper = std::max<uint32>(10, static_cast<uint32>(mobLevel) * 25);
+    else if (mobLevel < 80)
+        baseRateCopper = 1500 + static_cast<uint32>(mobLevel - 60) * 50;
+    else
+        baseRateCopper = 1500;
+
+    // 2. 怪物类型权重
+    float typeMultiplier = 1.0f;
+    if (killed->isWorldBoss() || (killed->GetMap() && killed->GetMap()->IsRaid()))
+        typeMultiplier = 60.0f; // 团本 Boss: 60x (~9G)
+    else if (killed->IsDungeonBoss())
+        typeMultiplier = 20.0f; // 5人本 Boss: 20x (~3G)
+    else if (killed->isElite())
+        typeMultiplier = 3.0f;  // 精英怪: 3x
+
+    // 3. 累加随从全员佣金 (按各自会籍计算折扣)
+    //    TODO(阶段四): 接入玩家真实公会归属与随从会籍；当前双方的 SetMaster()
+    //    会把随从阵营同步为指挥官阵营，故 isCrossFaction 恒为 false，
+    //    折扣系数实际恒为原价，接口形态已就位、不阻塞后续接入。
+    uint8 const playerGuildId = GUILD_NONE;
+    uint32 totalMobFee = 0;
+
+    for (AdaptiveBotAI* bot : botGroup)
+    {
+        if (!bot || !bot->GetBotCreature() || !bot->GetBotCreature()->IsAlive())
+            continue;
+
+        uint8 const botGuildId = GUILD_NONE;
+        bool const isCrossFaction = (bot->GetBotCreature()->GetFaction() != player->GetFaction());
+        float const discount = CalculateGuildDiscount(playerGuildId, botGuildId, isCrossFaction);
+
+        totalMobFee += static_cast<uint32>(static_cast<float>(baseRateCopper) * typeMultiplier * discount);
+    }
+
+    std::lock_guard<std::mutex> lock(_lock);
+    auto it = _activeContracts.find(guid);
+    if (it != _activeContracts.end())
+    {
+        it->second.pendingCopper += totalMobFee;
+        it->second.totalKilledCount += 1;
+    }
+}
+
+bool BotGuildEscrowMgr::SettleCurrentBill(Player* player, BillingReason reason)
+{
+    if (!player)
+        return false;
+
+    ObjectGuid const guid = player->GetGUID();
+
+    uint32 dueCopper = 0;
+    uint32 kills = 0;
+    {
+        std::lock_guard<std::mutex> lock(_lock);
+        auto it = _activeContracts.find(guid);
+        if (it == _activeContracts.end() || it->second.pendingCopper == 0)
+            return true;
+
+        dueCopper = it->second.pendingCopper;
+        kills = it->second.totalKilledCount;
+    }
+
+    // -------------------------------------------------------------------------
+    // 扣费失败通道：进入 5 分钟宽限期（消息下发必须脱离锁作用域）
+    // -------------------------------------------------------------------------
+    if (player->GetMoney() < dueCopper)
+    {
+        bool newlyEntered = false;
+        {
+            std::lock_guard<std::mutex> lock(_lock);
+            auto it = _activeContracts.find(guid);
+            if (it != _activeContracts.end() && !it->second.inGracePeriod)
+            {
+                it->second.inGracePeriod = true;
+                it->second.gracePeriodTimer = GRACE_PERIOD_MS;
+                newlyEntered = true;
+            }
+        }
+
+        if (newlyEntered && player->GetSession())
+            ChatHandler(player->GetSession()).PSendSysMessage(
+                "|cffff0000【公会警告】您的背包金币不足以支付佣金！进入 5 分钟宽限期，超时随从将罢工遣散并记入公会失信黑名单。|r");
+
+        return false;
+    }
+
+    // -------------------------------------------------------------------------
+    // 扣费成功通道
+    // -------------------------------------------------------------------------
+    player->ModifyMoney(-static_cast<int64>(dueCopper));
+
+    {
+        std::lock_guard<std::mutex> lock(_lock);
+        auto it = _activeContracts.find(guid);
+        if (it != _activeContracts.end())
+        {
+            it->second.pendingCopper = 0;
+            it->second.totalKilledCount = 0;
+            it->second.inGracePeriod = false;
+            it->second.gracePeriodTimer = 0;
+        }
+    }
+
+    if (player->GetSession())
+    {
+        uint32 const gold = dueCopper / 10000;
+        uint32 const silver = (dueCopper % 10000) / 100;
+        uint32 const copper = dueCopper % 100;
+
+        char const* reasonStr = "周期扣款";
+        if (reason == BILLING_REASON_MAP_CHANGE)
+            reasonStr = "副本切图结算";
+        else if (reason == BILLING_REASON_DISBAND)
+            reasonStr = "队伍解散清算";
+        else if (reason == BILLING_REASON_MANUAL)
+            reasonStr = "手动结算";
+
+        // AzerothCore 的 PSendSysMessage 为 fmt 语义，占位符必须是 {}，
+        // 沿用 printf 的 %s/%u 会在运行期抛 fmt::format_error。
+        ChatHandler(player->GetSession()).PSendSysMessage(
+            "【公会账单】[{}] 随从协助击杀 {} 个目标，支付佣金: {}金 {}银 {}铜。",
+            reasonStr, kills, gold, silver, copper);
+    }
+
+    return true;
+}
+
+void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
+{
+    if (!player)
+        return;
+
+    ObjectGuid const guid = player->GetGUID();
+
+    // -------------------------------------------------------------------------
+    // 契约自愈探针：招募入口不在本模块职责内，故由世界经济体自适应补建账户。
+    // 每 1 秒低频巡检一次，指挥官已带兵但契约缺失时自动开户，杜绝漏单。
+    // -------------------------------------------------------------------------
+    bool hasContract = false;
+    bool probeReady = false;
+    {
+        std::lock_guard<std::mutex> lock(_lock);
+        hasContract = (_activeContracts.find(guid) != _activeContracts.end());
+
+        if (!hasContract)
+        {
+            uint32& probe = _contractProbeTimers[guid];
+            probe += diff;
+            if (probe >= CONTRACT_PROBE_INTERVAL_MS)
+            {
+                probe = 0;
+                probeReady = true;
+            }
+        }
+    }
+
+    if (!hasContract)
+    {
+        if (!probeReady)
+            return;
+
+        // 无契约且未带兵：立刻回收探针槽位，避免世界常驻期为所有历史 GUID 无界驻留
+        if (BotCommandScript::CollectBotGroup(player).empty())
+        {
+            std::lock_guard<std::mutex> lock(_lock);
+            _contractProbeTimers.erase(guid);
+            return;
+        }
+
+        StartContract(player);
+    }
+
+    bool shouldSettle = false;
+    bool mapChanged = false;
+    bool shouldForceDisband = false;
+    uint32 breachDebt = 0;
+
+    {
+        std::lock_guard<std::mutex> lock(_lock);
+
+        auto it = _activeContracts.find(guid);
+        if (it == _activeContracts.end())
+            return;
+
+        BotHireContract& contract = it->second;
+
+        // 双轨驱动之一：切图强制结算（进出副本 / 跨大陆传送）。
+        // 以地图 ID 变化为判据而非依赖不存在的 OnMapChanged 钩子。
+        uint32 const currentMapId = player->GetMapId();
+        if (contract.lastMapId != currentMapId)
+        {
+            contract.lastMapId = currentMapId;
+            mapChanged = true;
+            shouldSettle = true;
+        }
+
+        // 双轨驱动之二：20 分钟周期轮询静默划扣
+        contract.periodicTimer += diff;
+        if (contract.periodicTimer >= PERIODIC_BILLING_INTERVAL_MS)
+        {
+            contract.periodicTimer = 0;
+            shouldSettle = true;
+        }
+
+        // 5 分钟违约宽限期倒计时（离线期间不推进，等价于暂停追缴）
+        if (contract.inGracePeriod)
+        {
+            if (contract.gracePeriodTimer > diff)
+            {
+                contract.gracePeriodTimer -= diff;
+            }
+            else
+            {
+                shouldForceDisband = true;
+                breachDebt = static_cast<uint32>(static_cast<float>(contract.pendingCopper) * BREACH_PENALTY_RATE);
+                _bankruptDebts[guid] = breachDebt;
+                _activeContracts.erase(it);
+                _contractProbeTimers.erase(guid);
+                shouldSettle = false; // 已进入制裁通道，不得再重复划扣
+            }
+        }
+    }
+
+    if (shouldForceDisband)
+    {
+        CharacterDatabase.Execute(
+            "REPLACE INTO character_bot_escrow (guid, is_bankrupt, debt_copper, updated_time) VALUES ({}, 1, {}, {})",
+            guid.GetCounter(), breachDebt, static_cast<uint64>(GameTime::GetGameTime()));
+
+        if (player->GetSession())
+            ChatHandler(player->GetSession()).PSendSysMessage(
+                "|cffff0000【公会制裁】宽限期已过，由于恶意欠薪，您的冒险队伍已被强制解散，您已被列入艾泽拉斯公会失信人黑名单！|r");
+
+        // 强制全队归巢：此时契约已被摘除，DoDisband 内部的尾款结清会自动跳过
+        BotCommandScript::DoDisband(player);
+        return;
+    }
+
+    if (shouldSettle)
+        SettleCurrentBill(player, mapChanged ? BILLING_REASON_MAP_CHANGE : BILLING_REASON_PERIODIC);
+}
+
+// -----------------------------------------------------------------------------
+// PlayerScript 挂载钩子实现
+// -----------------------------------------------------------------------------
+BotGuildEscrowPlayerScript::BotGuildEscrowPlayerScript() : PlayerScript("BotGuildEscrowPlayerScript") {}
+
+void BotGuildEscrowPlayerScript::OnPlayerLogin(Player* player)
+{
+    if (!player)
+        return;
+
+    if (!sBotGuildEscrowMgr->IsBankrupt(player->GetGUID()))
+        return;
+
+    // 登录即尝试自动清偿：金币不足时 ClearBankruptcy 会给出明确回执，
+    // 避免失信黑名单沦为无法解除的永久死结。
+    sBotGuildEscrowMgr->ClearBankruptcy(player);
+
+    if (sBotGuildEscrowMgr->IsBankrupt(player->GetGUID()) && player->GetSession())
+        ChatHandler(player->GetSession()).PSendSysMessage(
+            "|cffff0000【公会警告】您当前存在未结清的佣兵欠款，处于失信黑名单中，请尽快筹款偿还。|r");
+}
+
+void BotGuildEscrowPlayerScript::OnPlayerLogout(Player* player)
+{
+    if (!player)
+        return;
+
+    // 下线瞬间强制清算尾款。若清算失败（金币不足），保留内存契约与宽限倒计时，
+    // 玩家重新上线后继续追缴，杜绝「欠费下线」成为逃避佣金的漏洞。
+    if (!sBotGuildEscrowMgr->SettleCurrentBill(player, BILLING_REASON_DISBAND))
+        return;
+
+    sBotGuildEscrowMgr->RemoveContract(player->GetGUID());
+}
+
+void BotGuildEscrowPlayerScript::OnPlayerCreatureKill(Player* killer, Creature* killed)
+{
+    if (!killer || !killed)
+        return;
+
+    // 仅在带领随从时计费
+    if (sBotGuildEscrowMgr->HasActiveContract(killer->GetGUID()))
+        sBotGuildEscrowMgr->AccumulateKillFee(killer, killed);
+}
+
+void BotGuildEscrowPlayerScript::OnPlayerUpdate(Player* player, uint32 p_time)
+{
+    if (!player)
+        return;
+
+    sBotGuildEscrowMgr->Update(player, p_time);
+}
+
+// -----------------------------------------------------------------------------
+// WorldScript：数据库连通后再载入黑名单
+// -----------------------------------------------------------------------------
+BotGuildEscrowWorldScript::BotGuildEscrowWorldScript() : WorldScript("BotGuildEscrowWorldScript") {}
+
+void BotGuildEscrowWorldScript::OnStartup()
+{
+    sBotGuildEscrowMgr->LoadBankruptcyFromDB();
+}
+
+void AddSC_BotGuildEscrowMgr()
+{
+    new BotGuildEscrowPlayerScript();
+    new BotGuildEscrowWorldScript();
+}

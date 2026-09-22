@@ -43,6 +43,9 @@ void AddSC_bot_guardian();
 // Phase 2 宏观战术指挥系统（集合 / 解散 / 休息 / 三系阵型切换）
 void AddSC_BotCommandMgr();
 
+// Phase 3 计件账单与信托结算核心（动态计件 / 双轨结算 / 信用黑名单）
+void AddSC_BotGuildEscrowMgr();
+
 // 模块总入口：函数名必须严格匹配 "Add" + 模块目录名(连字符变下划线) + "Scripts"
 void Addmod_adaptive_botScripts()
 {
@@ -79,4 +82,5 @@ void Addmod_adaptive_botScripts()
     AddSC_bot_shadow_priest();
     AddSC_bot_guardian();
     AddSC_BotCommandMgr();
+    AddSC_BotGuildEscrowMgr();
 }
