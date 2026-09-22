@@ -8,13 +8,44 @@
 #include "Creature.h"
 #include "ObjectAccessor.h"
 #include <algorithm>
-#include <cctype>
 #include <cmath>
+#include <mutex>
 #include <vector>
 
-BotCommandMgrPlayerScript::BotCommandMgrPlayerScript() : PlayerScript("BotCommandMgrPlayerScript") {}
+using namespace Acore::ChatCommands;
 
-std::vector<AdaptiveBotAI*> BotCommandMgrPlayerScript::CollectBotGroup(Player* player)
+BotCommandScript::BotCommandScript() : CommandScript("BotCommandScript") {}
+
+ChatCommandTable BotCommandScript::GetCommands() const
+{
+    static ChatCommandTable botSubCommandTable =
+    {
+        { "assemble", HandleAssemble, SEC_PLAYER, Console::No },
+        { "集合",     HandleAssemble, SEC_PLAYER, Console::No },
+        { "disband",  HandleDisband,  SEC_PLAYER, Console::No },
+        { "解散",     HandleDisband,  SEC_PLAYER, Console::No },
+        { "rest",     HandleRest,     SEC_PLAYER, Console::No },
+        { "休息",     HandleRest,     SEC_PLAYER, Console::No },
+        { "stack",    HandleStack,    SEC_PLAYER, Console::No },
+        { "密集",     HandleStack,    SEC_PLAYER, Console::No },
+        { "集合阵",   HandleStack,    SEC_PLAYER, Console::No },
+        { "fan",      HandleFan,      SEC_PLAYER, Console::No },
+        { "扇形",     HandleFan,      SEC_PLAYER, Console::No },
+        { "弧形",     HandleFan,      SEC_PLAYER, Console::No },
+        { "spread",   HandleSpread,   SEC_PLAYER, Console::No },
+        { "分散",     HandleSpread,   SEC_PLAYER, Console::No },
+        { "散开",     HandleSpread,   SEC_PLAYER, Console::No }
+    };
+
+    static ChatCommandTable commandTable =
+    {
+        { "bot", botSubCommandTable }
+    };
+
+    return commandTable;
+}
+
+std::vector<AdaptiveBotAI*> BotCommandScript::CollectBotGroup(Player* player)
 {
     std::vector<AdaptiveBotAI*> botGroup;
     if (!player)
@@ -28,78 +59,18 @@ std::vector<AdaptiveBotAI*> BotCommandMgrPlayerScript::CollectBotGroup(Player* p
     return botGroup;
 }
 
-void BotCommandMgrPlayerScript::OnChat(Player* player, uint32 /*type*/, uint32 /*lang*/, std::string& msg)
-{
-    ProcessBotCommand(player, msg);
-}
 
-void BotCommandMgrPlayerScript::OnChat(Player* player, uint32 /*type*/, uint32 /*lang*/, std::string& msg, Group* /*group*/)
+bool BotCommandScript::HandleAssemble(ChatHandler* handler)
 {
-    ProcessBotCommand(player, msg);
-}
-
-bool BotCommandMgrPlayerScript::ProcessBotCommand(Player* player, std::string const& msg)
-{
-    if (!player || msg.empty())
+    Player* player = handler->GetPlayer();
+    if (!player)
         return false;
 
-    // 指令前缀检查（支持半角 .bot 与全角 。bot，大小写不敏感）
-    std::string lowerMsg = msg;
-    std::transform(lowerMsg.begin(), lowerMsg.end(), lowerMsg.begin(),
-        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-
-    std::string prefix = ".bot";
-    size_t pos = lowerMsg.find(prefix);
-    if (pos == std::string::npos)
-    {
-        prefix = "。bot";
-        pos = lowerMsg.find(prefix);
-        if (pos == std::string::npos)
-            return false;
-    }
-
-    std::string sub = lowerMsg.substr(pos + prefix.length());
-    // 去除前导空格
-    size_t firstChar = sub.find_first_not_of(" \t\r\n");
-    if (firstChar == std::string::npos)
-        return false;
-    sub = sub.substr(firstChar);
-
-    if (sub == "assemble" || sub == "集合")
-    {
-        HandleAssemble(player);
-        return true;
-    }
-    if (sub == "disband" || sub == "解散")
-    {
-        HandleDisband(player);
-        return true;
-    }
-    if (sub == "rest" || sub == "休息")
-    {
-        HandleRest(player);
-        return true;
-    }
-    if (sub == "stack" || sub == "密集" || sub == "集合阵")
-    {
-        HandleFormation(player, BotFormationType::STACK);
-        return true;
-    }
-    if (sub == "fan" || sub == "扇形" || sub == "弧形")
-    {
-        HandleFormation(player, BotFormationType::FAN);
-        return true;
-    }
-    if (sub == "spread" || sub == "分散" || sub == "散开")
-    {
-        HandleFormation(player, BotFormationType::SPREAD);
-        return true;
-    }
-
-    return false;
+    DoAssemble(player);
+    return true;
 }
 
-void BotCommandMgrPlayerScript::HandleAssemble(Player* player)
+void BotCommandScript::DoAssemble(Player* player)
 {
     std::vector<AdaptiveBotAI*> const botGroup = CollectBotGroup(player);
     if (botGroup.empty())
@@ -138,7 +109,17 @@ void BotCommandMgrPlayerScript::HandleAssemble(Player* player)
     ChatHandler(player->GetSession()).PSendSysMessage("【随从调度】全员已强制传送集合至您身边。");
 }
 
-void BotCommandMgrPlayerScript::HandleDisband(Player* player)
+bool BotCommandScript::HandleDisband(ChatHandler* handler)
+{
+    Player* player = handler->GetPlayer();
+    if (!player)
+        return false;
+
+    DoDisband(player);
+    return true;
+}
+
+void BotCommandScript::DoDisband(Player* player)
 {
     std::vector<AdaptiveBotAI*> const botGroup = CollectBotGroup(player);
     if (botGroup.empty())
@@ -180,7 +161,17 @@ void BotCommandMgrPlayerScript::HandleDisband(Player* player)
     ChatHandler(player->GetSession()).PSendSysMessage("【随从调度】冒险队伍已解散，随从已传送回所属驻地。");
 }
 
-void BotCommandMgrPlayerScript::HandleRest(Player* player)
+bool BotCommandScript::HandleRest(ChatHandler* handler)
+{
+    Player* player = handler->GetPlayer();
+    if (!player)
+        return false;
+
+    DoRest(player);
+    return true;
+}
+
+void BotCommandScript::DoRest(Player* player)
 {
     std::vector<AdaptiveBotAI*> const botGroup = CollectBotGroup(player);
     if (botGroup.empty())
@@ -227,7 +218,37 @@ void BotCommandMgrPlayerScript::HandleRest(Player* player)
         ChatHandler(player->GetSession()).PSendSysMessage("【随从调度】全队已解除休息，恢复待命作战状态。");
 }
 
-void BotCommandMgrPlayerScript::HandleFormation(Player* player, BotFormationType formation)
+bool BotCommandScript::HandleStack(ChatHandler* handler)
+{
+    Player* player = handler->GetPlayer();
+    if (!player)
+        return false;
+
+    DoFormation(player, BotFormationType::STACK);
+    return true;
+}
+
+bool BotCommandScript::HandleFan(ChatHandler* handler)
+{
+    Player* player = handler->GetPlayer();
+    if (!player)
+        return false;
+
+    DoFormation(player, BotFormationType::FAN);
+    return true;
+}
+
+bool BotCommandScript::HandleSpread(ChatHandler* handler)
+{
+    Player* player = handler->GetPlayer();
+    if (!player)
+        return false;
+
+    DoFormation(player, BotFormationType::SPREAD);
+    return true;
+}
+
+void BotCommandScript::DoFormation(Player* player, BotFormationType formation)
 {
     std::vector<AdaptiveBotAI*> const botGroup = CollectBotGroup(player);
     if (botGroup.empty())
