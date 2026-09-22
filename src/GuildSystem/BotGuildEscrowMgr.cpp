@@ -253,6 +253,8 @@ bool BotGuildEscrowMgr::SettleCurrentBill(Player* player, BillingReason reason)
 
     uint32 dueCopper = 0;
     uint32 kills = 0;
+    bool wasInGracePeriod = false;
+
     {
         std::lock_guard<std::mutex> lock(_lock);
         auto it = _activeContracts.find(guid);
@@ -261,10 +263,17 @@ bool BotGuildEscrowMgr::SettleCurrentBill(Player* player, BillingReason reason)
 
         dueCopper = it->second.pendingCopper;
         kills = it->second.totalKilledCount;
+        wasInGracePeriod = it->second.inGracePeriod;
     }
 
+    // 财务透明度：告警与回执统一以「金/银/铜」三段式直读呈现，
+    // 不再让玩家面对一串原始铜数自行换算。
+    uint32 const gold = dueCopper / 10000;
+    uint32 const silver = (dueCopper % 10000) / 100;
+    uint32 const copper = dueCopper % 100;
+
     // -------------------------------------------------------------------------
-    // 扣费失败通道：进入 5 分钟宽限期（消息下发必须脱离锁作用域）
+    // 扣费失败通道：进入 1 小时宽限期，并告知确切欠款（消息下发必须脱离锁作用域）
     // -------------------------------------------------------------------------
     if (player->GetMoney() < dueCopper)
     {
@@ -285,7 +294,8 @@ bool BotGuildEscrowMgr::SettleCurrentBill(Player* player, BillingReason reason)
 
         if (newlyEntered && player->GetSession())
             ChatHandler(player->GetSession()).PSendSysMessage(
-                "|cffff0000【公会警告】您的背包金币不足以支付佣金！已进入 1 小时信托宽限期，请尽快筹集资金；超时随从将罢工遣散并记入公会失信黑名单。|r");
+                "|cffff0000【公会警告】您的背包金币不足以支付佣金（当前欠款: {}金 {}银 {}铜）！已进入 1 小时信托宽限期，请尽快筹集资金；超时随从将罢工遣散并记入公会失信黑名单。|r",
+                gold, silver, copper);
 
         return false;
     }
@@ -312,12 +322,10 @@ bool BotGuildEscrowMgr::SettleCurrentBill(Player* player, BillingReason reason)
 
     if (player->GetSession())
     {
-        uint32 const gold = dueCopper / 10000;
-        uint32 const silver = (dueCopper % 10000) / 100;
-        uint32 const copper = dueCopper % 100;
-
         char const* reasonStr = "周期扣款";
-        if (reason == BILLING_REASON_MAP_CHANGE)
+        if (wasInGracePeriod || reason == BILLING_REASON_RECOVERY)
+            reasonStr = "宽限期补缴";
+        else if (reason == BILLING_REASON_MAP_CHANGE)
             reasonStr = "副本切图结算";
         else if (reason == BILLING_REASON_DISBAND)
             reasonStr = "队伍解散清算";
@@ -327,8 +335,9 @@ bool BotGuildEscrowMgr::SettleCurrentBill(Player* player, BillingReason reason)
         // AzerothCore 的 PSendSysMessage 为 fmt 语义，占位符必须是 {}，
         // 沿用 printf 的 %s/%u 会在运行期抛 fmt::format_error。
         ChatHandler(player->GetSession()).PSendSysMessage(
-            "【公会账单】[{}] 随从协助击杀 {} 个目标，支付佣金: {}金 {}银 {}铜。",
-            reasonStr, kills, gold, silver, copper);
+            "【公会账单】[{}] 随从协助击杀 {} 个目标，支付佣金: {}金 {}银 {}铜。{}",
+            reasonStr, kills, gold, silver, copper,
+            wasInGracePeriod ? " 您的公会信用已恢复正常！" : "");
     }
 
     return true;
@@ -387,8 +396,12 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
         StartContract(player);
     }
 
+    // 随从存在性快照：必须在获取 _lock 之前完成随从总线的加锁与遍历，
+    // 否则会在 _lock 内部嵌套 s_botRegistryMutex 形成锁序倒置。
+    bool const hasBots = !BotCommandScript::CollectBotGroup(player).empty();
+
     bool shouldSettle = false;
-    bool mapChanged = false;
+    BillingReason settleReason = BILLING_REASON_PERIODIC;
     bool shouldForceDisband = false;
     bool send30MinWarning = false;
     bool send10MinWarning = false;
@@ -404,22 +417,38 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
 
         BotHireContract& contract = it->second;
 
+        // 空契约自愈回收：既已无随从可供计件、又无未结佣金、且未处于追缴宽限期，
+        // 说明该契约已彻底停摆（随从被遣散 / 团灭未归 / 解散流程中断）。
+        // 若不摘除，_activeContracts 会随历史 GUID 无界驻留，构成常驻内存泄漏。
+        if (!contract.inGracePeriod && contract.pendingCopper == 0 && !hasBots)
+        {
+            _activeContracts.erase(it);
+            _contractProbeTimers.erase(guid);
+            return;
+        }
+
         // 双轨驱动之一：切图强制结算（进出副本 / 跨大陆传送）。
         // 以地图 ID 变化为判据而非依赖不存在的 OnMapChanged 钩子。
         uint32 const currentMapId = player->GetMapId();
         if (contract.lastMapId != currentMapId)
         {
             contract.lastMapId = currentMapId;
-            mapChanged = true;
             shouldSettle = true;
+            settleReason = BILLING_REASON_MAP_CHANGE;
         }
 
-        // 双轨驱动之二：20 分钟周期轮询静默划扣
+        // 双轨驱动之二：20 分钟周期轮询静默划扣。
+        // 切图结算优先于周期结算，周期心跳不得覆盖已标记的触发源，
+        // 否则宽限期补缴会被误标为「周期扣款」而丢失回执语义。
         contract.periodicTimer += diff;
         if (contract.periodicTimer >= PERIODIC_BILLING_INTERVAL_MS)
         {
             contract.periodicTimer = 0;
-            shouldSettle = true;
+            if (!shouldSettle)
+            {
+                shouldSettle = true;
+                settleReason = BILLING_REASON_PERIODIC;
+            }
         }
 
         // 1 小时违约宽限期倒计时 + 阶梯催缴 + 资金自愈检测（离线期间不推进，等价于暂停追缴）
@@ -434,7 +463,10 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
             {
                 contract.graceRecoveryCheckTimer = 0;
                 if (player->GetMoney() >= contract.pendingCopper)
+                {
                     shouldSettle = true;
+                    settleReason = BILLING_REASON_RECOVERY;
+                }
             }
 
             if (contract.gracePeriodTimer > diff)
@@ -464,6 +496,7 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
                 if (player->GetMoney() >= contract.pendingCopper)
                 {
                     shouldSettle = true;
+                    settleReason = BILLING_REASON_RECOVERY;
                 }
                 else
                 {
@@ -516,7 +549,7 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
     }
 
     if (shouldSettle)
-        SettleCurrentBill(player, mapChanged ? BILLING_REASON_MAP_CHANGE : BILLING_REASON_PERIODIC);
+        SettleCurrentBill(player, settleReason);
 }
 
 // -----------------------------------------------------------------------------
@@ -546,12 +579,12 @@ void BotGuildEscrowPlayerScript::OnPlayerLogout(Player* player)
     if (!player)
         return;
 
-    // 下线瞬间强制清算尾款。若清算失败（金币不足），保留内存契约与宽限倒计时，
-    // 玩家重新上线后继续追缴，杜绝「欠费下线」成为逃避佣金的漏洞。
-    if (!sBotGuildEscrowMgr->SettleCurrentBill(player, BILLING_REASON_DISBAND))
-        return;
-
-    sBotGuildEscrowMgr->RemoveContract(player->GetGUID());
+    // 下线闭环：统一走 DoDisband，一次性完成「尾款清算 -> 随从遣返 ->
+    // 护卫注销 -> 阵型/休息标记复位」，杜绝玩家离线后随从在副本内变成孤儿实体
+    // （既不再跟随、也不再被指挥，还会持续占用实体配额）。
+    // 注意：DoDisband 内部是「清算成功才注销契约」，此处不得再无条件 RemoveContract，
+    // 否则金币不足的玩家只要登出一次即可赖掉全部欠款。
+    BotCommandScript::DoDisband(player);
 }
 
 void BotGuildEscrowPlayerScript::OnPlayerCreatureKill(Player* killer, Creature* killed)

@@ -2165,6 +2165,9 @@ public:
             if (!botAI->GetMaster())
             {
                 botAI->SetMaster(player);
+                // 招募即刻开户：从绑定随从的第 0 秒起建立信托账户，
+                // 消除 1 秒自愈探针的计费真空期（此前首秒内的击杀会漏单）。
+                sBotGuildEscrowMgr->StartContract(player);
                 creature->Say("遵命，我将协助您作战。", LANG_UNIVERSAL);
             }
             CloseGossipMenuFor(player);

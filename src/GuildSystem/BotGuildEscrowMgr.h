@@ -36,6 +36,7 @@ enum BillingReason : uint8
     BILLING_REASON_PERIODIC,    // 20 分钟周期轮询静默划扣
     BILLING_REASON_MAP_CHANGE,  // 进出副本切图强制结算
     BILLING_REASON_DISBAND,     // 队伍主动解散最终清算
+    BILLING_REASON_RECOVERY,    // 宽限期资金自愈补缴清算
     BILLING_REASON_MANUAL       // 玩家手动结算
 };
 
@@ -96,8 +97,9 @@ private:
 
     // 击杀全局定长去重环：PlayerScript 侧与随从 AI 侧是两条独立上报通道，
     // 同一次击杀会被回调两次。若不设闸，任何非治疗阵容都会被双重计费。
-    // 定长环形缓冲零堆分配，最近 16 次击杀 GUID 的窗口足以覆盖同帧双路回调。
-    std::array<ObjectGuid, 16> _recentKilledGuids{};
+    // 定长环形缓冲零堆分配，扩容至 64 槽位后，即便 AoE 一波清掉数十个目标，
+    // 两条通道的回调错位也不会把已计费的击杀挤出窗口而造成重复累加。
+    std::array<ObjectGuid, 64> _recentKilledGuids{};
     uint8 _recentKilledIdx{ 0 };
     bool IsDuplicateKill(ObjectGuid const& guid);
 };
