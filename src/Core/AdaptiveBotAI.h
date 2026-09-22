@@ -41,6 +41,12 @@ public:
         UnregisterFromMaster();
     }
 
+    /// @brief 宿主实体安全访问器。
+    ///        `me` 由 UnitAI/CreatureAI 基类置于 protected 保护域，类外部的宏观
+    ///        指令调度系统（BotCommandMgr）需要直接编排随从的瞬移、表情与战斗
+    ///        状态，故在此以最小代价暴露一个只读实体句柄，避免类外保护访问错误。
+    [[nodiscard]] Creature* GetBotCreature() const { return me; }
+
     ObjectGuid masterGuid;
     uint32 followCheckTimer{ 0 };
     uint32 gcdTimer{ 0 };
@@ -48,6 +54,11 @@ public:
     uint32 energyRegenTimer{ 0 };
     uint32 manaRegenTimer{ 0 };
     bool wasInCombat{ false };
+
+    /// @brief 就地休息状态门禁标记。
+    ///        由宏观战术指挥系统 (.bot rest) 置位：休息期间彻底封锁索敌开怪与
+    ///        一切技能释放意图，仅保留普通跟随/待命行为。
+    bool isResting{ false };
 
     // 伴随型战斗护卫（Combat Guardian）实时句柄与保活轮询计时器
     ObjectGuid guardianGuid;
@@ -283,6 +294,7 @@ public:
         energyRegenTimer = 0;
         manaRegenTimer = 0;
         wasInCombat = false;
+        isResting = false;
         combatTimerMs = 0;
         tankSampleTimer = 0;
         otCheckTimer = 0;
@@ -946,6 +958,11 @@ public:
     // =========================================================================
     bool TryEngageCombat()
     {
+        // 休息状态禁止主动开怪：即便指挥官已身处交战中心，
+        // 被明确下令休整的随从也绝不自行卷入战斗。
+        if (isResting)
+            return false;
+
         if (me->IsInCombat())
             return true;
 
@@ -1485,6 +1502,11 @@ public:
                 LOG_INFO("scripts", "[Bot: {}] CanCast 阻断 [SpellID: {}] 原因: {}", me->GetName(), spellId, reason);
             return false;
         };
+
+        // 休息状态为最高优先级门禁：必须在能量/射程/冷却/LoS 等一切判定之前短路，
+        // 确保休息期间连瞬发技能也无法穿透释放，彻底锁死进攻意图。
+        if (isResting)
+            return LogBlock("随从正处于就地休息状态，锁死技能释放");
 
         if (!target || !target->IsInWorld() || target->GetMap() != me->GetMap() || spellId == 0)
             return LogBlock("目标空/不在世界/跨地图/法术ID为0");
