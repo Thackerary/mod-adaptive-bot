@@ -607,11 +607,14 @@ public:
 
     void DamageTaken(Unit* attacker, uint32& damage, DamageEffectType damagetype, SpellSchoolMask damageSchoolMask) override
     {
-        // 受击唤醒保险丝：休息态为纯门禁标记，若不在受击瞬间解除，
-        // 被巡逻怪偷袭的随从会因锁死索敌与技能而原地挨打直至阵亡。
-        if (isResting)
+        // 受击唤醒保险丝：休息态与阵型保持态均为纯门禁标记，若不在受击瞬间解除，
+        // 被巡逻怪偷袭的随从会因锁死索敌与技能而原地挨打直至阵亡；
+        // 正在列阵的随从同样必须立刻瓦解阵型锁转为战斗机动，否则会被固定在
+        // 阵型点位上无法追击目标。
+        if (isResting || isHoldingFormation)
         {
             isResting = false;
+            isHoldingFormation = false;
             me->HandleEmoteCommand(EMOTE_STATE_STAND);
         }
 
@@ -682,11 +685,12 @@ public:
 
     void JustEngagedWith(Unit* who) override
     {
-        // 同上：引擎因协助/受击把随从拖入战斗时，同样必须立即解除休息门禁，
-        // 否则随从会以「休整中」姿态在战斗中彻底挂机。
-        if (isResting)
+        // 同上：引擎因协助/受击把随从拖入战斗时，同样必须立即解除休息门禁与阵型锁，
+        // 否则随从会以「休整中」姿态在战斗中彻底挂机，或被阵型锁钉死在原地。
+        if (isResting || isHoldingFormation)
         {
             isResting = false;
+            isHoldingFormation = false;
             me->HandleEmoteCommand(EMOTE_STATE_STAND);
         }
 
@@ -706,6 +710,13 @@ public:
 
     virtual void OnCombatEnded(bool victory)
     {
+        // 战斗终结（无论胜败）：彻底清除阵型保持与就地休息两类锁定。
+        // isHoldingFormation 一旦滞留，UpdateFollowMaster 的常规跟随通道会被
+        // 永久短路，战斗结束后随从将全员留在阵亡点原地发呆并拒绝跟随指挥官，
+        // 直到下一次手动阵型指令或 45 码防丢失瞬移才会被意外解除。
+        isHoldingFormation = false;
+        isResting = false;
+
         if (isDebugLogging)
             LOG_INFO("scripts", "[Bot: {}] 战斗结算完成: {}", me->GetName(), victory ? "击杀胜利" : "团灭重置");
 
@@ -1913,18 +1924,34 @@ public:
         // UpdateTimers 每帧驱动，故以 restRegenTimer 按秒节流，避免按帧结算瞬间回满。
         if (isResting && !me->IsInCombat())
         {
-            restRegenTimer += diff;
-            if (restRegenTimer >= 1000)
+            // 指挥官交火警觉：休整中的随从仅靠自身受击唤醒存在致命盲区——
+            // 指挥官被多名敌人围攻时随从仍坐地围观，等敌人转而攻击随从才反应，
+            // 白白浪费开怪窗口期。此处以指挥官战斗状态作为强制起床信号。
+            Player* restingMaster = GetMaster();
+            if (restingMaster && restingMaster->IsInCombat())
             {
-                restRegenTimer -= 1000;
+                isResting = false;
+                restRegenTimer = 0;
+                me->HandleEmoteCommand(EMOTE_STATE_STAND);
 
-                if (me->GetHealth() < me->GetMaxHealth())
-                    me->ModifyHealth(std::max<int32>(1, static_cast<int32>(me->GetMaxHealth() * 5 / 100)));
+                if (isDebugLogging)
+                    LOG_INFO("scripts", "[Bot: {}] 指挥官已进入战斗，强制解除休息状态并起立备战。", me->GetName());
+            }
+            else
+            {
+                restRegenTimer += diff;
+                if (restRegenTimer >= 1000)
+                {
+                    restRegenTimer -= 1000;
 
-                if (me->getPowerType() == POWER_MANA && me->GetPower(POWER_MANA) < me->GetMaxPower(POWER_MANA))
-                    me->ModifyPower(POWER_MANA, static_cast<int32>(me->GetMaxPower(POWER_MANA) * 5 / 100));
-                else if (me->getPowerType() == POWER_ENERGY && me->GetPower(POWER_ENERGY) < me->GetMaxPower(POWER_ENERGY))
-                    me->ModifyPower(POWER_ENERGY, 10);
+                    if (me->GetHealth() < me->GetMaxHealth())
+                        me->ModifyHealth(std::max<int32>(1, static_cast<int32>(me->GetMaxHealth() * 5 / 100)));
+
+                    if (me->getPowerType() == POWER_MANA && me->GetPower(POWER_MANA) < me->GetMaxPower(POWER_MANA))
+                        me->ModifyPower(POWER_MANA, static_cast<int32>(me->GetMaxPower(POWER_MANA) * 5 / 100));
+                    else if (me->getPowerType() == POWER_ENERGY && me->GetPower(POWER_ENERGY) < me->GetMaxPower(POWER_ENERGY))
+                        me->ModifyPower(POWER_ENERGY, 10);
+                }
             }
         }
         else

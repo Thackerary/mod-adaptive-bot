@@ -100,6 +100,8 @@ void BotCommandScript::DoAssemble(Player* player)
 
         bot->isResting = false;
         bot->isHoldingFormation = false;
+        // 强制起立：若随从正以坐姿休整，直接瞬移会让其保持蹲坐模型滑行到落点。
+        botCreature->HandleEmoteCommand(EMOTE_STATE_STAND);
         botCreature->CombatStop(true);
         botCreature->GetMotionMaster()->Clear();
         bot->apfMoveUpdateTimer = 0;
@@ -279,6 +281,9 @@ void BotCommandScript::DoFormation(Player* player, BotFormationType formation)
 
         bot->isResting = false;
         bot->isHoldingFormation = true;
+        // 强制起立：坐姿模型执行 MovePoint 会表现为蹲坐滑行，
+        // 必须在解除休息标记的同一时刻播放下站立表情。
+        botCreature->HandleEmoteCommand(EMOTE_STATE_STAND);
         float destX = masterX;
         float destY = masterY;
 
