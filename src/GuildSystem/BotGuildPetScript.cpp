@@ -256,13 +256,22 @@ void BotGuildPetScript::HandleDailySupply(Player* player, Creature* creature)
 
     SupplyKit const kit = GetSupplyKitForLevel(player->GetLevel());
 
-    Item* healItem = player->AddItem(kit.healPotion, kit.count);
-    Item* manaItem = player->AddItem(kit.manaPotion, kit.count);
+    // Player::AddItem 的返回类型是 bool（发放成功与否），并非 Item*，
+    // 不能用于指针判空；此处按返回值逐个记录发放结果。
+    bool const healGranted = player->AddItem(kit.healPotion, kit.count);
+    bool const manaGranted = player->AddItem(kit.manaPotion, kit.count);
 
     // 背包空间不足时绝不记录领取时间戳：否则玩家会既没拿到物资、
     // 又白白消耗掉当天的领取资格。
-    if (!healItem || !manaItem)
+    if (!healGranted || !manaGranted)
     {
+        // 部分发放回滚：若治疗药水已入库而法力药水发放失败，
+        // 不回滚会让玩家在「未消耗领取资格」的前提下白拿一份药水，
+        // 反复触发即可无限刷取。此处按已发放量精确倒扣，保证零净收益。
+        if (healGranted)
+            player->DestroyItemCount(kit.healPotion, kit.count, true);
+        if (manaGranted)
+            player->DestroyItemCount(kit.manaPotion, kit.count, true);
         if (player->GetSession())
             ChatHandler(player->GetSession()).PSendSysMessage(
                 "|cffff0000【行军补给】您的背包空间不足，请整理背包后重新领取。|r");

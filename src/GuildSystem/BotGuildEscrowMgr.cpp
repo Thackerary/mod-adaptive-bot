@@ -10,6 +10,7 @@
 #include "DatabaseEnv.h"
 #include "GameTime.h"
 #include "Log.h"
+#include "ObjectAccessor.h"
 #include "Player.h"
 #include <algorithm>
 #include <vector>
@@ -294,8 +295,14 @@ bool BotGuildEscrowMgr::LeavePlayerGuild(Player* player)
     // 使魔彻底回收三连：解除召唤实体、驱散召唤光环、追缴实物道具、注销法术书技能。
     // 缺任何一环都留下绕过路径——只清实体则光环残留会在重登时自动再召唤；
     // 只清光环则实物道具仍在背包可无限次使用。
-    if (player->GetMiniPet())
-        player->RemoveMiniPet();
+    // AzerothCore 的 Player 并未提供 GetMiniPet / RemoveMiniPet，
+    // 伴侣句柄由 Unit::GetCritterGUID()（UNIT_FIELD_CRITTER）持有，
+    // 遣散须自行取实体后 DespawnOrUnsummon。
+    if (ObjectGuid const critterGuid = player->GetCritterGUID())
+    {
+        if (Creature* critter = ObjectAccessor::GetCreature(*player, critterGuid))
+            critter->DespawnOrUnsummon();
+    }
 
     if (GuildPetConfig const* cfg = GetGuildConfig(currentGuildId))
     {
