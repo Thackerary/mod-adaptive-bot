@@ -10,6 +10,7 @@
 #include "DatabaseEnv.h"
 #include "GameTime.h"
 #include "Log.h"
+#include "MapMgr.h"
 #include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "Player.h"
@@ -208,6 +209,110 @@ void BotGuildEscrowMgr::UnregisterHiredBot(ObjectGuid const& playerGuid, uint32 
     auto& list = it->second.hiredBots;
     list.erase(std::remove_if(list.begin(), list.end(),
         [entry](HiredBotRecord const& record) { return record.entry == entry; }), list.end());
+}
+
+void BotGuildEscrowMgr::SetHiredBotDead(ObjectGuid const& playerGuid, uint32 entry, bool isDead)
+{
+    std::lock_guard<std::mutex> lock(_lock);
+
+    auto it = _activeContracts.find(playerGuid);
+    if (it == _activeContracts.end())
+        return;
+
+    for (auto& record : it->second.hiredBots)
+    {
+        if (record.entry == entry)
+        {
+            record.isDead = isDead;
+            break;
+        }
+    }
+}
+
+bool BotGuildEscrowMgr::IsSpawnIdHired(uint32 spawnId)
+{
+    if (spawnId == 0)
+        return false;
+
+    std::lock_guard<std::mutex> lock(_lock);
+
+    for (auto const& pair : _activeContracts)
+    {
+        for (auto const& record : pair.second.hiredBots)
+        {
+            if (record.originSpawnId == spawnId)
+                return true;
+        }
+    }
+
+    return false;
+}
+
+void BotGuildEscrowMgr::RestoreOriginCreature(uint32 originSpawnId, ObjectGuid const& origGuid)
+{
+    if (originSpawnId == 0 || origGuid.IsEmpty())
+        return;
+
+    CreatureData const* cData = sObjectMgr->GetCreatureData(originSpawnId);
+    if (!cData)
+        return;
+
+    Map* originMap = sMapMgr->FindMap(cData->mapid);
+    if (!originMap)
+        return;
+
+    Creature* origin = originMap->GetCreature(origGuid);
+    if (!origin)
+        return;
+
+    origin->SetVisible(true);
+    origin->SetNpcFlag(UNIT_NPC_FLAG_GOSSIP);
+    origin->RestoreFaction();
+    origin->SetFullHealth();
+    origin->GetMotionMaster()->MoveTargetedHome();
+}
+
+void BotGuildEscrowMgr::CleanupAndDismissAllAvatars(Player* player)
+{
+    if (!player)
+        return;
+
+    ObjectGuid const guid = player->GetGUID();
+    std::vector<HiredBotRecord> recordsToRestore;
+
+    {
+        std::lock_guard<std::mutex> lock(_lock);
+
+        auto it = _activeContracts.find(guid);
+        if (it != _activeContracts.end())
+        {
+            // 先取走花名册副本并清空，避免实体操作期间仍被切图重塑逻辑引用。
+            recordsToRestore = it->second.hiredBots;
+            it->second.hiredBots.clear();
+        }
+    }
+
+    // 1. 跨地图唤醒全部休眠中的大世界营地本体（不依赖玩家当前所在地图）
+    for (HiredBotRecord const& record : recordsToRestore)
+    {
+        RestoreOriginCreature(record.originSpawnId, record.originCreatureGuid);
+    }
+
+    // 2. 销毁当前名下的战地化身实体
+    std::vector<AdaptiveBotAI*> const bots = BotCommandScript::CollectBotGroup(player);
+    for (AdaptiveBotAI* bot : bots)
+    {
+        if (!bot || !bot->isAvatar || !bot->GetBotCreature())
+            continue;
+
+        bot->UnregisterFromMaster();
+
+        // 同图才可就地销毁：异图实体归属另一张地图的更新线程，跨线程调用
+        // DespawnOrUnsummon 会直接触碰对方地图的实体容器而崩溃。
+        // 异图化身仅从总线注销，交由它自己地图的 UpdateFollowMaster 心跳安全自毁。
+        if (bot->GetBotCreature()->GetMapId() == player->GetMapId())
+            bot->GetBotCreature()->DespawnOrUnsummon();
+    }
 }
 
 bool BotGuildEscrowMgr::HasActiveContract(ObjectGuid const& playerGuid)
@@ -1158,7 +1263,11 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
     // -------------------------------------------------------------------------
     if (triggerMapAvatarTransfer)
     {
-        // 1. 清理旧地图上的滞留化身实体，回收服务器实体配额
+        // 1. 仅把旧地图化身从指挥官总线中注销，绝不在此跨线程销毁它！
+        //    玩家切图发生在「新地图」线程，而旧化身实体归属「旧地图」线程，
+        //    跨线程调用 DespawnOrUnsummon 会直接操作对方地图的实体容器，
+        //    是极难复现的多线程地图更新崩溃源。旧化身会在自己所属地图的
+        //    UpdateFollowMaster 周期心跳中检测到与指挥官分图后安全自毁。
         std::vector<AdaptiveBotAI*> const strandedBots = BotCommandScript::CollectBotGroup(player);
         for (AdaptiveBotAI* oldBot : strandedBots)
         {
@@ -1168,7 +1277,6 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
             if (oldBot->GetBotCreature()->GetMapId() != player->GetMapId())
             {
                 oldBot->UnregisterFromMaster();
-                oldBot->GetBotCreature()->DespawnOrUnsummon();
             }
         }
 
@@ -1176,6 +1284,16 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
         std::vector<AdaptiveBotAI*> const freshBots = BotCommandScript::CollectBotGroup(player);
         for (HiredBotRecord const& record : botsToRespawn)
         {
+            // 战死随从禁止随切图「免死刷活」：若放任重塑，玩家只需穿一道传送门
+            // 即可让阵亡随从以满血形态原地复活，战复、跑尸与死亡惩罚全部形同虚设。
+            if (record.isDead)
+            {
+                if (player->GetSession())
+                    ChatHandler(player->GetSession()).PSendSysMessage(
+                        "|cffff8000【公会战报】随从此前已在战斗中牺牲，未能重塑战地化身。|r");
+                continue;
+            }
+
             bool alreadyExists = false;
             for (AdaptiveBotAI* existing : freshBots)
             {

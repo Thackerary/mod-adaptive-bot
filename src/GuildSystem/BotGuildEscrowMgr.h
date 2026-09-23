@@ -60,12 +60,13 @@ struct GuildPetConfig
     uint32 auraSpellId;         // 专属战术光环 SpellID (全队共享，0 为无光环)
 };
 
-// 在队随从战地化身登记项（跨地图无缝重塑的调度依据）
+// 在队随从战地化身登记项（跨地图无缝重塑与防免死刷活的调度依据）
 struct HiredBotRecord
 {
     uint32 entry{ 0 };              // 随从模版 Entry（重塑召唤依据）
     uint32 originSpawnId{ 0 };      // 大世界本体 spawn_id（记忆档案主键）
     ObjectGuid originCreatureGuid;  // 休眠本体实体句柄
+    bool isDead{ false };           // 战死标记：切图时禁止重塑满血化身
 };
 
 // 单指挥官的内存实时契约记账单
@@ -180,9 +181,24 @@ public:
     void RemoveContract(ObjectGuid const& playerGuid);
     bool HasActiveContract(ObjectGuid const& playerGuid);
 
-    // 随从战地化身花名册维护（跨地图重塑调度通道）
+    // 随从战地化身花名册与战死状态维护（跨地图重塑调度通道）
     void RegisterHiredBot(ObjectGuid const& playerGuid, uint32 entry, uint32 originSpawnId, ObjectGuid const& origGuid);
     void UnregisterHiredBot(ObjectGuid const& playerGuid, uint32 entry);
+    void SetHiredBotDead(ObjectGuid const& playerGuid, uint32 entry, bool isDead);
+
+    /// @brief 该世界常驻实体（spawn_id）当前是否处于被雇佣出征状态。
+    ///        供网格卸载重载时判定是否需要维持隐形休眠，杜绝刷新出第二个本体。
+    bool IsSpawnIdHired(uint32 spawnId);
+
+    /// @brief 跨地图安全唤醒休眠中的大世界营地本体。
+    ///        ObjectAccessor::GetCreature 只在「实体所在的那一张地图」的实体容器中
+    ///        查找，玩家带化身身处副本时解散，本体的大世界地图与玩家当前地图不同，
+    ///        用 ObjectAccessor 必然查空，本体就此永久隐身（即「人间蒸发」根因）。
+    ///        故此处按 CreatureData::mapid 定位所属地图后，再由该地图容器取回本体。
+    static void RestoreOriginCreature(uint32 originSpawnId, ObjectGuid const& origGuid);
+
+    /// @brief 统一化身清理与本体唤醒调度（解散 / 登出 / 欠费制裁共用唯一出口）。
+    void CleanupAndDismissAllAvatars(Player* player);
 
     // 核心算费与结算
     void AccumulateKillFee(Player* player, Creature* killed);
