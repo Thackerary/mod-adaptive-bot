@@ -1181,6 +1181,35 @@ void BotGuildEscrowPlayerScript::OnPlayerUpdate(Player* player, uint32 p_time)
     sBotGuildEscrowMgr->Update(player, p_time);
 }
 
+void BotGuildEscrowPlayerScript::OnMapChanged(Player* player)
+{
+    if (!player)
+        return;
+
+    // 指挥官切图加载完成的第一时间拉齐全队随从。
+    // 基类 UpdateFollowMaster 的跨图兜底是 1 秒轮询，而随从若因旧网格休眠
+    // 未随地图切换被唤醒，存在最长 1 秒的跟随空窗；此钩子把响应压到第 0 秒。
+    std::vector<AdaptiveBotAI*> const botGroup = BotCommandScript::CollectBotGroup(player);
+    for (AdaptiveBotAI* bot : botGroup)
+    {
+        if (!bot || !bot->GetBotCreature() || !bot->GetBotCreature()->IsAlive())
+            continue;
+
+        Creature* botCreature = bot->GetBotCreature();
+
+        // 仅在地图不一致时触发跨图传送，避免同图重复传送打断正常跟随。
+        if (botCreature->GetMapId() != player->GetMapId())
+        {
+            // 先解除阵型锁与休息锁并同步位面，防止随从传送落地后被门禁钉住。
+            bot->isHoldingFormation = false;
+            bot->isResting = false;
+            botCreature->SetPhaseMask(player->GetPhaseMask(), true);
+            botCreature->TeleportTo(player->GetMapId(), player->GetPositionX(), player->GetPositionY(), player->GetPositionZ(), player->GetOrientation());
+            botCreature->GetMotionMaster()->Clear();
+        }
+    }
+}
+
 // -----------------------------------------------------------------------------
 // WorldScript：数据库连通后再载入黑名单
 // -----------------------------------------------------------------------------

@@ -1817,8 +1817,19 @@ public:
         if (!master || !master->IsAlive())
             return;
 
+        // 跨地图跟随兜底：指挥官已切至不同地图（跨大陆坐船/飞艇、进出副本、炉石），
+        // NearTeleportTo 仅在当前地图内生效，必须改用跨地图 TeleportTo 将随从
+        // 直接拉至主人身侧。同时先解除阵型锁与休息锁、同步位面，
+        // 否则传送落地后随从会被门禁标记钉死在原地拒绝归队。
         if (me->GetMap() != master->GetMap())
+        {
+            isHoldingFormation = false;
+            isResting = false;
+            me->SetPhaseMask(master->GetPhaseMask(), true);
+            me->TeleportTo(master->GetMapId(), master->GetPositionX(), master->GetPositionY(), master->GetPositionZ(), master->GetOrientation());
+            me->GetMotionMaster()->Clear();
             return;
+        }
 
         // 处于就地休息或保持阵型状态下，禁止常规 6 码跟随抢占：
         // 阵型成员一旦被拉回跟随队形，三大阵型的几何外推结果会被每秒巡检整体冲刷。
@@ -2190,13 +2201,43 @@ public:
                 botAI->UnregisterFromMaster();
                 botAI->masterGuid.Clear();
                 creature->CombatStop(true);
-                creature->GetMotionMaster()->MoveIdle();
                 creature->RestoreFaction();
-                creature->Say("我在此待命。", LANG_UNIVERSAL);
 
                 // 恢复为数据库 creature_template 中定义的初始最低等级并补满血量
                 creature->SetLevel(creature->GetCreatureTemplate()->minlevel);
                 creature->SetHealth(creature->GetMaxHealth());
+
+                // 解散归巢：读取大世界原生实体在数据库登记的原始出生营地信息。
+                // 若就地 MoveIdle，随从会永远滞留在副本深处/荒野无人区，既无法被
+                // 重新招募，也破坏了营地常驻生态，故必须送回其原生刷新点。
+                CreatureData const* cData = creature->GetCreatureData();
+                if (cData)
+                {
+                    uint32 const homeMapId = cData->mapid;
+                    Position const homePos(cData->posX, cData->posY, cData->posZ, cData->orientation);
+
+                    // 异地判据：跨地图，或与出生点直线距离超过 10 码。
+                    // 用三参 GetDistance 重载而非 Position 重载，规避重载可用性歧义。
+                    if (creature->GetMapId() != homeMapId || creature->GetDistance(cData->posX, cData->posY, cData->posZ) > 10.0f)
+                    {
+                        creature->Say("感谢并肩作战，我先返回驻地休整了！", LANG_UNIVERSAL);
+                        creature->TeleportTo(homeMapId, homePos.GetPositionX(), homePos.GetPositionY(), homePos.GetPositionZ(), homePos.GetOrientation());
+                    }
+                    else
+                    {
+                        creature->Say("我在此待命。", LANG_UNIVERSAL);
+                    }
+
+                    // 传送完成后由其自身寻路精确贴合 HomePosition（世界常驻实体
+                    // 的家点由 Creature::LoadFromDB 写入，MoveTargetedHome 可安全调用）。
+                    creature->GetMotionMaster()->MoveTargetedHome();
+                }
+                else
+                {
+                    // 临时召唤物或非大世界持久化实体：无原生驻点可回，保底原地待命。
+                    creature->Say("我在此待命。", LANG_UNIVERSAL);
+                    creature->GetMotionMaster()->MoveIdle();
+                }
             }
             CloseGossipMenuFor(player);
         }
