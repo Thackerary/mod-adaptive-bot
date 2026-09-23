@@ -11,6 +11,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 class Player;
 class Creature;
@@ -59,6 +60,14 @@ struct GuildPetConfig
     uint32 auraSpellId;         // 专属战术光环 SpellID (全队共享，0 为无光环)
 };
 
+// 在队随从战地化身登记项（跨地图无缝重塑的调度依据）
+struct HiredBotRecord
+{
+    uint32 entry{ 0 };              // 随从模版 Entry（重塑召唤依据）
+    uint32 originSpawnId{ 0 };      // 大世界本体 spawn_id（记忆档案主键）
+    ObjectGuid originCreatureGuid;  // 休眠本体实体句柄
+};
+
 // 单指挥官的内存实时契约记账单
 struct BotHireContract
 {
@@ -73,6 +82,9 @@ struct BotHireContract
     bool reminded30Min{ false };        // 30 分钟催缴预警已发送标记
     bool reminded10Min{ false };        // 10 分钟紧急催缴已发送标记
     uint32 auraSyncTimer{ 0 };          // 公会战术光环动态同步节流计时器 (2000ms)
+
+    // 在队随从花名册：切图时据此在新地图重塑同批化身，实现无缝跟随。
+    std::vector<HiredBotRecord> hiredBots;
 
     // 契约独立击杀去重环：PlayerScript 侧与随从 AI 侧是两条独立上报通道，
     // 同一次击杀会被回调两次，必须设闸防双重计费。
@@ -167,6 +179,10 @@ public:
     void StartContract(Player* player);
     void RemoveContract(ObjectGuid const& playerGuid);
     bool HasActiveContract(ObjectGuid const& playerGuid);
+
+    // 随从战地化身花名册维护（跨地图重塑调度通道）
+    void RegisterHiredBot(ObjectGuid const& playerGuid, uint32 entry, uint32 originSpawnId, ObjectGuid const& origGuid);
+    void UnregisterHiredBot(ObjectGuid const& playerGuid, uint32 entry);
 
     // 核心算费与结算
     void AccumulateKillFee(Player* player, Creature* killed);

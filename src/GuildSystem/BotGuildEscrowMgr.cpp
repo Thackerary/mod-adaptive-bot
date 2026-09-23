@@ -15,6 +15,7 @@
 #include "Player.h"
 #include "SpellInfo.h"
 #include "SpellMgr.h"
+#include "TemporarySummon.h"
 #include <algorithm>
 #include <unordered_set>
 #include <vector>
@@ -172,6 +173,41 @@ void BotGuildEscrowMgr::RemoveContract(ObjectGuid const& playerGuid)
     // 玩家更新帧在随从彻底离队之后做一次幂等差量同步，确保任何注销路径都
     // 不留残留战术光环（对已自行清理过光环的路径同样无害，属幂等空操作）。
     _pendingAuraCleanup.insert(playerGuid);
+}
+
+void BotGuildEscrowMgr::RegisterHiredBot(ObjectGuid const& playerGuid, uint32 entry, uint32 originSpawnId, ObjectGuid const& origGuid)
+{
+    std::lock_guard<std::mutex> lock(_lock);
+
+    auto it = _activeContracts.find(playerGuid);
+    if (it == _activeContracts.end())
+        return;
+
+    // 幂等保护：同一模版 Entry 只登记一次，防止重复签约把花名册撑爆。
+    for (auto const& record : it->second.hiredBots)
+    {
+        if (record.entry == entry)
+            return;
+    }
+
+    HiredBotRecord record;
+    record.entry = entry;
+    record.originSpawnId = originSpawnId;
+    record.originCreatureGuid = origGuid;
+    it->second.hiredBots.push_back(record);
+}
+
+void BotGuildEscrowMgr::UnregisterHiredBot(ObjectGuid const& playerGuid, uint32 entry)
+{
+    std::lock_guard<std::mutex> lock(_lock);
+
+    auto it = _activeContracts.find(playerGuid);
+    if (it == _activeContracts.end())
+        return;
+
+    auto& list = it->second.hiredBots;
+    list.erase(std::remove_if(list.begin(), list.end(),
+        [entry](HiredBotRecord const& record) { return record.entry == entry; }), list.end());
 }
 
 bool BotGuildEscrowMgr::HasActiveContract(ObjectGuid const& playerGuid)
@@ -937,6 +973,8 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
     bool shouldRecycleContract = false; // 空契约本帧注销标记（收尾动作一律推迟至锁外）
     uint32 breachDebt = 0;
     uint32 warningDueCopper = 0;
+    bool triggerMapAvatarTransfer = false;            // 本帧是否触发跨地图化身重塑
+    std::vector<HiredBotRecord> botsToRespawn;        // 待在新地图重塑的花名册快照
 
     {
         std::lock_guard<std::mutex> lock(_lock);
@@ -949,12 +987,15 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
 
         // 双轨驱动之一：切图强制结算（进出副本 / 跨大陆传送）。
         // 以地图 ID 变化为判据而非依赖不存在的 OnMapChanged 钩子。
+        // 同时抓取花名册快照，交由锁外做跨地图化身重塑（实体操作严禁持锁执行）。
         uint32 const currentMapId = player->GetMapId();
         if (contract.lastMapId != currentMapId)
         {
             contract.lastMapId = currentMapId;
             shouldSettle = true;
             settleReason = BILLING_REASON_MAP_CHANGE;
+            triggerMapAvatarTransfer = true;
+            botsToRespawn = contract.hiredBots;
         }
 
         // 公会战术光环同步节流：此处仅推进计时器与置位标记，
@@ -1107,6 +1148,60 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
         // 强制全队归巢：此时契约已被摘除，DoDisband 内部的尾款结清会自动跳过
         BotCommandScript::DoDisband(player);
         return;
+    }
+
+    // -------------------------------------------------------------------------
+    // 跨地图战地化身无缝重塑：旧地图化身销毁，新地图在指挥官身侧就地投影新化身，
+    // 并透传本体 originSpawnId / originCreatureGuid，实现经验档案完整继承。
+    // 全部实体操作一律在锁外执行：SummonCreature / DespawnOrUnsummon 会触发地图
+    // 线程副作用，持 _lock 期间回调外部代码将引入锁序倒置死锁风险。
+    // -------------------------------------------------------------------------
+    if (triggerMapAvatarTransfer)
+    {
+        // 1. 清理旧地图上的滞留化身实体，回收服务器实体配额
+        std::vector<AdaptiveBotAI*> const strandedBots = BotCommandScript::CollectBotGroup(player);
+        for (AdaptiveBotAI* oldBot : strandedBots)
+        {
+            if (!oldBot || !oldBot->GetBotCreature())
+                continue;
+
+            if (oldBot->GetBotCreature()->GetMapId() != player->GetMapId())
+            {
+                oldBot->UnregisterFromMaster();
+                oldBot->GetBotCreature()->DespawnOrUnsummon();
+            }
+        }
+
+        // 2. 在新地图指挥官身侧重塑化身（同 Entry 已存在则跳过，杜绝重复入队）
+        std::vector<AdaptiveBotAI*> const freshBots = BotCommandScript::CollectBotGroup(player);
+        for (HiredBotRecord const& record : botsToRespawn)
+        {
+            bool alreadyExists = false;
+            for (AdaptiveBotAI* existing : freshBots)
+            {
+                if (existing && existing->GetBotCreature()
+                    && existing->GetBotCreature()->GetEntry() == record.entry
+                    && existing->GetBotCreature()->GetMapId() == player->GetMapId())
+                {
+                    alreadyExists = true;
+                    break;
+                }
+            }
+
+            if (alreadyExists)
+                continue;
+
+            if (TempSummon* avatar = player->SummonCreature(record.entry, player->GetPosition(), TEMPSUMMON_MANUAL_DESPAWN))
+            {
+                if (auto* avatarAI = dynamic_cast<AdaptiveBotAI*>(avatar->AI()))
+                {
+                    avatarAI->isAvatar = true;
+                    avatarAI->originSpawnId = record.originSpawnId;
+                    avatarAI->originCreatureGuid = record.originCreatureGuid;
+                    avatarAI->SetMaster(player);
+                }
+            }
+        }
     }
 
     if (shouldSettle)

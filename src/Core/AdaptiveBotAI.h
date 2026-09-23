@@ -470,20 +470,52 @@ public:
     }
 
     // =========================================================================
-    // 阶段三：世界常驻实体的物理身份标识
+    // 战地化身身份标识与大世界本体寄宿句柄
     // =========================================================================
-    /// @brief 获取随从在 world 数据库 creature 表中的物理身份 spawnId。
-    ///        只有由 .sql 世界刷新出来的常驻 NPC 才具备有效 spawnId；
-    ///        运行时 SummonCreature 的临时实体（含伴随护卫）恒返回 0，
-    ///        据此天然隔离「可跨战斗积累经验的常驻随从」与「一次性召唤物」。
+    bool isAvatar{ false };            // 本实体是否为临时战地化身
+    uint32 originSpawnId{ 0 };         // 寄宿的大世界本体 spawn_id（化身专用）
+    ObjectGuid originCreatureGuid;     // 休眠本体实体句柄（解散时唤醒用）
+
+    // =========================================================================
+    // 阶段三：世界常驻实体的物理身份标识（化身穿透继承）
+    // =========================================================================
+    /// @brief 获取随从的物理身份 spawnId。
+    ///        化身实体优先返回寄宿的大世界本体 spawnId，使战前 Boss 认知预热与
+    ///        战后归因落盘全部锚定本体档案，实现化身与本体的经验完全共享。
     uint32 GetBotSpawnId() const
     {
+        if (originSpawnId != 0)
+            return originSpawnId;
+
         // AzerothCore 已移除 GetDBTableGUIDLow()，世界常驻实体的数据库物理 GUID
         // 唯一合法入口为 GetSpawnId()：
         //   - 由 .sql 世界刷新出来的常驻 NPC 返回非零 spawnId；
         //   - 运行时 SummonCreature 的临时实体（含伴随护卫）恒返回 0。
         // 据此天然隔离「可跨战斗积累经验的常驻随从」与「一次性召唤物」。
         return static_cast<uint32>(me->GetSpawnId());
+    }
+
+    /// @brief 化身安全消散并唤醒大世界本体（解散安全闭环）。
+    ///        化身销毁前先把本体从隐身休眠中唤醒并复位交互标记与血量，
+    ///        确保玩家随时可以回到营地重新洽谈雇佣。
+    void DismissAvatar()
+    {
+        if (!isAvatar)
+            return;
+
+        if (!originCreatureGuid.IsEmpty())
+        {
+            if (Creature* origin = ObjectAccessor::GetCreature(*me, originCreatureGuid))
+            {
+                origin->SetVisible(true);
+                origin->SetNpcFlag(UNIT_NPC_FLAG_GOSSIP);
+                origin->RestoreFaction();
+                origin->SetFullHealth();
+                origin->GetMotionMaster()->MoveTargetedHome();
+            }
+        }
+
+        me->DespawnOrUnsummon();
     }
 
     // =========================================================================
@@ -1817,12 +1849,18 @@ public:
         if (!master || !master->IsAlive())
             return;
 
-        // 跨地图阻断：Creature 实体依附于具体地图，Unit/WorldObject 均未提供跨图
-        // TeleportTo（该能力仅 Player 具备，Creature 只有同图的 NearTeleportTo）。
-        // 且随从与指挥官分处两张地图时，距离、相位、视线判定全部失去意义，
-        // 故此处安全早退，等同图后再恢复常规跟随。
+        // 跨地图阻断与旧化身自毁：
+        // Creature 实体依附于具体地图，Unit/WorldObject 均未提供跨图 TeleportTo
+        // （该能力仅 Player 具备，Creature 只有同图的 NearTeleportTo）。
+        // 若当前实体为临时化身且指挥官已切换地图，旧地图化身立即自毁以回收实体配额，
+        // 新地图的化身由 BotGuildEscrowMgr 的切图重塑调度在指挥官身侧重新投影。
         if (me->GetMap() != master->GetMap())
+        {
+            if (isAvatar)
+                me->DespawnOrUnsummon();
+
             return;
+        }
 
         // 处于就地休息或保持阵型状态下，禁止常规 6 码跟随抢占：
         // 阵型成员一旦被拉回跟随队形，三大阵型的几何外推结果会被每秒巡检整体冲刷。
@@ -2110,6 +2148,17 @@ class AdaptiveBotScript : public CreatureScript
 public:
     explicit AdaptiveBotScript(char const* name) : CreatureScript(name) { }
 
+    /// @brief 公会中介服务费阶梯定价（一次性收取、不退还，归公会所有）。
+    ///        1~59 级 20 银币；60~79 级 1 金币；80 级 3 金币。
+    static uint32 GetRecruitMediationFee(uint8 level)
+    {
+        if (level >= 80)
+            return 30000; // 3 金币
+        if (level >= 60)
+            return 10000; // 1 金币
+        return 2000;      // 20 银币
+    }
+
     CreatureAI* GetAI(Creature* creature) const override
     {
         return new T_AI(creature);
@@ -2137,7 +2186,19 @@ public:
 
         if (!master)
         {
-            AddGossipItemFor(player, GOSSIP_ICON_CHAT, "跟随我，协助我作战！", GOSSIP_SENDER_MAIN, 1);
+            // 中介费明码标价：签约前即向玩家展示一次性服务费金额。
+            uint32 const fee = GetRecruitMediationFee(creature->GetLevel());
+            uint32 const gold = fee / 10000;
+            uint32 const silver = (fee % 10000) / 100;
+
+            std::string recruitMsg = "跟随我，协助我作战！（公会中介费: ";
+            if (gold > 0)
+                recruitMsg += std::to_string(gold) + "金";
+            if (silver > 0)
+                recruitMsg += std::to_string(silver) + "银";
+            recruitMsg += "）";
+
+            AddGossipItemFor(player, GOSSIP_ICON_CHAT, recruitMsg, GOSSIP_SENDER_MAIN, 1);
         }
         else if (master == player)
         {
@@ -2179,11 +2240,52 @@ public:
         {
             if (!botAI->GetMaster())
             {
-                botAI->SetMaster(player);
-                // 招募即刻开户：从绑定随从的第 0 秒起建立信托账户，
-                // 消除 1 秒自愈探针的计费真空期（此前首秒内的击杀会漏单）。
-                sBotGuildEscrowMgr->StartContract(player);
-                creature->Say("遵命，我将协助您作战。", LANG_UNIVERSAL);
+                // 1. 中介费门禁：金币不足直接阻断签约，费用一次性收取且不退还。
+                uint32 const fee = GetRecruitMediationFee(creature->GetLevel());
+                if (player->GetMoney() < fee)
+                {
+                    uint32 const gold = fee / 10000;
+                    uint32 const silver = (fee % 10000) / 100;
+                    if (player->GetSession())
+                        ChatHandler(player->GetSession()).PSendSysMessage(
+                            "|cffff0000【公会前台】您的背包金币不足以支付公会中介服务费（需支付: {}金 {}银）！|r", gold, silver);
+                    CloseGossipMenuFor(player);
+                    return true;
+                }
+
+                player->ModifyMoney(-static_cast<int64>(fee));
+                if (player->GetSession())
+                    ChatHandler(player->GetSession()).PSendSysMessage(
+                        "【公会前台】已缴纳公会中介服务费，冒险雇佣契约正式缔结！");
+
+                uint32 const entry = creature->GetEntry();
+                uint32 const originSpawn = botAI->GetBotSpawnId();
+                ObjectGuid const originGuid = creature->GetGUID();
+                Position const spawnPos = creature->GetPosition();
+
+                // 2. 本体公开告别后立即隐身休眠并封锁交互，杜绝镜头看到"两个自己"。
+                creature->Say("遵命！契约已成，我的战地化身将即刻协助您作战。", LANG_UNIVERSAL);
+                creature->SetVisible(false);
+                creature->RemoveNpcFlag(UNIT_NPC_FLAG_GOSSIP);
+                creature->CombatStop(true);
+                creature->GetMotionMaster()->MoveIdle();
+
+                // 3. 原地唤醒战地化身入队，并把本体档案句柄寄宿给化身。
+                if (TempSummon* avatar = player->SummonCreature(entry, spawnPos, TEMPSUMMON_MANUAL_DESPAWN))
+                {
+                    if (auto* avatarAI = dynamic_cast<AdaptiveBotAI*>(avatar->AI()))
+                    {
+                        avatarAI->isAvatar = true;
+                        avatarAI->originSpawnId = originSpawn;
+                        avatarAI->originCreatureGuid = originGuid;
+                        avatarAI->SetMaster(player);
+
+                        // 招募即刻开户：从绑定随从的第 0 秒起建立信托账户，
+                        // 消除 1 秒自愈探针的计费真空期（此前首秒内的击杀会漏单）。
+                        sBotGuildEscrowMgr->StartContract(player);
+                        sBotGuildEscrowMgr->RegisterHiredBot(player->GetGUID(), entry, originSpawn, originGuid);
+                    }
+                }
             }
             CloseGossipMenuFor(player);
         }
@@ -2191,9 +2293,25 @@ public:
         {
             if (botAI->GetMaster() == player)
             {
+                uint32 const botEntry = creature->GetEntry();
+                bool const isAv = botAI->isAvatar;
+
                 botAI->UnregisterFromMaster();
                 botAI->masterGuid.Clear();
                 creature->CombatStop(true);
+
+                // 从公会契约花名册中注销，终止其跨地图重塑调度。
+                sBotGuildEscrowMgr->UnregisterHiredBot(player->GetGUID(), botEntry);
+
+                // 化身分支：化身消散，并由 DismissAvatar() 唤醒休眠中的大世界本体。
+                if (isAv)
+                {
+                    creature->Say("契约解除，化身消散，我先返回驻地了。", LANG_UNIVERSAL);
+                    botAI->DismissAvatar();
+                    CloseGossipMenuFor(player);
+                    return true;
+                }
+
                 creature->RestoreFaction();
 
                 // 恢复为数据库 creature_template 中定义的初始最低等级并补满血量
