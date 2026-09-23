@@ -2175,11 +2175,18 @@ public:
 
     /// @brief 公会中介服务费阶梯定价（一次性收取、不退还，归公会所有）。
     ///        1~59 级 20 银币；60~79 级 1 金币；80 级 3 金币。
-    static uint32 GetRecruitMediationFee(uint8 level)
+    ///        等级基准取「玩家与随从模版等级的最大值」：若只认生物等级，
+    ///        80 级玩家面对营地里 10 级的低阶模版时只需支付 20 银，
+    ///        等价于用等级倒挂白嫖满级随从的全程服务，中介费形同虚设。
+    static uint32 GetRecruitMediationFee(Player* player, Creature* creature)
     {
-        if (level >= 80)
+        uint8 const playerLevel = player ? player->GetLevel() : 1;
+        uint8 const creatureLevel = creature ? creature->GetLevel() : 1;
+        uint8 const effectiveLevel = std::max(playerLevel, creatureLevel);
+
+        if (effectiveLevel >= 80)
             return 30000; // 3 金币
-        if (level >= 60)
+        if (effectiveLevel >= 60)
             return 10000; // 1 金币
         return 2000;      // 20 银币
     }
