@@ -306,6 +306,27 @@ public:
 
     void Reset() override
     {
+        // 网格重载防复生：世界常驻随从被雇佣出征期间，本体处于「隐身休眠」，
+        // 但网格（Grid）因玩家远离而卸载、再因折返而重新载入时，ApplyAllUpdates
+        // 会按数据库快照把它重新初始化——若不加此闸，营地会凭空刷新出第二个
+        // 可见可交互的同名本体，同场出现两个本体。
+        uint32 const mySpawnId = static_cast<uint32>(me->GetSpawnId());
+        if (!isAvatar && mySpawnId > 0 && sBotGuildEscrowMgr->IsSpawnIdHired(mySpawnId))
+        {
+            me->SetVisible(false);
+            me->RemoveNpcFlag(UNIT_NPC_FLAG_GOSSIP);
+            me->CombatStop(true);
+            me->GetMotionMaster()->MoveIdle();
+            return;
+        }
+
+        // 化身复活复位：化身实体重新激活且仍存活时，抹掉花名册里的战死标记。
+        // 若不复位，被战复 / 跑尸救回的化身会在下一次切图时被防刷活闸门误拦截。
+        if (isAvatar && !masterGuid.IsEmpty() && me->IsAlive())
+        {
+            sBotGuildEscrowMgr->SetHiredBotDead(masterGuid, me->GetEntry(), false);
+        }
+
         ScriptedAI::Reset();
         followCheckTimer = 0;
         gcdTimer = 0;
@@ -503,18 +524,12 @@ public:
         if (!isAvatar)
             return;
 
-        if (!originCreatureGuid.IsEmpty())
-        {
-            if (Creature* origin = ObjectAccessor::GetCreature(*me, originCreatureGuid))
-            {
-                origin->SetVisible(true);
-                origin->SetNpcFlag(UNIT_NPC_FLAG_GOSSIP);
-                origin->RestoreFaction();
-                origin->SetFullHealth();
-                origin->GetMotionMaster()->MoveTargetedHome();
-            }
-        }
-
+        // 委托公会管理核心执行跨地图安全唤醒：
+        // ObjectAccessor::GetCreature 只在「实体所在的那一张地图」的容器中查找。
+        // 玩家带化身身处副本时解散，本体的大世界地图与玩家当前地图不同，
+        // 用它必然查空，本体就此永久隐身（即「人间蒸发」根因）。
+        // 统一改由核心层按 CreatureData::mapid 定位所属地图后精准取回本体。
+        BotGuildEscrowMgr::RestoreOriginCreature(originSpawnId, originCreatureGuid);
         me->DespawnOrUnsummon();
     }
 
@@ -714,6 +729,14 @@ public:
         ScriptedAI::JustDied(killer);
         if (isDebugLogging)
             LOG_INFO("scripts", "[Bot: {}] 阵亡！致命伤害来源: [{}]", me->GetName(), killer ? killer->GetName() : "未知/环境伤害");
+
+        // 化身战死立标：花名册记录战死状态，切图重塑环节据此拒绝重新投影。
+        // 否则玩家只需穿一道传送门，阵亡随从便以满血形态原地复活，
+        // 战复、跑尸与死亡惩罚机制全部形同虚设。
+        if (isAvatar && !masterGuid.IsEmpty())
+        {
+            sBotGuildEscrowMgr->SetHiredBotDead(masterGuid, me->GetEntry(), true);
+        }
 
         OnBotDied(killer);
     }
@@ -1846,21 +1869,23 @@ public:
         followCheckTimer = 1000;
 
         Player* master = GetMaster();
-        if (!master || !master->IsAlive())
-            return;
 
-        // 跨地图阻断与旧化身自毁：
-        // Creature 实体依附于具体地图，Unit/WorldObject 均未提供跨图 TeleportTo
-        // （该能力仅 Player 具备，Creature 只有同图的 NearTeleportTo）。
-        // 若当前实体为临时化身且指挥官已切换地图，旧地图化身立即自毁以回收实体配额，
-        // 新地图的化身由 BotGuildEscrowMgr 的切图重塑调度在指挥官身侧重新投影。
-        if (me->GetMap() != master->GetMap())
+        // 跨地图阻断与旧化身安全自毁：
+        // GetMaster() 仅在「当前地图」检索玩家。指挥官切图后它必然返回 nullptr，
+        // 若照旧只在 !master 时直接 return，旧地图化身将永远等不到下方的分图判定，
+        // 变成既无主人、也不会自毁的孤儿实体持续占用配额。
+        // 故此处把「找不到主人」与「主人跨图」合并为同一判据：化身一律立即自毁，
+        // 其在新地图的接替实体由 BotGuildEscrowMgr 的切图重塑调度重新投影。
+        if (!master || me->GetMap() != master->GetMap())
         {
             if (isAvatar)
                 me->DespawnOrUnsummon();
 
             return;
         }
+
+        if (!master->IsAlive())
+            return;
 
         // 处于就地休息或保持阵型状态下，禁止常规 6 码跟随抢占：
         // 阵型成员一旦被拉回跟随队形，三大阵型的几何外推结果会被每秒巡检整体冲刷。
@@ -2187,7 +2212,7 @@ public:
         if (!master)
         {
             // 中介费明码标价：签约前即向玩家展示一次性服务费金额。
-            uint32 const fee = GetRecruitMediationFee(creature->GetLevel());
+            uint32 const fee = GetRecruitMediationFee(player, creature);
             uint32 const gold = fee / 10000;
             uint32 const silver = (fee % 10000) / 100;
 
@@ -2241,7 +2266,7 @@ public:
             if (!botAI->GetMaster())
             {
                 // 1. 中介费门禁：金币不足直接阻断签约，费用一次性收取且不退还。
-                uint32 const fee = GetRecruitMediationFee(creature->GetLevel());
+                uint32 const fee = GetRecruitMediationFee(player, creature);
                 if (player->GetMoney() < fee)
                 {
                     uint32 const gold = fee / 10000;
