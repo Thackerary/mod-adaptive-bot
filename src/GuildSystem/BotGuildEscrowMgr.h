@@ -242,7 +242,6 @@ public:
     void OnPlayerLogout(Player* player) override;
     void OnPlayerCreatureKill(Player* killer, Creature* killed) override;
     void OnPlayerUpdate(Player* player, uint32 p_time) override;
-    void OnMapChanged(Player* player) override; // 监听指挥官跨地图/进出副本事件
 };
 
 // 数据库就绪后才载入黑名单：脚本注册阶段（AddSC_*）数据库尚未连通

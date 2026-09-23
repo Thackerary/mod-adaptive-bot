@@ -1817,19 +1817,12 @@ public:
         if (!master || !master->IsAlive())
             return;
 
-        // 跨地图跟随兜底：指挥官已切至不同地图（跨大陆坐船/飞艇、进出副本、炉石），
-        // NearTeleportTo 仅在当前地图内生效，必须改用跨地图 TeleportTo 将随从
-        // 直接拉至主人身侧。同时先解除阵型锁与休息锁、同步位面，
-        // 否则传送落地后随从会被门禁标记钉死在原地拒绝归队。
+        // 跨地图阻断：Creature 实体依附于具体地图，Unit/WorldObject 均未提供跨图
+        // TeleportTo（该能力仅 Player 具备，Creature 只有同图的 NearTeleportTo）。
+        // 且随从与指挥官分处两张地图时，距离、相位、视线判定全部失去意义，
+        // 故此处安全早退，等同图后再恢复常规跟随。
         if (me->GetMap() != master->GetMap())
-        {
-            isHoldingFormation = false;
-            isResting = false;
-            me->SetPhaseMask(master->GetPhaseMask(), true);
-            me->TeleportTo(master->GetMapId(), master->GetPositionX(), master->GetPositionY(), master->GetPositionZ(), master->GetOrientation());
-            me->GetMotionMaster()->Clear();
             return;
-        }
 
         // 处于就地休息或保持阵型状态下，禁止常规 6 码跟随抢占：
         // 阵型成员一旦被拉回跟随队形，三大阵型的几何外推结果会被每秒巡检整体冲刷。
@@ -2208,33 +2201,33 @@ public:
                 creature->SetHealth(creature->GetMaxHealth());
 
                 // 解散归巢：读取大世界原生实体在数据库登记的原始出生营地信息。
-                // 若就地 MoveIdle，随从会永远滞留在副本深处/荒野无人区，既无法被
-                // 重新招募，也破坏了营地常驻生态，故必须送回其原生刷新点。
+                // 若就地 MoveIdle，随从会永远滞留在野外无人区，既无法被重新招募，
+                // 也破坏了营地常驻生态，故需送回其原生刷新点。
+                //
+                // 注意跨图限制：Creature 没有跨地图 TeleportTo，NearTeleportTo 只在
+                // 同图内生效。若解散时指挥官身处副本等异于驻地的地图，随从无法一步
+                // 归位（只能随玩家出本后再归巢），此处仅在同图前提下执行同图瞬间归巢。
                 CreatureData const* cData = creature->GetCreatureData();
-                if (cData)
+                if (cData && creature->GetMapId() == cData->mapid)
                 {
-                    uint32 const homeMapId = cData->mapid;
-                    Position const homePos(cData->posX, cData->posY, cData->posZ, cData->orientation);
-
-                    // 异地判据：跨地图，或与出生点直线距离超过 10 码。
-                    // 用三参 GetDistance 重载而非 Position 重载，规避重载可用性歧义。
-                    if (creature->GetMapId() != homeMapId || creature->GetDistance(cData->posX, cData->posY, cData->posZ) > 10.0f)
+                    // 同图异地（离出生点超过 10 码）才瞬移，避免原地解散时反复挪位。
+                    if (creature->GetDistance(cData->posX, cData->posY, cData->posZ) > 10.0f)
                     {
                         creature->Say("感谢并肩作战，我先返回驻地休整了！", LANG_UNIVERSAL);
-                        creature->TeleportTo(homeMapId, homePos.GetPositionX(), homePos.GetPositionY(), homePos.GetPositionZ(), homePos.GetOrientation());
+                        creature->NearTeleportTo(cData->posX, cData->posY, cData->posZ, cData->orientation);
                     }
                     else
                     {
                         creature->Say("我在此待命。", LANG_UNIVERSAL);
                     }
 
-                    // 传送完成后由其自身寻路精确贴合 HomePosition（世界常驻实体
-                    // 的家点由 Creature::LoadFromDB 写入，MoveTargetedHome 可安全调用）。
+                    // 瞬移落点后由其自身寻路精确贴合 HomePosition（世界常驻实体的
+                    // 家点由 Creature::LoadFromDB 写入，MoveTargetedHome 可安全调用）。
                     creature->GetMotionMaster()->MoveTargetedHome();
                 }
                 else
                 {
-                    // 临时召唤物或非大世界持久化实体：无原生驻点可回，保底原地待命。
+                    // 异图解散帧，或临时召唤物等无原生驻点实体：保底原地待命。
                     creature->Say("我在此待命。", LANG_UNIVERSAL);
                     creature->GetMotionMaster()->MoveIdle();
                 }
