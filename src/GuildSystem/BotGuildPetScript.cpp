@@ -110,8 +110,10 @@ bool BotGuildPetScript::OnGossipSelect(Player* player, Creature* creature, uint3
             ShowTacticalCommands(player, creature);
             break;
         case ACTION_TACTICAL_DISBAND:
+            // 解散链路已由 DoDisband 统一收口（尾款清算 -> 化身销毁 -> 本体唤醒 -> 归巢），
+            // 解散后返回使魔主菜单：队伍已空，继续停留在战术号令菜单只会列出无效指令。
             BotCommandScript::DoDisband(player);
-            ShowTacticalCommands(player, creature);
+            ShowPetMainMenu(player, creature);
             break;
         case ACTION_TACTICAL_REST:
             BotCommandScript::DoRest(player);

@@ -137,10 +137,19 @@ bool BotCommandScript::HandleDisband(ChatHandler* handler)
 
 void BotCommandScript::DoDisband(Player* player)
 {
+    if (!player)
+        return;
+
+    // 统一化身清理总闸：唤醒大世界休眠本体、销毁战地化身并清空随从花名册。
+    // 必须置于尾款清算之前——本函数无论清算成败都会遣返随从，若花名册残留到
+    // 「清算失败、契约进入 1 小时宽限期」之后，下一帧切图重塑逻辑会按花名册
+    // 把刚被解散的化身原样召唤回来，解散指令彻底失效。
+    sBotGuildEscrowMgr->CleanupAndDismissAllAvatars(player);
+
     // 主动解散：在遣返随从前结清最后一笔尾款。
     // 仅当清算成功才注销契约；若玩家当场金币不足，则保留契约与宽限期倒计时，
     // 由 1 小时追缴通道继续处理，杜绝「解散即赖账」。
-    if (player && sBotGuildEscrowMgr->HasActiveContract(player->GetGUID()))
+    if (sBotGuildEscrowMgr->HasActiveContract(player->GetGUID()))
     {
         if (sBotGuildEscrowMgr->SettleCurrentBill(player, BILLING_REASON_DISBAND))
             sBotGuildEscrowMgr->RemoveContract(player->GetGUID());
@@ -153,6 +162,11 @@ void BotCommandScript::DoDisband(Player* player)
     for (AdaptiveBotAI* bot : botGroup)
     {
         if (!bot)
+            continue;
+
+        // 化身实体已由 CleanupAndDismissAllAvatars 统一处置（含跨地图本体唤醒），
+        // 此处只负责大世界常驻本体的阵营复位与归巢，避免对同一实体二次操作。
+        if (bot->isAvatar)
             continue;
 
         Creature* botCreature = bot->GetBotCreature();
