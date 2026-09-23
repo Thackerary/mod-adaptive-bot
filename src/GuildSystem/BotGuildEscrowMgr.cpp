@@ -257,7 +257,10 @@ void BotGuildEscrowMgr::RestoreOriginCreature(uint32 originSpawnId, ObjectGuid c
     if (!cData)
         return;
 
-    Map* originMap = sMapMgr->FindMap(cData->mapid);
+    // sMapMgr->FindMap 为 (mapId, instanceId) 双参签名且无默认实参，
+    // 单参调用无法通过重载解析。世界常驻实体的出生点必然位于非副本的大陆地图上，
+    // 其实例号恒为 0，故此处显式传 0 取常规地图容器。
+    Map* originMap = sMapMgr->FindMap(cData->mapid, 0);
     if (!originMap)
         return;
 
