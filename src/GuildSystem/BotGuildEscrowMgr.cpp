@@ -308,6 +308,9 @@ void BotGuildEscrowMgr::CleanupAndDismissAllAvatars(Player* player)
         if (!bot || !bot->isAvatar || !bot->GetBotCreature())
             continue;
 
+        // 化身退场前先遣散其伴随护卫：护卫不随化身自动销毁，
+        // 不显式回收会在解散点留下无主孤儿宠物。
+        bot->DespawnGuardian();
         bot->UnregisterFromMaster();
 
         // 同图才可就地销毁：异图实体归属另一张地图的更新线程，跨线程调用
@@ -1082,6 +1085,7 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
     uint32 breachDebt = 0;
     uint32 warningDueCopper = 0;
     bool triggerMapAvatarTransfer = false;            // 本帧是否触发跨地图化身重塑
+    bool isWipeRecovery = false;                      // 本帧是否为团灭跑尸复活后的宽容重塑
     std::vector<HiredBotRecord> botsToRespawn;        // 待在新地图重塑的花名册快照
 
     {
@@ -1093,6 +1097,26 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
 
         BotHireContract& contract = it->second;
 
+        // 指挥官阵亡 / 跑尸状态侦测：只置位、不清除，作为「这轮战斗曾全队阵亡」的
+        // 历史证据。必须独立于地图维度记录——团灭后玩家常常是原图跑尸复活
+        // （副本内释放灵魂 + 跑回尸体），地图 ID 全程不变，只看切图根本无法
+        // 区分「卡传送门免死刷活」与「正规团灭跑尸」。
+        if (!player->IsAlive() || player->HasPlayerFlag(PLAYER_FLAGS_GHOST))
+            contract.masterCorpseRun = true;
+
+        // 团灭赦免：指挥官此前阵亡跑尸，此刻已成功复活（活体状态）。
+        // 赦免全队战死标记，使随从可随重塑重新投影——这是对「正规付出跑尸代价」
+        // 的合理补偿；而随从战死但玩家全程存活（卡门）时该标记不会被置位，
+        // 防免死刷活闸门照常生效。
+        if (contract.masterCorpseRun && player->IsAlive())
+        {
+            contract.masterCorpseRun = false;
+            isWipeRecovery = true;
+
+            for (auto& record : contract.hiredBots)
+                record.isDead = false;
+        }
+
         // 双轨驱动之一：切图强制结算（进出副本 / 跨大陆传送）。
         // 以地图 ID 变化为判据而非依赖不存在的 OnMapChanged 钩子。
         // 同时抓取花名册快照，交由锁外做跨地图化身重塑（实体操作严禁持锁执行）。
@@ -1102,6 +1126,14 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
             contract.lastMapId = currentMapId;
             shouldSettle = true;
             settleReason = BILLING_REASON_MAP_CHANGE;
+            triggerMapAvatarTransfer = true;
+            botsToRespawn = contract.hiredBots;
+        }
+        else if (isWipeRecovery)
+        {
+            // 同图复活（副本内跑尸复活 / 灵魂医者原地复活）同样需要重塑：
+            // 此时地图 ID 未变，若不在此补一条触发通道，随从将永远停在尸体原地，
+            // 既不再入队也不再提供战术光环。
             triggerMapAvatarTransfer = true;
             botsToRespawn = contract.hiredBots;
         }
@@ -1264,7 +1296,10 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
     // 全部实体操作一律在锁外执行：SummonCreature / DespawnOrUnsummon 会触发地图
     // 线程副作用，持 _lock 期间回调外部代码将引入锁序倒置死锁风险。
     // -------------------------------------------------------------------------
-    if (triggerMapAvatarTransfer)
+    // 幽灵状态下严禁重塑：指挥官尚未复活时召唤化身，只会让随从以活体姿态
+    // 站在跑尸路线上，既无法被指挥又会在下一帧被自毁逻辑回收，纯属空耗。
+    // 待指挥官复活后由 masterCorpseRun 赦免通道统一重塑。
+    if (triggerMapAvatarTransfer && player->IsAlive())
     {
         // 1. 仅把旧地图化身从指挥官总线中注销，绝不在此跨线程销毁它！
         //    玩家切图发生在「新地图」线程，而旧化身实体归属「旧地图」线程，
@@ -1277,9 +1312,24 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
             if (!oldBot || !oldBot->GetBotCreature())
                 continue;
 
-            if (oldBot->GetBotCreature()->GetMapId() != player->GetMapId())
+            Creature* oldCreature = oldBot->GetBotCreature();
+
+            if (oldCreature->GetMapId() != player->GetMapId())
             {
+                oldBot->DespawnGuardian();
                 oldBot->UnregisterFromMaster();
+                continue;
+            }
+
+            // 同图遗留的阵亡化身残骸：团灭跑尸场景下随从的尸体就留在副本原地。
+            // 若只注销不回收，其 Entry 会命中下方 alreadyExists 判定，把刚被
+            // 赦免的新化身整批挡在门外，随从永远无法归队。同图销毁不涉及
+            // 跨线程地图容器操作，可安全即时执行。
+            if (!oldCreature->IsAlive())
+            {
+                oldBot->DespawnGuardian();
+                oldBot->UnregisterFromMaster();
+                oldCreature->DespawnOrUnsummon();
             }
         }
 
@@ -1320,9 +1370,26 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
                     avatarAI->originSpawnId = record.originSpawnId;
                     avatarAI->originCreatureGuid = record.originCreatureGuid;
                     avatarAI->SetMaster(player);
+
+                    // 团灭跑尸宽容重塑：以半血半蓝的「重伤休整」姿态归队。
+                    // 若全额补满，跑尸复活就变成了奖励（团灭后原地满状态再战），
+                    // 半血半蓝既保证随从能继续参战，又保留了死亡的实质代价。
+                    // 必须置于 SetMaster 之后：SetMaster 内部的属性同步与
+                    // ApplyAdaptiveBalanceStats 会按百分比重算血量，先设会被覆盖。
+                    if (isWipeRecovery)
+                    {
+                        avatar->SetHealth(std::max<uint32>(1, avatar->GetMaxHealth() / 2));
+
+                        if (avatar->getPowerType() == POWER_MANA)
+                            avatar->SetPower(POWER_MANA, avatar->GetMaxPower(POWER_MANA) / 2);
+                    }
                 }
             }
         }
+
+        if (isWipeRecovery && player->GetSession())
+            ChatHandler(player->GetSession()).PSendSysMessage(
+                "|cffff8000【公会战报】检测到指挥官团灭跑尸重整，随从化身已从灵界重塑归队（当前处于半血重伤休整状态）。|r");
     }
 
     if (shouldSettle)

@@ -78,6 +78,11 @@ public:
     /// @brief 生成与脱战重聚共用的幂等初始化入口。
     void Reset() override;
 
+    /// @brief 阵亡处理：伴随护卫以 TEMPSUMMON_MANUAL_DESPAWN 挂载，
+    ///        若不在阵亡后主动回收，尸体会永久滞留世界（既不消失也不被
+    ///        主人复用），长期高强度作战下会持续吞噬服务器实体配额。
+    void JustDied(Unit* killer) override;
+
     /// @brief 具体护卫专精（座狼 / 食尸鬼 / 地狱猎犬 ...）的初始化钩子。
     virtual void OnGuardianReset() {}
 

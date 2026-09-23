@@ -39,6 +39,9 @@ public:
     
     virtual ~AdaptiveBotAI()
     {
+        // 先遣散护卫再注销总线：宿主销毁后护卫会失去转火与归位同步源，
+        // 若不一并回收将滞留世界成为无主孤儿实体，且不再被任何逻辑接管。
+        DespawnGuardian();
         UnregisterFromMaster();
     }
 
@@ -490,6 +493,20 @@ public:
         }
     }
 
+    /// @brief 显式遣散伴随护卫（幂等、可重复调用）。
+    ///        化身消散 / 跨图自毁 / 宿主析构等「临时实体退场」路径必须调用，
+    ///        否则护卫会以无主孤儿形态滞留在旧地图，持续占用实体配额。
+    void DespawnGuardian()
+    {
+        if (guardianGuid.IsEmpty())
+            return;
+
+        if (Creature* guardian = ObjectAccessor::GetCreature(*me, guardianGuid))
+            guardian->DespawnOrUnsummon();
+
+        guardianGuid.Clear();
+    }
+
     // =========================================================================
     // 战地化身身份标识与大世界本体寄宿句柄
     // =========================================================================
@@ -523,6 +540,10 @@ public:
     {
         if (!isAvatar)
             return;
+
+        // 化身退场前先遣散伴随护卫：护卫是独立实体、不随化身一并销毁，
+        // 若不显式回收，解散后它会以无主孤儿形态永远站在解散点。
+        DespawnGuardian();
 
         // 委托公会管理核心执行跨地图安全唤醒：
         // ObjectAccessor::GetCreature 只在「实体所在的那一张地图」的容器中查找。
@@ -1879,7 +1900,12 @@ public:
         if (!master || me->GetMap() != master->GetMap())
         {
             if (isAvatar)
+            {
+                // 化身在其自身地图的心跳中自毁时，必须同步带走伴随护卫，
+                // 否则旧地图会留下一名永远无人指挥的孤儿宠物。
+                DespawnGuardian();
                 me->DespawnOrUnsummon();
+            }
 
             return;
         }

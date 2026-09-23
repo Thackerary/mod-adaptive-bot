@@ -83,6 +83,7 @@ struct BotHireContract
     bool reminded30Min{ false };        // 30 分钟催缴预警已发送标记
     bool reminded10Min{ false };        // 10 分钟紧急催缴已发送标记
     uint32 auraSyncTimer{ 0 };          // 公会战术光环动态同步节流计时器 (2000ms)
+    bool masterCorpseRun{ false };      // 指挥官是否曾处于阵亡/跑尸状态（团灭赦免重塑依据）
 
     // 在队随从花名册：切图时据此在新地图重塑同批化身，实现无缝跟随。
     std::vector<HiredBotRecord> hiredBots;

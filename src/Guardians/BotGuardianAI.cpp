@@ -274,6 +274,16 @@ void BotGuardianAI::Reset()
     OnGuardianReset();
 }
 
+void BotGuardianAI::JustDied(Unit* killer)
+{
+    ScriptedAI::JustDied(killer);
+
+    // 伴随护卫阵亡 3 秒后自动析构尸体：MANUAL_DESPAWN 语义下引擎不会自行
+    // 清理尸体，不清则永久留尸并占用实体配额。留 3 秒窗口让玩家看清阵亡
+    // 表现与战报，之后平稳消散；主人侧的 3 秒脱战保活轮询会自动补招新护卫。
+    me->DespawnOrUnsummon(3000ms);
+}
+
 void BotGuardianAI::MoveInLineOfSight(Unit* /*who*/)
 {
     // 伴随型护卫严禁自主警戒引怪，索敌权完全交由主人控制
