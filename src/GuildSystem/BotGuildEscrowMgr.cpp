@@ -321,6 +321,97 @@ void BotGuildEscrowMgr::CleanupAndDismissAllAvatars(Player* player)
     }
 }
 
+bool BotGuildEscrowMgr::ReviveDeadBots(Player* player)
+{
+    if (!player || !player->IsAlive())
+        return false;
+
+    // 战斗状态严格封锁：杜绝开怪后原地复活随从被当作「无限拉怪外挂」，
+    // 也避免在首领战中凭空补员破坏战斗数值平衡。
+    if (player->IsInCombat())
+    {
+        if (player->GetSession())
+            ChatHandler(player->GetSession()).PSendSysMessage(
+                "|cffff0000【战地急救】战斗中无法进行战地急救，请先脱离战斗！|r");
+        return false;
+    }
+
+    ObjectGuid const guid = player->GetGUID();
+    std::vector<HiredBotRecord> deadBots;
+
+    {
+        std::lock_guard<std::mutex> lock(_lock);
+
+        auto it = _activeContracts.find(guid);
+        if (it == _activeContracts.end())
+            return false;
+
+        for (auto& record : it->second.hiredBots)
+        {
+            if (record.isDead)
+            {
+                record.isDead = false;
+                deadBots.push_back(record);
+            }
+        }
+    }
+
+    if (deadBots.empty())
+    {
+        if (player->GetSession())
+            ChatHandler(player->GetSession()).PSendSysMessage(
+                "【战地急救】当前队伍中没有阵亡牺牲的随从。");
+        return false;
+    }
+
+    // 1. 回收同地图同名阵亡实体的尸体残骸与护卫（同图析构安全）
+    std::vector<AdaptiveBotAI*> const currentBots = BotCommandScript::CollectBotGroup(player);
+    for (AdaptiveBotAI* oldBot : currentBots)
+    {
+        if (!oldBot || !oldBot->GetBotCreature())
+            continue;
+
+        Creature* oldCreature = oldBot->GetBotCreature();
+        if (oldCreature->GetMapId() == player->GetMapId() && !oldCreature->IsAlive())
+        {
+            oldBot->DespawnGuardian();
+            oldBot->UnregisterFromMaster();
+            oldCreature->DespawnOrUnsummon();
+        }
+    }
+
+    // 2. 原地重新投影新化身，并赋予 50% 生命/法力重伤状态
+    uint32 revivedCount = 0;
+    for (HiredBotRecord const& record : deadBots)
+    {
+        if (TempSummon* avatar = player->SummonCreature(record.entry, player->GetPosition(), TEMPSUMMON_MANUAL_DESPAWN))
+        {
+            if (auto* avatarAI = dynamic_cast<AdaptiveBotAI*>(avatar->AI()))
+            {
+                avatarAI->isAvatar = true;
+                avatarAI->originSpawnId = record.originSpawnId;
+                avatarAI->originCreatureGuid = record.originCreatureGuid;
+                avatarAI->SetMaster(player);
+
+                // 强制截断为 50% 重伤休整状态：必须置于 SetMaster 之后，
+                // 否则 SetMaster 内部的属性同步会按百分比重算血量覆盖该赋值。
+                avatar->SetHealth(std::max<uint32>(1, avatar->GetMaxHealth() / 2));
+                if (avatar->getPowerType() == POWER_MANA)
+                    avatar->SetPower(POWER_MANA, avatar->GetMaxPower(POWER_MANA) / 2);
+
+                ++revivedCount;
+            }
+        }
+    }
+
+    if (player->GetSession())
+        ChatHandler(player->GetSession()).PSendSysMessage(
+            "|cffff8000【战地急救】已成功唤醒并重塑 {} 名随从（当前处于 50% 生命/法力重伤休整状态）。|r",
+            revivedCount);
+
+    return true;
+}
+
 bool BotGuildEscrowMgr::HasActiveContract(ObjectGuid const& playerGuid)
 {
     std::lock_guard<std::mutex> lock(_lock);

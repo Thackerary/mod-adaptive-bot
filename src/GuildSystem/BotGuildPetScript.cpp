@@ -27,6 +27,7 @@ namespace
         ACTION_TACTICAL_STACK    = 104,
         ACTION_TACTICAL_FAN      = 105,
         ACTION_TACTICAL_SPREAD   = 106,
+        ACTION_TACTICAL_REVIVE   = 107, // 战地急救唤醒
 
         ACTION_BILLING_SETTLE    = 201
     };
@@ -115,6 +116,12 @@ bool BotGuildPetScript::OnGossipSelect(Player* player, Creature* creature, uint3
             BotCommandScript::DoDisband(player);
             ShowPetMainMenu(player, creature);
             break;
+        case ACTION_TACTICAL_REVIVE:
+            // 急救结果由核心层自行下发战报（战斗门禁 / 无阵亡 / 成功三种回执），
+            // 此处直接返回战术号令菜单，便于团长连续整补后再下令列阵。
+            sBotGuildEscrowMgr->ReviveDeadBots(player);
+            ShowTacticalCommands(player, creature);
+            break;
         case ACTION_TACTICAL_REST:
             BotCommandScript::DoRest(player);
             ShowTacticalCommands(player, creature);
@@ -175,6 +182,7 @@ void BotGuildPetScript::ShowTacticalCommands(Player* player, Creature* creature)
 {
     AddGossipItemFor(player, GOSSIP_ICON_CHAT, "【集合】全员瞬移集合至我身边。", GOSSIP_SENDER_MAIN, ACTION_TACTICAL_ASSEMBLE);
     AddGossipItemFor(player, GOSSIP_ICON_CHAT, "【解散】解散队伍并遣返全部随从。", GOSSIP_SENDER_MAIN, ACTION_TACTICAL_DISBAND);
+    AddGossipItemFor(player, GOSSIP_ICON_CHAT, "【战地急救】唤醒重塑战死随从（以50%生命法力归队）。", GOSSIP_SENDER_MAIN, ACTION_TACTICAL_REVIVE);
     AddGossipItemFor(player, GOSSIP_ICON_CHAT, "【休息】切换就地休息 / 恢复待命。", GOSSIP_SENDER_MAIN, ACTION_TACTICAL_REST);
     AddGossipItemFor(player, GOSSIP_ICON_CHAT, "【密集集合阵】集中承伤与团补。", GOSSIP_SENDER_MAIN, ACTION_TACTICAL_STACK);
     AddGossipItemFor(player, GOSSIP_ICON_CHAT, "【弧形推进阵】正面迎敌，避侧后顺劈。", GOSSIP_SENDER_MAIN, ACTION_TACTICAL_FAN);

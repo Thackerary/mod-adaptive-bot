@@ -201,6 +201,10 @@ public:
     /// @brief 统一化身清理与本体唤醒调度（解散 / 登出 / 欠费制裁共用唯一出口）。
     void CleanupAndDismissAllAvatars(Player* player);
 
+    /// @brief 战地医疗急救：脱战时将队内战死的随从化身就地重新投影，以 50% 生命/法力归队。
+    ///        战斗状态严格封锁，且全程不收取任何金币，专供副本攻坚后的整补。
+    bool ReviveDeadBots(Player* player);
+
     // 核心算费与结算
     void AccumulateKillFee(Player* player, Creature* killed);
     bool SettleCurrentBill(Player* player, BillingReason reason);
