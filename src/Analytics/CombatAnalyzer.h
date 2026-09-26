@@ -9,6 +9,7 @@
 #include "Movement/DangerZones.h"
 #include <array>
 #include <cstddef>
+#include <unordered_map>
 #include <vector>
 
 enum class BotCombatEventType : uint8
@@ -58,7 +59,13 @@ public:
 
     [[nodiscard]] std::size_t Size() const { return _size; }
     [[nodiscard]] bool Empty() const { return _size == 0; }
-
+	[[nodiscard]] BotCombatEvent* GetLatest()
+    {
+        if (_size == 0)
+            return nullptr;
+        return &_buffer[(_head - 1) & (Capacity - 1)];
+    }
+	
     template <typename Func>
     void ForEach(Func&& func) const
     {
@@ -104,8 +111,7 @@ struct AttributionReport
     uint32 peakDamage{ 0 };
 
     // 维度 2: 漏打断统计
-    uint32 missedInterruptsCount{ 0 };
-    uint32 lastMissedSpellId{ 0 };
+    std::unordered_map<uint32, uint32> missedSpellCounts;
 
     // 维度 3: 起手 OT 归因
     bool earlyOtDetected{ false };
@@ -125,5 +131,9 @@ public:
         BotCombatRingBuffer<256> const& ringBuffer,
         uint32 combatDurationMs,
         bool victory,
-        uint32 bossEntry = 0);
+        uint32 bossEntry = 0,
+		float earlyMaxTankThreat = 0.0f,
+        bool earlyOtDetected = false,
+        uint32 earlyOtTimeMs = 0,
+		std::unordered_map<uint32, uint32> const& streamMissedSpells = {});
 };

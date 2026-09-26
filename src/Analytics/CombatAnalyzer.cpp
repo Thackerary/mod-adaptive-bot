@@ -9,23 +9,31 @@ AttributionReport CombatAnalyzer::Analyze(
     BotCombatRingBuffer<256> const& ringBuffer,
     uint32 combatDurationMs,
     bool victory,
-    uint32 bossEntry)
+    uint32 bossEntry,
+	float earlyMaxTankThreat,
+    bool earlyOtDetected,
+    uint32 earlyOtTimeMs,
+	std::unordered_map<uint32, uint32> const& streamMissedSpells)
 {
     AttributionReport report;
     report.bossEntry = bossEntry;
     report.totalCombatTimeMs = combatDurationMs;
     report.isWipe = !victory;
-
+	report.earlyOtDetected = earlyOtDetected;
+    report.otTimeMs = earlyOtTimeMs;
+	// 直接采纳流式累加的漏打断字典（整场战斗无遗漏）
+    report.missedSpellCounts = streamMissedSpells;
+	
+	float const seconds = std::min(combatDurationMs, 10000u) / 1000.0f;
+    report.tankFirst10sTps = (seconds > 0.0f) ? (earlyMaxTankThreat / seconds) : 0.0f;
+	
     if (ringBuffer.Empty())
         return report;
 
     uint32 maxDamageInRecent = 0;
     uint32 maxDamageSpell = 0;
 
-    uint32 maxTankThreat = 0;
-    uint32 tankSampleCount = 0;
-
-    // 1. 逆序扫描：捕获致死伤害与尖刺爆发
+    // 1. 逆序扫描：仅捕获致死伤害、尖刺爆发与地面避险禁区
     bool foundFatal = false;
     ringBuffer.ForEachReverse([&](BotCombatEvent const& ev) -> bool
     {
@@ -65,38 +73,6 @@ AttributionReport CombatAnalyzer::Analyze(
 
     report.peakDamage = maxDamageInRecent;
     report.peakDamageSpellId = maxDamageSpell;
-
-    // 2. 正序扫描：漏打断、起手 OT 与主坦 TPS
-    ringBuffer.ForEach([&](BotCombatEvent const& ev)
-    {
-        if (ev.eventType == BotCombatEventType::SPELL_HIT_TAKEN)
-        {
-            ++report.missedInterruptsCount;
-            report.lastMissedSpellId = ev.spellId;
-        }
-
-        if (ev.eventType == BotCombatEventType::THREAT_OT_WARNING && ev.combatTimeMs <= 10000)
-        {
-            if (!report.earlyOtDetected)
-            {
-                report.earlyOtDetected = true;
-                report.otTimeMs = ev.combatTimeMs;
-            }
-        }
-
-        if (ev.eventType == BotCombatEventType::TANK_THREAT_SAMPLE && ev.combatTimeMs <= 10000)
-        {
-            // 采样值为该秒的绝对累计仇恨，而非每秒增量，因此只能取窗口内峰值，
-            // 直接累加会得到 O(n^2) 量级的虚高结果（TPS 暴涨 5~10 倍）。
-            if (ev.amount > maxTankThreat)
-                maxTankThreat = ev.amount;
-
-            ++tankSampleCount;
-        }
-    });
-
-    float const seconds = std::min(combatDurationMs, 10000u) / 1000.0f;
-    report.tankFirst10sTps = (seconds > 0.0f) ? (static_cast<float>(maxTankThreat) / seconds) : 0.0f;
 
     return report;
 }

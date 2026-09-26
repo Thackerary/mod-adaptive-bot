@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <memory>
 #include "ScriptedCreature.h"
 #include "ScriptMgr.h"
 #include "Creature.h"
@@ -36,7 +37,20 @@ class AdaptiveBotAI : public ScriptedAI
 {
 public:
     explicit AdaptiveBotAI(Creature* creature) : ScriptedAI(creature) {}
-    
+    //uint32 lastReceivedHarmfulSpellId{ 0 };
+	
+	// 早期战斗指标（前 10 秒即时计算固化，杜绝环形队列溢出冲刷）
+	float earlyMaxTankThreat{ 0.0f };
+	bool earlyOtDetected{ false };
+	uint32 earlyOtTimeMs{ 0 };
+	
+	// 最近承受的非正向法术（用于致死法术 ID 归因与白字平砍甄别）
+    uint32 lastHarmfulSpellId{ 0 };
+    uint32 lastHarmfulSpellTimer{ 0 };
+	
+	// 核心新增：本场战斗流式漏打断累加器（随战斗实时递增，彻底脱离环形队列）
+    std::unordered_map<uint32, uint32> combatMissedSpells;
+	
     virtual ~AdaptiveBotAI()
     {
         // 先遣散护卫再注销总线：宿主销毁后护卫会失去转火与归位同步源，
@@ -214,45 +228,110 @@ public:
     }
 
     // =========================================================================
-    // 同指挥官随从集群总线
-    // =========================================================================
-    static inline std::mutex s_botRegistryMutex;
+	// 同指挥官随从集群总线 (RCU / Copy-On-Write 原子无锁只读快照架构)
+	// =========================================================================
+    using BotGroupList = std::vector<AdaptiveBotAI*>;
+	using MasterBotRegistryMap = std::unordered_map<ObjectGuid, std::shared_ptr<const BotGroupList>>;
+	// 全局不可变快照指针与低频写锁
+	static inline std::shared_ptr<const MasterBotRegistryMap> s_botRegistrySnapshot = std::make_shared<const MasterBotRegistryMap>();
+	static inline std::mutex s_botRegistryWriteMutex;
+	//向下兼容旧专精子类 AI（解决 BotProtectionPaladinAI 等专精类引用的编译问题）
+	static inline std::mutex s_botRegistryMutex;
     static inline std::unordered_map<ObjectGuid, std::vector<AdaptiveBotAI*>> s_masterBotRegistry;
+	/// @brief O(1) 纯无锁获取当前指挥官的名下随从只读快照
+	[[nodiscard]] static std::shared_ptr<const BotGroupList> GetMasterBotsSnapshot(ObjectGuid const& masterGuid)
+	{
+		auto snapshot = std::atomic_load(&s_botRegistrySnapshot);
+		if (!snapshot)
+			return nullptr;
+
+		auto it = snapshot->find(masterGuid);
+		if (it != snapshot->end())
+			return it->second;
+
+		return nullptr;
+	}
+	
+	/// @brief 供外部模块（如 BotCommandMgr / BotGuildEscrowMgr）安全拷贝随从组快照
+	[[nodiscard]] static std::vector<AdaptiveBotAI*> CollectMasterBots(ObjectGuid const& masterGuid)
+	{
+		if (auto bots = GetMasterBotsSnapshot(masterGuid))
+			return *bots;
+		return {};
+	}
 
     void RegisterToMaster(ObjectGuid const& guid)
     {
-        std::lock_guard<std::mutex> lock(s_botRegistryMutex);
+        std::lock_guard<std::mutex> lock(s_botRegistryWriteMutex);
+		std::lock_guard<std::mutex> compatLock(s_botRegistryMutex);
+		
+		//  同步更新向下兼容表（保证各专精子类 AI 无缝读取）
         auto& list = s_masterBotRegistry[guid];
         if (std::find(list.begin(), list.end(), this) == list.end())
             list.push_back(this);
+		
+		// 1. 获取旧快照并浅拷贝 Map 外壳
+		auto oldSnapshot = std::atomic_load(&s_botRegistrySnapshot);
+		auto newMap = std::make_shared<MasterBotRegistryMap>(*oldSnapshot);
+		
+		// 2. 提取并深拷贝该指挥官的列表
+		auto it = newMap->find(guid);
+		std::vector<AdaptiveBotAI*> newList;
+		if (it != newMap->end() && it->second)
+			newList = *(it->second);
+		
+		// 3. 注入当前随从并生成新的不可变子列表
+		if (std::find(newList.begin(), newList.end(), this) == newList.end())
+		{
+			newList.push_back(this);
+			(*newMap)[guid] = std::make_shared<const BotGroupList>(std::move(newList));
+
+			// 4. 原子覆写全局快照指针 (RCU 发布)
+			std::atomic_store(&s_botRegistrySnapshot, std::shared_ptr<const MasterBotRegistryMap>(newMap));
+		}
     }
 
     void UnregisterFromMaster()
     {
-        if (!masterGuid.IsEmpty())
+        if (masterGuid.IsEmpty())
+			return;
+
+		std::lock_guard<std::mutex> lock(s_botRegistryWriteMutex);
+		std::lock_guard<std::mutex> compatLock(s_botRegistryMutex);
+		
+		//同步更新向下兼容表
+        auto itCompat = s_masterBotRegistry.find(masterGuid);
+        if (itCompat != s_masterBotRegistry.end())
         {
-            std::lock_guard<std::mutex> lock(s_botRegistryMutex);
-            auto it = s_masterBotRegistry.find(masterGuid);
-            if (it != s_masterBotRegistry.end())
-            {
-                auto& list = it->second;
-                list.erase(std::remove(list.begin(), list.end(), this), list.end());
-                if (list.empty())
-                    s_masterBotRegistry.erase(it);
-            }
+            auto& list = itCompat->second;
+            list.erase(std::remove(list.begin(), list.end(), this), list.end());
+            if (list.empty())
+                s_masterBotRegistry.erase(itCompat);
         }
+		
+		auto oldSnapshot = std::atomic_load(&s_botRegistrySnapshot);
+		auto it = oldSnapshot->find(masterGuid);
+		if (it == oldSnapshot->end() || !it->second)
+			return;
+
+		auto newMap = std::make_shared<MasterBotRegistryMap>(*oldSnapshot);
+		std::vector<AdaptiveBotAI*> newList = *(it->second);
+		newList.erase(std::remove(newList.begin(), newList.end(), this), newList.end());
+
+		if (newList.empty())
+			newMap->erase(masterGuid);
+		else
+			(*newMap)[masterGuid] = std::make_shared<const BotGroupList>(std::move(newList));
+
+		// 原子覆写全局快照指针 (RCU 发布)
+		std::atomic_store(&s_botRegistrySnapshot, std::shared_ptr<const MasterBotRegistryMap>(newMap));
     }
 
-    /// @brief 轻量级只读随从存在性检查（零堆内存分配，无 vector 拷贝开销）。
-    ///        CollectBotGroup() 会为调用方拷贝整份随从快照，在每秒心跳级的
-    ///        空契约裁决路径上会造成持续的堆分配抖动；此处仅做一次哈希查找，
-    ///        专供「这笔契约是否还该存在」这类只需布尔结论的场景使用。
     [[nodiscard]] static bool HasMasterBots(ObjectGuid const& masterGuid)
-    {
-        std::lock_guard<std::mutex> lock(s_botRegistryMutex);
-        auto it = s_masterBotRegistry.find(masterGuid);
-        return it != s_masterBotRegistry.end() && !it->second.empty();
-    }
+	{
+		auto bots = GetMasterBotsSnapshot(masterGuid);
+		return bots && !bots->empty();
+	}
 
     Unit* GetGroupTank()
     {
@@ -261,7 +340,16 @@ public:
             return nullptr;
 
         {
-            std::lock_guard<std::mutex> lock(s_botRegistryMutex);
+			if (auto bots = GetMasterBotsSnapshot(master->GetGUID()))
+			{
+				for (AdaptiveBotAI* allyBot : *bots)
+				{
+					if (allyBot && allyBot->me && allyBot->me->IsInWorld() && allyBot->me->IsAlive() 
+						&& allyBot->me->GetMap() == me->GetMap() && allyBot->IsTankBot())
+						return allyBot->me;
+				}
+			}
+            /* std::lock_guard<std::mutex> lock(s_botRegistryMutex);
             auto it = s_masterBotRegistry.find(master->GetGUID());
             if (it != s_masterBotRegistry.end())
             {
@@ -270,7 +358,7 @@ public:
                     if (allyBot && allyBot->me && allyBot->me->IsInWorld() && allyBot->me->IsAlive() && allyBot->me->GetMap() == me->GetMap() && allyBot->IsTankBot())
                         return allyBot->me;
                 }
-            }
+            } */
         }
 
         bool const isMasterTank = master->HasAura(71)     // 战士: 防御姿态
@@ -351,6 +439,13 @@ public:
         currentEnemyCastingElapsedMs = 0;
         currentEnemyCastingTotalMs = 0;
         combatEventBuffer.Clear();
+		//新增
+		earlyMaxTankThreat = 0.0f;
+		earlyOtDetected = false;
+		earlyOtTimeMs = 0;
+		lastHarmfulSpellId = 0;
+		lastHarmfulSpellTimer = 0;
+		combatMissedSpells.clear(); // 清空历史累加
         // 刻意保留 activeDangerZones：团灭跑尸的 Reset() 不得冲刷已学到的
         // 危险禁区，否则每一次团灭都会把当次归因成果清零，永远无法跨战斗避险。
         ResetComboPoints();
@@ -671,7 +766,7 @@ public:
     {
         damage = static_cast<uint32>(damage * GetDamageDealtMultiplier());
 
-        if (me->IsInCombat() && damage > 0)
+        /* if (me->IsInCombat() && damage > 0)
         {
             BotCombatEvent ev;
             ev.combatTimeMs = combatTimerMs;
@@ -680,7 +775,7 @@ public:
             ev.sourceGuid = doneTo ? doneTo->GetGUID() : ObjectGuid::Empty;
             ev.schoolMask = static_cast<uint8>(damageSchoolMask);
             combatEventBuffer.Push(ev);
-        }
+        } */
 
         ScriptedAI::DamageDealt(doneTo, damage, damagetype, damageSchoolMask);
     }
@@ -702,15 +797,23 @@ public:
 
         if (me->IsInCombat())
         {
+			bool const isLethal = (damage >= me->GetHealth());
             BotCombatEvent ev;
             ev.combatTimeMs = combatTimerMs;
-            ev.eventType = (damage >= me->GetHealth()) ? BotCombatEventType::LETHAL_DAMAGE : BotCombatEventType::DAMAGE_TAKEN;
+            ev.eventType = isLethal ? BotCombatEventType::LETHAL_DAMAGE : BotCombatEventType::DAMAGE_TAKEN;
             ev.amount = damage;
             ev.x = me->GetPositionX();
             ev.y = me->GetPositionY();
             ev.z = me->GetPositionZ();
             ev.sourceGuid = attacker ? attacker->GetGUID() : ObjectGuid::Empty;
             ev.schoolMask = static_cast<uint8>(damageSchoolMask);
+
+            // 仅当致命伤害由法术（非平砍 DIRECT_DAMAGE）引起且在 1 秒时效内时赋予 SpellID
+            if (isLethal && damagetype != DIRECT_DAMAGE && lastHarmfulSpellTimer > 0)
+                ev.spellId = lastHarmfulSpellId;
+            else
+                ev.spellId = 0;
+
             combatEventBuffer.Push(ev);
         }
 
@@ -726,20 +829,25 @@ public:
     void SpellHit(Unit* caster, SpellInfo const* spell) override
     {
         ScriptedAI::SpellHit(caster, spell);
-
-        // 归因采样：仅记录敌方「有读条」的非正向法术命中，作为漏打断审计口径
+		
+		if (spell && !spell->IsPositive())
+        {
+            lastHarmfulSpellId = spell->Id;
+            lastHarmfulSpellTimer = 1000; // 1 秒内该技能造成的伤害均可被致死归因捕获
+			// 核心补偿：若上一条事件是刚刚因当前法术产生的致死伤害，就地回填 SpellID
+            if (BotCombatEvent* latestEv = combatEventBuffer.GetLatest())
+            {
+                if (latestEv->eventType == BotCombatEventType::LETHAL_DAMAGE && latestEv->spellId == 0)
+                {
+                    latestEv->spellId = spell->Id;
+                }
+            }
+        }
+        // 仅记录敌方「有读条」且「可被打断」的非正向法术
         if (me->IsInCombat() && spell && !spell->IsPositive() && spell->CalcCastTime() > 0)
         {
-            BotCombatEvent ev;
-            ev.combatTimeMs = combatTimerMs;
-            ev.eventType = BotCombatEventType::SPELL_HIT_TAKEN;
-            ev.spellId = spell->Id;
-            ev.x = me->GetPositionX();
-            ev.y = me->GetPositionY();
-            ev.z = me->GetPositionZ();
-            ev.sourceGuid = caster ? caster->GetGUID() : ObjectGuid::Empty;
-            ev.schoolMask = static_cast<uint8>(spell->GetSchoolMask());
-            combatEventBuffer.Push(ev);
+			// 核心解耦：就地流式累加，战斗即便打 20 分钟也 100% 精确无损
+            ++combatMissedSpells[spell->Id];
         }
 
         OnSpellHitTaken(caster, spell);
@@ -840,7 +948,7 @@ public:
                 }
             }
 
-            AttributionReport const report = CombatAnalyzer::Analyze(combatEventBuffer, combatTimerMs, victory, bossEntry);
+            AttributionReport const report = CombatAnalyzer::Analyze(combatEventBuffer, combatTimerMs, victory, bossEntry, earlyMaxTankThreat, earlyOtDetected, earlyOtTimeMs, combatMissedSpells);
 
             if (isDebugLogging)
             {
@@ -855,8 +963,9 @@ public:
                 LOG_INFO("scripts", "[维度1-承伤峰值] 承受最高伤害技能ID: {} | 峰值伤害: {}",
                     report.peakDamageSpellId, report.peakDamage);
 
-                LOG_INFO("scripts", "[维度2-漏断审计] 承受敌方未打断施法总数: {} 次 (末次法术ID: {})",
-                    report.missedInterruptsCount, report.lastMissedSpellId);
+                LOG_INFO("scripts", "[维度2-漏断审计] 承受敌方未打断技能种数: {} 种", report.missedSpellCounts.size());
+                for (auto const& [missedSpell, count] : report.missedSpellCounts)
+                    LOG_INFO("scripts", "   -> 法术ID: {} 漏断 {} 次", missedSpell, count);
 
                 LOG_INFO("scripts", "[维度3-起手OT] 前10秒是否OT: {} (OT触发时点: {} ms)",
                     report.earlyOtDetected ? "【是】" : "否", report.otTimeMs);
@@ -1176,19 +1285,17 @@ public:
         }
 
         {
-            std::lock_guard<std::mutex> lock(s_botRegistryMutex);
-            auto it = s_masterBotRegistry.find(master->GetGUID());
-            if (it != s_masterBotRegistry.end())
-            {
-                for (AdaptiveBotAI* allyBot : it->second)
-                {
-                    if (allyBot && allyBot->me && allyBot->me != me)
-                    {
-                        if (Unit* target = CheckUnitAttackers(allyBot->me))
-                            return target;
-                    }
-                }
-            }
+            if (auto bots = GetMasterBotsSnapshot(master->GetGUID()))
+			{
+				for (AdaptiveBotAI* allyBot : *bots)
+				{
+					if (allyBot && allyBot->me && allyBot->me != me)
+					{
+						if (Unit* target = CheckUnitAttackers(allyBot->me))
+							return target;
+					}
+				}
+			}
         }
 
         return nullptr;
@@ -1255,7 +1362,7 @@ public:
         }
 
         {
-            std::lock_guard<std::mutex> lock(s_botRegistryMutex);
+            /* std::lock_guard<std::mutex> lock(s_botRegistryMutex);
             auto it = s_masterBotRegistry.find(master->GetGUID());
             if (it != s_masterBotRegistry.end())
             {
@@ -1264,7 +1371,15 @@ public:
                     if (allyBot && allyBot->me && allyBot->me != me)
                         CheckUnit(allyBot->me);
                 }
-            }
+            } */
+			if (auto bots = GetMasterBotsSnapshot(master->GetGUID()))
+			{
+				for (AdaptiveBotAI* allyBot : *bots)
+				{
+					if (allyBot && allyBot->me && allyBot->me != me)
+						CheckUnit(allyBot->me);
+				}
+			}
         }
 
         return lowestTarget;
@@ -2114,9 +2229,20 @@ public:
             combatTimerMs = 0;
             tankSampleTimer = 0;
             otCheckTimer = 0;
+			earlyMaxTankThreat = 0.0f; // 进战即刻重置
+            earlyOtDetected = false;    // 进战即刻重置
+            earlyOtTimeMs = 0;          // 进战即刻重置
+			combatMissedSpells.clear(); // 进战即刻重置
             combatEventBuffer.Clear();
         }
-
+		
+		if (lastHarmfulSpellTimer > diff)
+            lastHarmfulSpellTimer -= diff;
+        else
+        {
+            lastHarmfulSpellTimer = 0;
+            lastHarmfulSpellId = 0;
+        }
         // 战时采样：前 10 秒窗口内做 OT 检测与主坦仇恨速率 (TPS) 沉淀
         if (me->IsInCombat())
         {
@@ -2134,6 +2260,12 @@ public:
                     Unit* attacker = me->getAttackerForHelper();
                     if (attacker && attacker->GetVictim() == me)
                     {
+						if (!earlyOtDetected)
+                        {
+                            earlyOtDetected = true;
+                            earlyOtTimeMs = combatTimerMs;
+                        }
+						
                         BotCombatEvent ev;
                         ev.combatTimeMs = combatTimerMs;
                         ev.eventType = BotCombatEventType::THREAT_OT_WARNING;
@@ -2154,6 +2286,9 @@ public:
                         float const currentThreat = currentVictim->GetThreatMgr().GetThreat(groupTank);
                         if (currentThreat > 0.0f)
                         {
+							if (currentThreat > earlyMaxTankThreat)
+                                earlyMaxTankThreat = currentThreat;
+							
                             BotCombatEvent ev;
                             ev.combatTimeMs = combatTimerMs;
                             ev.eventType = BotCombatEventType::TANK_THREAT_SAMPLE;

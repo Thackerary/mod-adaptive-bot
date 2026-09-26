@@ -262,16 +262,15 @@ namespace
             }
         }
 
-        // ---- 4. 压秒打断余量学习 ----
-        // reaction_delay_ms 语义：相对敌方读条结束的「提前出手余量」。
-        //   首见初始值必须换算为真实毫秒 (漏断次数 * 步长)，上限 1200ms；
-        //   后续每次漏断继续累加 150ms，杜绝初始仅写入 1~2ms 虚假延时的缺陷。
-        // priority_level 首次置 1 并同步累加，供维度 A 打断仲裁排序使用。
-        if (report.lastMissedSpellId != 0 && report.missedInterruptsCount > 0)
+        // ---- 4. 压秒打断余量学习：多技能独立统计，彻底告别单技能顶包 ----
+        for (auto const& [spellId, missedCount] : report.missedSpellCounts)
         {
+            if (spellId == 0 || missedCount == 0)
+                continue;
+
             uint32 const initDelayMs = std::min<uint32>(
                 BOT_MEMORY_INTERRUPT_MAX_MS,
-                report.missedInterruptsCount * BOT_MEMORY_INTERRUPT_STEP_MS);
+                missedCount * BOT_MEMORY_INTERRUPT_STEP_MS);
 
             ScopedStatement stmt(db,
                 "INSERT INTO bot_individual_interrupt "
@@ -289,7 +288,7 @@ namespace
 
             sqlite3_bind_int64(stmt.Get(), 1, static_cast<sqlite3_int64>(task.spawnId));
             sqlite3_bind_int64(stmt.Get(), 2, static_cast<sqlite3_int64>(task.bossEntry));
-            sqlite3_bind_int64(stmt.Get(), 3, static_cast<sqlite3_int64>(report.lastMissedSpellId));
+            sqlite3_bind_int64(stmt.Get(), 3, static_cast<sqlite3_int64>(spellId));
             sqlite3_bind_int64(stmt.Get(), 4, static_cast<sqlite3_int64>(initDelayMs));
             sqlite3_bind_int64(stmt.Get(), 5, static_cast<sqlite3_int64>(BOT_MEMORY_INTERRUPT_MAX_MS));
             sqlite3_bind_int64(stmt.Get(), 6, static_cast<sqlite3_int64>(BOT_MEMORY_INTERRUPT_STEP_MS));

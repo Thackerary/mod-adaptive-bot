@@ -49,16 +49,11 @@ ChatCommandTable BotCommandScript::GetCommands() const
 
 std::vector<AdaptiveBotAI*> BotCommandScript::CollectBotGroup(Player* player)
 {
-    std::vector<AdaptiveBotAI*> botGroup;
-    if (!player)
-        return botGroup;
+	if (!player)
+        return {};
 
-    std::lock_guard<std::mutex> lock(AdaptiveBotAI::s_botRegistryMutex);
-    auto it = AdaptiveBotAI::s_masterBotRegistry.find(player->GetGUID());
-    if (it != AdaptiveBotAI::s_masterBotRegistry.end())
-        botGroup = it->second;
-
-    return botGroup;
+    // 直接接入方案 B 提供的不可变 RCU 快照导出接口，零锁开销
+    return AdaptiveBotAI::CollectMasterBots(player->GetGUID());
 }
 
 
