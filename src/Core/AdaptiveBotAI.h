@@ -776,7 +776,41 @@ public:
             ev.schoolMask = static_cast<uint8>(damageSchoolMask);
             combatEventBuffer.Push(ev);
         } */
+		if (doneTo && doneTo->IsAlive())
+		{
+			Player* master = GetMaster();
+			uint8 const playerGuild = master ? sBotGuildEscrowMgr->GetPlayerGuildId(master->GetGUID()) : GUILD_NONE;
+			uint8 const botGuild = BotGuildEscrowMgr::GetBotGuildIdFromEntry(me->GetEntry());
 
+			// 1. 【达拉然下水道黑市】：街头突袭
+			// 判定：主人属于黑市或随从原生归属黑市
+			if (playerGuild == GUILD_UNDERBELLY_SYNDICATE || botGuild == GUILD_UNDERBELLY_SYNDICATE)
+			{
+				float bonus = 1.0f;
+				// 背后或侧翼攻击判定 (目标背对自身)
+				if (doneTo->isInBack(me))
+					bonus += 0.03f; // 背后/侧翼 +3%
+
+				// 昏迷、瘫痪或受控/减速判定
+				if (doneTo->HasUnitState(UNIT_STATE_STUNNED | UNIT_STATE_CONFUSED) || 
+					doneTo->HasAuraType(SPELL_AURA_MOD_DECREASE_SPEED))
+					bonus += 0.03f; // 受控/减速追加 +3%
+
+				damage = static_cast<uint32>(damage * bonus);
+			}
+
+			// 2. 【银色北伐军】：天灾克星 (对亡灵与恶魔伤害 +2.5%)
+			if (playerGuild == GUILD_ARGENT_CRUSADE || botGuild == GUILD_ARGENT_CRUSADE)
+			{
+				Creature* targetCreature = doneTo->ToCreature();
+				if (targetCreature)
+				{
+					uint32 const cType = targetCreature->GetCreatureTemplate()->type;
+					if (cType == CREATURE_TYPE_UNDEAD || cType == CREATURE_TYPE_DEMON)
+						damage = static_cast<uint32>(damage * 1.025f);
+				}
+			}
+		}
         ScriptedAI::DamageDealt(doneTo, damage, damagetype, damageSchoolMask);
     }
 
@@ -794,7 +828,31 @@ public:
         }
 
         damage = static_cast<uint32>(damage * GetDamageTakenMultiplier());
+		
+		if (attacker)
+		{
+			Player* master = GetMaster();
+			uint8 const playerGuild = master ? sBotGuildEscrowMgr->GetPlayerGuildId(master->GetGUID()) : GUILD_NONE;
+			uint8 const botGuild = BotGuildEscrowMgr::GetBotGuildIdFromEntry(me->GetEntry());
 
+			// 1. 【银色北伐军】：天灾庇护 (受亡灵与恶魔伤害 -2.5%)
+			if (playerGuild == GUILD_ARGENT_CRUSADE || botGuild == GUILD_ARGENT_CRUSADE)
+			{
+				if (Creature* cAttacker = attacker->ToCreature())
+				{
+					uint32 const cType = cAttacker->GetCreatureTemplate()->type;
+					if (cType == CREATURE_TYPE_UNDEAD || cType == CREATURE_TYPE_DEMON)
+						damage = static_cast<uint32>(damage * 0.975f);
+				}
+			}
+
+			// 2. 【幽暗城死亡猎手】：凋零契约 (受到暗影与自然伤害降低 5%)
+			if (playerGuild == GUILD_DEATHSTALKERS || botGuild == GUILD_DEATHSTALKERS)
+			{
+				if (damageSchoolMask & (SPELL_SCHOOL_MASK_SHADOW | SPELL_SCHOOL_MASK_NATURE))
+					damage = static_cast<uint32>(damage * 0.95f);
+			}
+		}
         if (me->IsInCombat())
         {
 			bool const isLethal = (damage >= me->GetHealth());
@@ -2345,11 +2403,20 @@ public:
         uint8 const creatureLevel = creature ? creature->GetLevel() : 1;
         uint8 const effectiveLevel = std::max(playerLevel, creatureLevel);
 
-        if (effectiveLevel >= 80)
-            return 30000; // 3 金币
-        if (effectiveLevel >= 60)
-            return 10000; // 1 金币
-        return 2000;      // 20 银币
+        uint32 baseFee = 2000;      // 20 银
+		if (effectiveLevel >= 80)
+			baseFee = 30000;        // 3 金
+		else if (effectiveLevel >= 60)
+			baseFee = 10000;        // 1 金
+		
+		if (!player)
+        return baseFee;
+
+		// 【黑市特权】：达拉然下水道黑市行会享受招募中介服务费立减 20% (0.80x)
+		if (sBotGuildEscrowMgr->GetPlayerGuildId(player->GetGUID()) == GUILD_UNDERBELLY_SYNDICATE)
+			return static_cast<uint32>(baseFee * 0.80f);
+
+		return baseFee;
     }
 
     CreatureAI* GetAI(Creature* creature) const override

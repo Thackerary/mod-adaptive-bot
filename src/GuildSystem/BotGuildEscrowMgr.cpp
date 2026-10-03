@@ -420,16 +420,17 @@ bool BotGuildEscrowMgr::HasActiveContract(ObjectGuid const& playerGuid)
 
 float BotGuildEscrowMgr::CalculateGuildDiscount(uint8 playerGuildId, uint8 botGuildId, bool isCrossFaction)
 {
-    // // 同公会享受 7.5 折内部津贴（特判排除热砂财阀：地精在商言商，作为开放 31 系全专精的全能商业行会，绝不设内部折扣）
-    if (playerGuildId != GUILD_NONE && playerGuildId == botGuildId && playerGuildId != GUILD_STEAMWHEEDLE_CARTEL)
-        return 0.75f;
+    float discount = 1.0f;
+
+    // 【黑市特权】：达拉然下水道黑市行会战地信托佣金常驻 8 折 (0.80x)
+    if (playerGuildId == GUILD_UNDERBELLY_SYNDICATE)
+        discount *= 0.80f;
 
     // 跨阵营中介加收 20%
     if (isCrossFaction)
-        return 1.20f;
+        discount *= 1.20f;
 
-    // 常规原价
-    return 1.0f;
+    return discount;
 }
 
 GuildPetConfig const* BotGuildEscrowMgr::GetGuildConfig(uint8 guildId)
@@ -467,7 +468,8 @@ uint8 BotGuildEscrowMgr::GetBotGuildIdFromEntry(uint32 entry)
 
 bool BotGuildEscrowMgr::IsPlayerClassAffiliated(uint8 guildId, uint8 playerClass)
 {
-    // 防御下溢：魔兽 3.3.5a 职业 ID 范围为 1 (战士) ~ 11 (德鲁伊)。
+	return true;
+    /* // 防御下溢：魔兽 3.3.5a 职业 ID 范围为 1 (战士) ~ 11 (德鲁伊)。
     // 若传入 0，GUILD_CLASS_MASK 宏内的 (cls - 1) 会以无符号整数下溢成
     // 0xFFFFFFFF，移位量随即溢出位宽，属未定义行为；大于 11 的非法 ID
     // 同样应直接拒绝，而非信任调用方自行保证入参合法性。
@@ -482,7 +484,7 @@ bool BotGuildEscrowMgr::IsPlayerClassAffiliated(uint8 guildId, uint8 playerClass
     if (cfg->compatibleClassMask == 0)
         return false;
 
-    return (cfg->compatibleClassMask & GUILD_CLASS_MASK(playerClass)) != 0;
+    return (cfg->compatibleClassMask & GUILD_CLASS_MASK(playerClass)) != 0; */
 }
 
 uint32 BotGuildEscrowMgr::GetGuildAuraSpellId(uint8 guildId)
@@ -605,7 +607,7 @@ bool BotGuildEscrowMgr::LeavePlayerGuild(Player* player)
 
     if (player->GetSession())
         ChatHandler(player->GetSession()).PSendSysMessage(
-            "【公会前台】您已成功退出公会。专属通信使魔已被收回注销，7.5 折公会津贴同步失效。");
+            "【公会前台】您已成功退出公会。专属通信使魔已被收回注销。");
 
     return true;
 }
@@ -835,7 +837,6 @@ void BotGuildEscrowMgr::AccumulateKillFee(Player* player, Creature* killed)
     // 3. 累加随从全员佣金 (按各自真实原生会籍与阵营立场阶梯计价)
     //    阶段四落地：玩家会籍由公会前台正式登记（GetPlayerGuildId 实时查询），
     //    随从会籍则必须由实体 Entry 反解原生归属，而绝不能沿用指挥官会籍——
-    //    否则任意公会都会退化为「自己雇自己」，0.75x 内部津贴变成永久常驻，
     //    不同公会/跨阵营的阶梯定价彻底失去意义。
     //    阵营判定同理：随从入队时 SetMaster 已把阵营刷为玩家阵营，
     //    运行时 GetFaction() 比对恒为同阵营，只能改看模版上的原生阵营属性。
@@ -861,7 +862,7 @@ void BotGuildEscrowMgr::AccumulateKillFee(Player* player, Creature* killed)
                 isCrossFaction = true;
         }
 
-        // 3. 计算阶梯折扣：同公会 0.75x，跨阵营 1.20x，常规 1.00x
+        // 3. 计算阶梯折扣：跨阵营 1.20x，常规 1.00x
         float const discount = CalculateGuildDiscount(playerGuildId, botGuildId, isCrossFaction);
 
         totalMobFee += static_cast<uint32>(static_cast<float>(baseRateCopper) * typeMultiplier * discount);
@@ -987,18 +988,12 @@ void BotGuildEscrowMgr::UpdateTeamGuildAuras(Player* player)
     // -------------------------------------------------------------------------
     std::unordered_set<uint32> activeAuras;
 
-    // A. 指挥官贡献判定（职业契合度门禁的核心落点）：
-    //    只有职业契合该公会的玩家才能激活并共享其战术光环；不契合者自身
-    //    拿不到光环，全队也不享受该玩家会籍所对应的加成——此时若队内没有
-    //    该公会的正统随从，该光环将在整支队伍中彻底缺席（惩罚成立）。
+    // A. 指挥官贡献判定：取消职业门禁，所有职业加入公会后均可直接为全队激活战术光环
     uint8 const playerGuildId = GetPlayerGuildId(player->GetGUID());
     if (playerGuildId != GUILD_NONE)
     {
-        if (IsPlayerClassAffiliated(playerGuildId, player->getClass()))
-        {
-            if (uint32 const aura = GetGuildAuraSpellId(playerGuildId))
-                activeAuras.insert(aura);
-        }
+        if (uint32 const aura = GetGuildAuraSpellId(playerGuildId))
+            activeAuras.insert(aura);
     }
 
     // B. 随从贡献判定：随从由模版 Entry 逆向反解原生公会，属正统精锐编制，
@@ -1545,6 +1540,16 @@ void BotGuildEscrowPlayerScript::OnPlayerCreatureKill(Player* killer, Creature* 
     // 仅在带领随从时计费
     if (sBotGuildEscrowMgr->HasActiveContract(killer->GetGUID()))
         sBotGuildEscrowMgr->AccumulateKillFee(killer, killed);
+	
+	// 【军情七处特权】：击杀人形生物掉落金币额外增加 15%
+    if (sBotGuildEscrowMgr->GetPlayerGuildId(killer->GetGUID()) == GUILD_SI7_MERCENARIES)
+    {
+        if (killed->GetCreatureTemplate()->type == CREATURE_TYPE_HUMANOID)
+        {
+            uint32 const bonusMoney = static_cast<uint32>(killed->GetLevel() * 12); // 按等级动态奖励金币
+            killer->ModifyMoney(bonusMoney);
+        }
+    }
 }
 
 void BotGuildEscrowPlayerScript::OnPlayerUpdate(Player* player, uint32 p_time)

@@ -177,19 +177,19 @@ void BotGuildReceptionistScript::ShowGuildDetail(Player* player, Creature* creat
 			if (guildId == GUILD_STEAMWHEEDLE_CARTEL)
             {
                 ChatHandler(player->GetSession()).PSendSysMessage(
-                    "【公会前台】{}：入会后可领取专属通信使魔；开放全部 31 系专精无门槛雇佣。在商言商，本会不设内部折扣（常驻 1.0x 原价结算）。", cfg->name);
+                    "【公会前台】{}：入会后可领取专属通信使魔；开放全部 31 系专精无门槛雇佣，并享受每日工程军需与战术号令权。", cfg->name);
             }
             else
 			{
-				ChatHandler(player->GetSession()).PSendSysMessage("【公会前台】{}：入会后可领取专属通信使魔，并享受随从雇佣 7.5 折内部津贴。", cfg->name);
+				ChatHandler(player->GetSession()).PSendSysMessage("【公会前台】{}：入会后可领取专属通信使魔，解锁全队战术光环、每日行军补给与战术号令权。", cfg->name);
 
-				// 职业契合度前置提醒：非契合职业入会后无法为队伍激活本会战术光环。
+				/* // 职业契合度前置提醒：非契合职业入会后无法为队伍激活本会战术光环。
 				// 若不在入会前讲清，玩家会误以为「入会即得光环」而产生落差投诉。
 				if (!sBotGuildEscrowMgr->IsPlayerClassAffiliated(guildId, player->getClass()))
 				{
-					ChatHandler(player->GetSession()).PSendSysMessage(
-						"|cffff8000【契合度警示】您的职业与本公会的战术风格不符。入会后仍可享受 7.5 折佣金津贴与每日行军补给，但您本人无法为队伍激活本公会的专属战术光环（需依赖本会正统随从提供）。|r");
-				}
+					ChatHandler(player->GetSession()).PSendSysMessage(				
+						"|cffff8000【契合度警示】您的职业与本公会的战术风格不符。入会后仍可享受每日行军补给与使魔调度，但您本人无法为队伍激活本公会的专属战术光环（需依赖本会正统随从提供）。|r");
+				} */
 			}
             
         }
@@ -221,14 +221,30 @@ void BotGuildReceptionistScript::HandleJoinGuild(Player* player, Creature* creat
         ShowMainMenu(player, creature);
         return;
     }
-
+	
+	bool itemAdded = true;
     if (!player->HasItemCount(cfg->itemId, 1))
-        player->AddItem(cfg->itemId, 1);
+	{
+		if (!player->AddItem(cfg->itemId, 1))
+        {
+            itemAdded = false;
+            if (player->GetSession())
+                ChatHandler(player->GetSession()).PSendSysMessage(
+                    "|cffff8000【公会前台】您的背包空间已满，使魔道具未能放入背包。请整理背包后点击【补发本公会专属通信使魔】领回。|r");
+        }
+	}
 
     if (player->GetSession())
-        ChatHandler(player->GetSession()).PSendSysMessage(
-            "【公会前台】欢迎加入{}！专属通信使魔已放入您的背包，右键使用即可召唤并在野外随时调度本会随从！",
-            cfg->name);
+	{
+		if (itemAdded)
+            ChatHandler(player->GetSession()).PSendSysMessage(
+                "【公会前台】欢迎加入{}！专属通信使魔已放入您的背包，右键使用即可召唤并在野外随时调度本会随从！",
+                cfg->name);
+        else
+            ChatHandler(player->GetSession()).PSendSysMessage(
+                "【公会前台】欢迎加入{}！会籍已生效，请清理背包后补发使魔以开启随身调度功能。",
+                cfg->name);
+	}
 
     creature->Whisper("愿我们的旗帜与你同行。", LANG_UNIVERSAL, player);
     ShowMainMenu(player, creature);
@@ -238,7 +254,7 @@ void BotGuildReceptionistScript::ShowLeaveConfirmMenu(Player* player, Creature* 
 {
     if (player->GetSession())
         ChatHandler(player->GetSession()).PSendSysMessage(
-            "|cffff8000【公会前台】您确定要脱离会籍吗？退会后专属使魔将被注销回收，且无法再享受 7.5 折内部雇佣津贴！|r");
+            "|cffff8000【公会前台】您确定要脱离会籍吗？退会后专属使魔将被注销回收，且无法再领取每日公会补给！|r");
 
     AddGossipItemFor(player, GOSSIP_ICON_CHAT, "我确认退会，请办理手续。", GOSSIP_SENDER_MAIN, ACTION_LEAVE_CONFIRM_YES);
     AddGossipItemFor(player, GOSSIP_ICON_DOT, "暂不退会，返回。", GOSSIP_SENDER_MAIN, ACTION_BACK_TO_MAIN);

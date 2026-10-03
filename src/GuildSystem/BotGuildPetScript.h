@@ -23,6 +23,7 @@ private:
     static void ShowBillingStatus(Player* player, Creature* creature);
     static void HandleManualSettle(Player* player, Creature* creature);
     static void HandleDailySupply(Player* player, Creature* creature);
+	static void HandleSummonMailbox(Player* player, Creature* creature); // 新增此行
 };
 
 void AddSC_BotGuildPetScript();

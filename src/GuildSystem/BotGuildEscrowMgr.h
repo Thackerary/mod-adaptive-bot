@@ -130,39 +130,39 @@ public:
     {{
         // 1. 探险者: 战/猎/骑/贼 -> 勘探迅捷 (全队地下城移速 +5%)
         { GUILD_EXPLORERS_LEAGUE,     7560,  8496,  70201, "铁炉堡探险者协会",     true,  false,
-          GUILD_CLASS_MASK(1) | GUILD_CLASS_MASK(3) | GUILD_CLASS_MASK(2) | GUILD_CLASS_MASK(4), 58857 },
+          0xFFFFFFFF, 58857 },
 
         // 2. 军情七处: 贼/猎/法/术/牧 -> 斩首赏金 (全队 3% 破甲)
         { GUILD_SI7_MERCENARIES,      8491,  10674, 70202, "暴风城军情七处",       true,  false,
-          GUILD_CLASS_MASK(4) | GUILD_CLASS_MASK(3) | GUILD_CLASS_MASK(8) | GUILD_CLASS_MASK(9) | GUILD_CLASS_MASK(5), 73878 },
+          0xFFFFFFFF, 73878 },
 
         // 3. 银色盟约: 法/牧/猎/骑 -> 魔枢谐振 (全队法力消耗 -3%)
         { GUILD_SILVER_COVENANT,      8485,  10673, 70203, "达拉然银色盟约",       true,  false,
-          GUILD_CLASS_MASK(8) | GUILD_CLASS_MASK(5) | GUILD_CLASS_MASK(3) | GUILD_CLASS_MASK(2), 61316 },
+          0xFFFFFFFF, 61316 },
 
         // 4. 战歌远征队: 战/萨/猎/贼 -> 战歌怒火 (全队物理攻强 +3%)
         { GUILD_WARSONG_OFFENSIVE,    10393, 12643, 70204, "战歌远征突击队",       false, true,
-          GUILD_CLASS_MASK(1) | GUILD_CLASS_MASK(7) | GUILD_CLASS_MASK(3) | GUILD_CLASS_MASK(4), 65987 },
+          0xFFFFFFFF, 65987 },
 
         // 5. 夺日者: 法/骑/术/牧 -> 魔能共鸣 (全队法术暴击 +2%)
         { GUILD_SUNREAVERS,           27445, 33050, 70205, "夺日者议会",           false, true,
-          GUILD_CLASS_MASK(8) | GUILD_CLASS_MASK(2) | GUILD_CLASS_MASK(9) | GUILD_CLASS_MASK(5), 23645 },
+          0xFFFFFFFF, 23645 },
 
         // 6. 死亡猎手: 贼/术/DK/牧 -> 凋零契约 (全队受暗影/自然伤害降低 5%)
         { GUILD_DEATHSTALKERS,        10392, 12642, 70206, "幽暗城死亡猎手狂怒社", false, true,
-          GUILD_CLASS_MASK(4) | GUILD_CLASS_MASK(9) | GUILD_CLASS_MASK(6) | GUILD_CLASS_MASK(5), 32049 },
+          0xFFFFFFFF, 32049 },
 
         // 7. 银色北伐军: 骑/战/牧/DK -> 圣光避难所 (全队受治疗效果 +4%)
         { GUILD_ARGENT_CRUSADE,       44982, 63317, 70207, "银色北伐军先锋营",     false, false,
-          GUILD_CLASS_MASK(2) | GUILD_CLASS_MASK(1) | GUILD_CLASS_MASK(5) | GUILD_CLASS_MASK(6), 65634 },
+          0xFFFFFFFF, 65634 },
 
         // 8. 下水道黑市: 全职业开放，无战术光环 (纯个人修理与道具特权)
         { GUILD_UNDERBELLY_SYNDICATE, 43698, 59250, 70208, "达拉然下水道黑市行会", false, false,
           0xFFFFFFFF, 0 },
 
-        // 9. 塞纳里奥: 德/萨/猎 -> 荒野赐福 (全队微量常驻全属性加成)
+        // 9. 塞纳里奥: 德/萨/猎 -> 荒野赐福 (野外坐骑移速 +10%、坠落伤害 -30%、脱战回血蓝 +25%)
         { GUILD_CENARION_EXPEDITION,  44794, 61773, 70209, "塞纳里奥议会/远征队",  false, false,
-          GUILD_CLASS_MASK(11) | GUILD_CLASS_MASK(7) | GUILD_CLASS_MASK(3), 48470 },
+          0xFFFFFFFF, 48470 },
 
         // 10. 热砂财阀: 全职业开放，无战术光环 (全能商业补位)
         { GUILD_STEAMWHEEDLE_CARTEL,  11026, 13548, 70210, "热砂财阀雇佣行",       false, false,

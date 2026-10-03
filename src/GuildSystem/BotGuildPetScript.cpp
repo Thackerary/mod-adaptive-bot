@@ -7,10 +7,13 @@
 #include "BotGuildEscrowMgr.h"
 #include "Chat.h"
 #include "Creature.h"
+#include "GameTime.h"
 #include "GossipDef.h"
 #include "Item.h"
 #include "PetAI.h"
 #include "Player.h"
+#include <unordered_map>
+#include <string>
 
 namespace
 {
@@ -20,7 +23,8 @@ namespace
         ACTION_BILLING_MENU      = 2,
         ACTION_CLAIM_SUPPLY      = 3,
         ACTION_BACK_TO_MAIN      = 4,
-
+		ACTION_SUMMON_MAILBOX    = 5, // 热砂财阀特权：随身便携邮箱
+		
         ACTION_TACTICAL_ASSEMBLE = 101,
         ACTION_TACTICAL_DISBAND  = 102,
         ACTION_TACTICAL_REST     = 103,
@@ -31,7 +35,9 @@ namespace
 
         ACTION_BILLING_SETTLE    = 201
     };
-
+	// 内存独立时钟记录（免侵入 EscrowMgr 数据库表结构）
+    static std::unordered_map<ObjectGuid, uint64> s_silverCovenantSupplyTime; // 银色盟约 30 分钟晶水计时
+    static std::unordered_map<ObjectGuid, uint64> s_steamwheedleMailboxTime;  // 热砂便携邮箱 10 分钟 CD 计时
     // 每日行军补给配方：按指挥官等级区间发放对应档次的实战药水
     struct SupplyKit
     {
@@ -102,6 +108,9 @@ bool BotGuildPetScript::OnGossipSelect(Player* player, Creature* creature, uint3
         case ACTION_CLAIM_SUPPLY:
             HandleDailySupply(player, creature);
             break;
+		case ACTION_SUMMON_MAILBOX:
+            HandleSummonMailbox(player, creature);
+			break;
         case ACTION_BACK_TO_MAIN:
             ShowPetMainMenu(player, creature);
             break;
@@ -173,8 +182,16 @@ void BotGuildPetScript::ShowPetMainMenu(Player* player, Creature* creature)
 
     AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "【战术号令中心】远程下达集合 / 解散 / 休息 / 阵型指令。", GOSSIP_SENDER_MAIN, ACTION_TACTICAL_MENU);
     AddGossipItemFor(player, GOSSIP_ICON_MONEY_BAG, "【佣金账单查询与结算】", GOSSIP_SENDER_MAIN, ACTION_BILLING_MENU);
-    AddGossipItemFor(player, GOSSIP_ICON_CHAT, "【领取公会行军补给】", GOSSIP_SENDER_MAIN, ACTION_CLAIM_SUPPLY);
-
+    // 动态显示补给文案
+    if (guildId == GUILD_SILVER_COVENANT)
+        AddGossipItemFor(player, GOSSIP_ICON_CHAT, "【领取魔枢给养】每 30 分钟免费获取魔法晶水与点心。", GOSSIP_SENDER_MAIN, ACTION_CLAIM_SUPPLY);
+    else
+        AddGossipItemFor(player, GOSSIP_ICON_CHAT, "【领取公会行军补给】领取每日专属战地配给物资。", GOSSIP_SENDER_MAIN, ACTION_CLAIM_SUPPLY);
+	
+	// 热砂财阀专属：随身便携邮箱终端
+    if (guildId == GUILD_STEAMWHEEDLE_CARTEL)
+        AddGossipItemFor(player, GOSSIP_ICON_INTERACT_1, "【商业特权】部署热砂传讯便携邮箱（冷却 10 分钟）。", GOSSIP_SENDER_MAIN, ACTION_SUMMON_MAILBOX);
+	
     SendGossipMenuFor(player, DEFAULT_GOSSIP_MESSAGE, creature->GetGUID());
 }
 
@@ -254,48 +271,170 @@ void BotGuildPetScript::HandleManualSettle(Player* player, Creature* creature)
 }
 
 void BotGuildPetScript::HandleDailySupply(Player* player, Creature* creature)
-{
+{	
+	uint8 const guildId = sBotGuildEscrowMgr->GetPlayerGuildId(player->GetGUID());
+    if (guildId == GUILD_NONE)
+    {
+        if (player->GetSession())
+            ChatHandler(player->GetSession()).PSendSysMessage(
+                "|cffff0000【行军补给】您尚未加入任何公会，无法享受公会后勤补给。|r");
+        ShowPetMainMenu(player, creature);
+        return;
+    }
+	uint64 const now = static_cast<uint64>(GameTime::GetGameTime().count());
+    // -------------------------------------------------------------------------
+    // 分支 1：达拉然银色盟约（30 分钟独立晶水给养）
+    // -------------------------------------------------------------------------
+    if (guildId == GUILD_SILVER_COVENANT)
+    {
+        auto it = s_silverCovenantSupplyTime.find(player->GetGUID());
+        if (it != s_silverCovenantSupplyTime.end() && now < (it->second + 1800))
+        {
+            uint32 const remainMin = static_cast<uint32>((it->second + 1800 - now + 59) / 60);
+            if (player->GetSession())
+                ChatHandler(player->GetSession()).PSendSysMessage(
+                    "|cffff8000【魔枢给养】达拉然魔枢给养正在调配中，还需等待 {} 分钟方可再次申领。|r", remainMin);
+            ShowPetMainMenu(player, creature);
+            return;
+        }
+
+        uint32 const waterId = (player->GetLevel() >= 75) ? 43523 : 33445; // 魔法冰川之水 / 魔法甘露之水
+        uint32 const foodId  = (player->GetLevel() >= 75) ? 43518 : 33449; // 魔法甘露点心 / 魔法羊角面包
+
+        bool const wOk = player->AddItem(waterId, 20);
+        bool const fOk = player->AddItem(foodId, 20);
+
+        if (!wOk || !fOk)
+        {
+            if (wOk) player->DestroyItemCount(waterId, 20, true);
+            if (fOk) player->DestroyItemCount(foodId, 20, true);
+
+            if (player->GetSession())
+                ChatHandler(player->GetSession()).PSendSysMessage("|cffff0000【魔枢给养】背包空间不足，请清理出至少 2 个空位。|r");
+            ShowPetMainMenu(player, creature);
+            return;
+        }
+
+        s_silverCovenantSupplyTime[player->GetGUID()] = now;
+        if (player->GetSession())
+            ChatHandler(player->GetSession()).PSendSysMessage("【魔枢给养】已成功领取达拉然魔法晶水与点心各 20 份！");
+        ShowPetMainMenu(player, creature);
+        return;
+    }
+	
+	// -------------------------------------------------------------------------
+    // 分支 2：其余 9 大公会专属每日配给（20 小时宽限期门禁）
+    // -------------------------------------------------------------------------
     if (!sBotGuildEscrowMgr->CanClaimDailySupply(player->GetGUID()))
     {
         if (player->GetSession())
             ChatHandler(player->GetSession()).PSendSysMessage(
-                "|cffff0000【行军补给】今日补给已领取，或您尚未加入任何冒险者公会。|r");
+                "|cffff0000【行军补给】今日公会专属配给物资已领取完毕，请明日再来。|r");
         ShowPetMainMenu(player, creature);
         return;
     }
-
-    SupplyKit const kit = GetSupplyKitForLevel(player->GetLevel());
-
-    // Player::AddItem 的返回类型是 bool（发放成功与否），并非 Item*，
-    // 不能用于指针判空；此处按返回值逐个记录发放结果。
-    bool const healGranted = player->AddItem(kit.healPotion, kit.count);
-    bool const manaGranted = player->AddItem(kit.manaPotion, kit.count);
-
-    // 背包空间不足时绝不记录领取时间戳：否则玩家会既没拿到物资、
-    // 又白白消耗掉当天的领取资格。
-    if (!healGranted || !manaGranted)
+	bool success = false;
+    std::string supplyName = "";
+    uint32 grantedItem1 = 0, count1 = 0;
+    uint32 grantedItem2 = 0, count2 = 0;
+	
+	switch (guildId)
     {
-        // 部分发放回滚：若治疗药水已入库而法力药水发放失败，
-        // 不回滚会让玩家在「未消耗领取资格」的前提下白拿一份药水，
-        // 反复触发即可无限刷取。此处按已发放量精确倒扣，保证零净收益。
-        if (healGranted)
-            player->DestroyItemCount(kit.healPotion, kit.count, true);
-        if (manaGranted)
-            player->DestroyItemCount(kit.manaPotion, kit.count, true);
+        case GUILD_EXPLORERS_LEAGUE: // 探险者协会：古代抗性合剂 x1 (+50全抗)
+            grantedItem1 = 43548; count1 = 1;
+            success = player->AddItem(grantedItem1, count1);
+            supplyName = "古代抗性合剂 x1";
+            break;
+
+        case GUILD_SUNREAVERS: // 夺日者议会：夺日者魔能宝石 x3
+            grantedItem1 = 34062; count1 = 3;
+            success = player->AddItem(grantedItem1, count1);
+            supplyName = "夺日者魔能宝石 x3";
+            break;
+
+        case GUILD_UNDERBELLY_SYNDICATE: // 下水道黑市：走私物资箱 x1
+            grantedItem1 = 44700; count1 = 1;
+            success = player->AddItem(grantedItem1, count1);
+            supplyName = "黑市走私物资箱 x1";
+            break;
+
+        case GUILD_WARSONG_OFFENSIVE: // 战歌远征队：战歌战旗 x1 (防背包唯一性冲突)
+            if (player->HasItemCount(38309, 1))
+            {
+                if (player->GetSession())
+                    ChatHandler(player->GetSession()).PSendSysMessage(
+                        "|cffff8000【行军补给】您的背包中已持有一面战歌战旗，请使用后再行申领。|r");
+                ShowPetMainMenu(player, creature);
+                return;
+            }
+            grantedItem1 = 38309; count1 = 1;
+            success = player->AddItem(grantedItem1, count1);
+            supplyName = "战歌战旗 x1";
+            break;
+
+        case GUILD_STEAMWHEEDLE_CARTEL: // 热砂财阀：地精速效爆雷 x5
+            grantedItem1 = 41112; count1 = 5;
+            success = player->AddItem(grantedItem1, count1);
+            supplyName = "地精强效速效爆雷 x5";
+            break;
+
+        default: // 军情七处、死亡猎手、银色北伐军、塞纳里奥：自适应等级战斗药水包
+        {
+            SupplyKit const kit = GetSupplyKitForLevel(player->GetLevel());
+            grantedItem1 = kit.healPotion; count1 = kit.count;
+            grantedItem2 = kit.manaPotion; count2 = kit.count;
+            bool const hOk = player->AddItem(grantedItem1, count1);
+            bool const mOk = player->AddItem(grantedItem2, count2);
+            success = (hOk && mOk);
+            supplyName = "强化战斗药水配给包（治疗/法力各5瓶）";
+            break;
+        }
+    }
+	
+	if (!success)
+    {
+        // 失败差量回滚防刷
+        if (grantedItem1 && count1) player->DestroyItemCount(grantedItem1, count1, true);
+        if (grantedItem2 && count2) player->DestroyItemCount(grantedItem2, count2, true);
+
         if (player->GetSession())
             ChatHandler(player->GetSession()).PSendSysMessage(
-                "|cffff0000【行军补给】您的背包空间不足，请整理背包后重新领取。|r");
+                "|cffff0000【行军补给】背包空间不足，请清理背包后重试。|r");
+        ShowPetMainMenu(player, creature);
+        return;
+    }
+	
+	sBotGuildEscrowMgr->RecordDailySupplyClaim(player->GetGUID());
+	
+	if (player->GetSession())
+        ChatHandler(player->GetSession()).PSendSysMessage("【公会配给】已成功申领专属物资：{}！", supplyName);
+
+    ShowPetMainMenu(player, creature);
+}
+
+void BotGuildPetScript::HandleSummonMailbox(Player* player, Creature* creature)
+{
+    uint64 const now = static_cast<uint64>(GameTime::GetGameTime().count());
+    auto it = s_steamwheedleMailboxTime.find(player->GetGUID());
+
+    if (it != s_steamwheedleMailboxTime.end() && now < (it->second + 600))
+    {
+        uint32 const remainMin = static_cast<uint32>((it->second + 600 - now + 59) / 60);
+        if (player->GetSession())
+            ChatHandler(player->GetSession()).PSendSysMessage(
+                "|cffff8000【便携邮箱】热砂传讯便携邮箱正在冷却中，还需等待 {} 分钟。|r", remainMin);
         ShowPetMainMenu(player, creature);
         return;
     }
 
-    sBotGuildEscrowMgr->RecordDailySupplyClaim(player->GetGUID());
+    // 释放工程学随身便携邮箱法术 (Spell 54710: MOLL-E，持续 10 分钟)
+    player->CastSpell(player, 54710, true);
+    s_steamwheedleMailboxTime[player->GetGUID()] = now;
 
     if (player->GetSession())
-        ChatHandler(player->GetSession()).PSendSysMessage(
-            "【行军补给】已领取：治疗药水 x{}、法力药水 x{}。祝您远征顺利！", kit.count, kit.count);
+        ChatHandler(player->GetSession()).PSendSysMessage("【商业特权】热砂随身便携邮箱已成功展开，持续 10 分钟。");
 
-    ShowPetMainMenu(player, creature);
+    CloseGossipMenuFor(player);
 }
 
 void AddSC_BotGuildPetScript()
