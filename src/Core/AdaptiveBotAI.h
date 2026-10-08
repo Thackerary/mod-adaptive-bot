@@ -410,7 +410,12 @@ public:
             me->GetMotionMaster()->MoveIdle();
             return;
         }
-
+		// 状态复位下马
+        if (me->IsMounted())
+        {
+            me->Dismount();
+            me->SetSpeed(MOVE_RUN, 1.0f);
+        }
         // 化身复活复位：化身实体重新激活且仍存活时，抹掉花名册里的战死标记。
         // 若不复位，被战复 / 跑尸救回的化身会在下一次切图时被防刷活闸门误拦截。
         if (isAvatar && !masterGuid.IsEmpty() && me->IsAlive())
@@ -747,7 +752,12 @@ public:
     {
         if (!victim)
             return;
-
+		// 攻击前自动解除骑乘
+        if (me->IsMounted())
+        {
+            me->Dismount();
+            me->SetSpeed(MOVE_RUN, 1.0f);
+        }
         if (IsRangedBot())
         {
             if (me->Attack(victim, false))
@@ -765,52 +775,6 @@ public:
     void DamageDealt(Unit* doneTo, uint32& damage, DamageEffectType damagetype, SpellSchoolMask damageSchoolMask) override
     {
         damage = static_cast<uint32>(damage * GetDamageDealtMultiplier());
-
-        /* if (me->IsInCombat() && damage > 0)
-        {
-            BotCombatEvent ev;
-            ev.combatTimeMs = combatTimerMs;
-            ev.eventType = BotCombatEventType::DAMAGE_DEALT;
-            ev.amount = damage;
-            ev.sourceGuid = doneTo ? doneTo->GetGUID() : ObjectGuid::Empty;
-            ev.schoolMask = static_cast<uint8>(damageSchoolMask);
-            combatEventBuffer.Push(ev);
-        } */
-		if (doneTo && doneTo->IsAlive())
-		{
-			Player* master = GetMaster();
-			uint8 const playerGuild = master ? sBotGuildEscrowMgr->GetPlayerGuildId(master->GetGUID()) : GUILD_NONE;
-			uint8 const botGuild = BotGuildEscrowMgr::GetBotGuildIdFromEntry(me->GetEntry());
-
-			// 1. 【达拉然下水道黑市】：街头突袭
-			// 判定：主人属于黑市或随从原生归属黑市
-			if (playerGuild == GUILD_UNDERBELLY_SYNDICATE || botGuild == GUILD_UNDERBELLY_SYNDICATE)
-			{
-				float bonus = 1.0f;
-				// 背后或侧翼攻击判定 (目标背对自身)
-				if (doneTo->isInBack(me))
-					bonus += 0.03f; // 背后/侧翼 +3%
-
-				// 昏迷、瘫痪或受控/减速判定
-				if (doneTo->HasUnitState(UNIT_STATE_STUNNED | UNIT_STATE_CONFUSED) || 
-					doneTo->HasAuraType(SPELL_AURA_MOD_DECREASE_SPEED))
-					bonus += 0.03f; // 受控/减速追加 +3%
-
-				damage = static_cast<uint32>(damage * bonus);
-			}
-
-			// 2. 【银色北伐军】：天灾克星 (对亡灵与恶魔伤害 +2.5%)
-			if (playerGuild == GUILD_ARGENT_CRUSADE || botGuild == GUILD_ARGENT_CRUSADE)
-			{
-				Creature* targetCreature = doneTo->ToCreature();
-				if (targetCreature)
-				{
-					uint32 const cType = targetCreature->GetCreatureTemplate()->type;
-					if (cType == CREATURE_TYPE_UNDEAD || cType == CREATURE_TYPE_DEMON)
-						damage = static_cast<uint32>(damage * 1.025f);
-				}
-			}
-		}
         ScriptedAI::DamageDealt(doneTo, damage, damagetype, damageSchoolMask);
     }
 
@@ -826,33 +790,15 @@ public:
             isHoldingFormation = false;
             me->HandleEmoteCommand(EMOTE_STATE_STAND);
         }
-
+		// 受击强制下马
+        if (me->IsMounted())
+        {
+            me->Dismount();
+            me->SetSpeed(MOVE_RUN, 1.0f);
+        }
+		
         damage = static_cast<uint32>(damage * GetDamageTakenMultiplier());
 		
-		if (attacker)
-		{
-			Player* master = GetMaster();
-			uint8 const playerGuild = master ? sBotGuildEscrowMgr->GetPlayerGuildId(master->GetGUID()) : GUILD_NONE;
-			uint8 const botGuild = BotGuildEscrowMgr::GetBotGuildIdFromEntry(me->GetEntry());
-
-			// 1. 【银色北伐军】：天灾庇护 (受亡灵与恶魔伤害 -2.5%)
-			if (playerGuild == GUILD_ARGENT_CRUSADE || botGuild == GUILD_ARGENT_CRUSADE)
-			{
-				if (Creature* cAttacker = attacker->ToCreature())
-				{
-					uint32 const cType = cAttacker->GetCreatureTemplate()->type;
-					if (cType == CREATURE_TYPE_UNDEAD || cType == CREATURE_TYPE_DEMON)
-						damage = static_cast<uint32>(damage * 0.975f);
-				}
-			}
-
-			// 2. 【幽暗城死亡猎手】：凋零契约 (受到暗影与自然伤害降低 5%)
-			if (playerGuild == GUILD_DEATHSTALKERS || botGuild == GUILD_DEATHSTALKERS)
-			{
-				if (damageSchoolMask & (SPELL_SCHOOL_MASK_SHADOW | SPELL_SCHOOL_MASK_NATURE))
-					damage = static_cast<uint32>(damage * 0.95f);
-			}
-		}
         if (me->IsInCombat())
         {
 			bool const isLethal = (damage >= me->GetHealth());
@@ -958,6 +904,12 @@ public:
             isResting = false;
             isHoldingFormation = false;
             me->HandleEmoteCommand(EMOTE_STATE_STAND);
+        }
+		
+		if (me->IsMounted())
+        {
+            me->Dismount();
+            me->SetSpeed(MOVE_RUN, 1.0f);
         }
 
         ScriptedAI::JustEngagedWith(who);
@@ -1922,6 +1874,13 @@ public:
     // =========================================================================
     bool ExecuteSpell(Unit* target, uint32 spellId, bool applyGcd = true, Unit* facingTarget = nullptr)
     {
+		// 施法前解除骑乘，防止 SPELL_FAILED_NOT_MOUNTED 阻断
+        if (me->IsMounted())
+        {
+            me->Dismount();
+            me->SetSpeed(MOVE_RUN, 1.0f);
+        }
+		
         if (!target || !target->IsInWorld() || target->GetMap() != me->GetMap())
             return false;
 
@@ -2084,8 +2043,44 @@ public:
         }
 
         if (!master->IsAlive())
-            return;
+		{
+			// 指挥官阵亡：随从就地下马待命
+            if (me->IsMounted())
+            {
+                me->Dismount();
+                me->SetSpeed(MOVE_RUN, 1.0f);
+            }
+			return;
+		}          
+		
+		// =====================================================================
+        // 方案 B：坐骑外观镜像与速度动态同步
+        // =====================================================================
+        if (master->IsMounted())
+        {
+            uint32 const masterMountDisplay = master->GetMountID();
+            if (masterMountDisplay != 0)
+            {
+                // 未上马或坐骑模型不一致时实时镜像
+                if (!me->IsMounted() || me->GetMountID() != masterMountDisplay)
+                {
+                    me->Mount(masterMountDisplay);
+                }
+            }
 
+            // 同步移动速度倍率（自动匹配 60%、100% 坐骑以及十字军光环等加速）
+            float const masterSpeedRate = master->GetSpeedRate(MOVE_RUN);
+            if (std::abs(me->GetSpeedRate(MOVE_RUN) - masterSpeedRate) > 0.05f)
+            {
+                me->SetSpeed(MOVE_RUN, masterSpeedRate);
+            }
+        }
+        else if (me->IsMounted())
+        {
+            // 主人下马：随从同步下马并恢复常规移动速度倍率
+            me->Dismount();
+            me->SetSpeed(MOVE_RUN, 1.0f);
+        }
         // 处于就地休息或保持阵型状态下，禁止常规 6 码跟随抢占：
         // 阵型成员一旦被拉回跟随队形，三大阵型的几何外推结果会被每秒巡检整体冲刷。
         // 仅在指挥官脱离过远 (>45 码) 跨区域时保留防丢失瞬移，并顺势解除两类锁定。
@@ -2410,12 +2405,18 @@ public:
 			baseFee = 10000;        // 1 金
 		
 		if (!player)
-        return baseFee;
-
-		// 【黑市特权】：达拉然下水道黑市行会享受招募中介服务费立减 20% (0.80x)
-		if (sBotGuildEscrowMgr->GetPlayerGuildId(player->GetGUID()) == GUILD_UNDERBELLY_SYNDICATE)
-			return static_cast<uint32>(baseFee * 0.80f);
-
+			return baseFee;
+		
+		uint8 const pGuild = sBotGuildEscrowMgr->GetPlayerGuildId(player->GetGUID());
+		
+		// 【黑市特权】：招募中介费立减 20% (0.80x)
+        if (pGuild == GUILD_UNDERBELLY_SYNDICATE)
+            return (baseFee * 80 + 50) / 100;
+		
+		// 【夺日者特权】：招募中介费立减 15% (0.85x)
+        if (pGuild == GUILD_SUNREAVERS)
+            return (baseFee * 85 + 50) / 100;
+		
 		return baseFee;
     }
 

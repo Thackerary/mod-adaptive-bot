@@ -167,13 +167,6 @@ void BotGuildEscrowMgr::RemoveContract(ObjectGuid const& playerGuid)
     std::lock_guard<std::mutex> lock(_lock);
     _activeContracts.erase(playerGuid);
     _contractProbeTimers.erase(playerGuid);
-
-    // 登记一次性光环收尾：契约注销点分散在手动解散（DoDisband）/ 退会 / 登出 /
-    // 制裁等多条路径，且注销瞬间随从往往尚未遣返——当场同步会被仍在队的随从
-    // 重新点亮光环，变成「清完再挂上」的空转。故此处只挂标记，交由后续首个
-    // 玩家更新帧在随从彻底离队之后做一次幂等差量同步，确保任何注销路径都
-    // 不留残留战术光环（对已自行清理过光环的路径同样无害，属幂等空操作）。
-    _pendingAuraCleanup.insert(playerGuid);
 }
 
 void BotGuildEscrowMgr::RegisterHiredBot(ObjectGuid const& playerGuid, uint32 entry, uint32 originSpawnId, ObjectGuid const& origGuid)
@@ -381,6 +374,9 @@ bool BotGuildEscrowMgr::ReviveDeadBots(Player* player)
     }
 
     // 2. 原地重新投影新化身，并赋予 50% 生命/法力重伤状态
+    uint8 const playerGuildId = GetPlayerGuildId(player->GetGUID());
+    uint32 const recoverPct = (playerGuildId == GUILD_ARGENT_CRUSADE) ? 90 : 50; // 北伐军 90%，其余 50%
+
     uint32 revivedCount = 0;
     for (HiredBotRecord const& record : deadBots)
     {
@@ -393,11 +389,10 @@ bool BotGuildEscrowMgr::ReviveDeadBots(Player* player)
                 avatarAI->originCreatureGuid = record.originCreatureGuid;
                 avatarAI->SetMaster(player);
 
-                // 强制截断为 50% 重伤休整状态：必须置于 SetMaster 之后，
-                // 否则 SetMaster 内部的属性同步会按百分比重算血量覆盖该赋值。
-                avatar->SetHealth(std::max<uint32>(1, avatar->GetMaxHealth() / 2));
+                // 按公会特权比例恢复生命与法力
+                avatar->SetHealth(std::max<uint32>(1, avatar->GetMaxHealth() * recoverPct / 100));
                 if (avatar->getPowerType() == POWER_MANA)
-                    avatar->SetPower(POWER_MANA, avatar->GetMaxPower(POWER_MANA) / 2);
+                    avatar->SetPower(POWER_MANA, avatar->GetMaxPower(POWER_MANA) * recoverPct / 100);
 
                 ++revivedCount;
             }
@@ -406,8 +401,8 @@ bool BotGuildEscrowMgr::ReviveDeadBots(Player* player)
 
     if (player->GetSession())
         ChatHandler(player->GetSession()).PSendSysMessage(
-            "|cffff8000【战地急救】已成功唤醒并重塑 {} 名随从（当前处于 50% 生命/法力重伤休整状态）。|r",
-            revivedCount);
+            "|cffff8000【战地急救】已成功唤醒并重塑 {} 名随从（当前处于 {}% 生命/法力重伤休整状态）。|r",
+            revivedCount, recoverPct);
 
     return true;
 }
@@ -418,14 +413,21 @@ bool BotGuildEscrowMgr::HasActiveContract(ObjectGuid const& playerGuid)
     return _activeContracts.find(playerGuid) != _activeContracts.end();
 }
 
-float BotGuildEscrowMgr::CalculateGuildDiscount(uint8 playerGuildId, uint8 botGuildId, bool isCrossFaction)
+float BotGuildEscrowMgr::CalculateGuildDiscount(uint8 playerGuildId, uint8 /*botGuildId*/, bool isCrossFaction)
 {
     float discount = 1.0f;
 
     // 【黑市特权】：达拉然下水道黑市行会战地信托佣金常驻 8 折 (0.80x)
     if (playerGuildId == GUILD_UNDERBELLY_SYNDICATE)
         discount *= 0.80f;
-
+	
+	// 【热砂特权】：全能商业掮客，彻底豁免 20% 跨阵营中介加价，且常驻返利 5% (0.95x)
+    if (playerGuildId == GUILD_STEAMWHEEDLE_CARTEL)
+    {
+        isCrossFaction = false; // 抹掉跨阵营标记
+        discount *= 0.95f;      // 额外 95 折
+    }
+	
     // 跨阵营中介加收 20%
     if (isCrossFaction)
         discount *= 1.20f;
@@ -455,42 +457,15 @@ GuildPetConfig const* BotGuildEscrowMgr::GetGuildConfigByCreature(uint32 creatur
 
 uint8 BotGuildEscrowMgr::GetBotGuildIdFromEntry(uint32 entry)
 {
-    // Phase 1 模版 Entry 公式：71000 + gid * 31 + spec_id (gid: 1~10, spec_id: 1~31)
-    // Entry 范围为 71032 ~ 71341
-    if (entry >= 71032 && entry <= 71341)
+    // Phase 1 模版 Entry 公式：71000 + gid * 50 + spec_id (gid: 1~10, spec_id: 1~50)
+    // 500 席位架构：71001 ~ 71500 (每个公会连续占 50 个 Entry)
+    if (entry >= 71001 && entry <= 71500)
     {
-        uint32 const gid = (entry - 71001) / 31;
+        uint32 const gid = (entry - 71001) / 50;
         if (gid >= 1 && gid <= 10)
             return static_cast<uint8>(gid);
     }
     return GUILD_NONE;
-}
-
-bool BotGuildEscrowMgr::IsPlayerClassAffiliated(uint8 guildId, uint8 playerClass)
-{
-	return true;
-    /* // 防御下溢：魔兽 3.3.5a 职业 ID 范围为 1 (战士) ~ 11 (德鲁伊)。
-    // 若传入 0，GUILD_CLASS_MASK 宏内的 (cls - 1) 会以无符号整数下溢成
-    // 0xFFFFFFFF，移位量随即溢出位宽，属未定义行为；大于 11 的非法 ID
-    // 同样应直接拒绝，而非信任调用方自行保证入参合法性。
-    if (playerClass == 0 || playerClass > 11)
-        return false;
-
-    GuildPetConfig const* cfg = GetGuildConfig(guildId);
-    if (!cfg)
-        return false;
-
-    // 职业掩码为 0 属于配置遗漏，一律判为不契合，宁可少给光环也不放行非法加成。
-    if (cfg->compatibleClassMask == 0)
-        return false;
-
-    return (cfg->compatibleClassMask & GUILD_CLASS_MASK(playerClass)) != 0; */
-}
-
-uint32 BotGuildEscrowMgr::GetGuildAuraSpellId(uint8 guildId)
-{
-    GuildPetConfig const* cfg = GetGuildConfig(guildId);
-    return cfg ? cfg->auraSpellId : 0;
 }
 
 uint8 BotGuildEscrowMgr::GetPlayerGuildId(ObjectGuid const& playerGuid)
@@ -582,12 +557,6 @@ bool BotGuildEscrowMgr::LeavePlayerGuild(Player* player)
 
     CharacterDatabase.Execute("DELETE FROM character_bot_guild_member WHERE guid = {}", guid.GetCounter());
 
-    // 使魔彻底回收三连：解除召唤实体、驱散召唤光环、追缴实物道具、注销法术书技能。
-    // 缺任何一环都留下绕过路径——只清实体则光环残留会在重登时自动再召唤；
-    // 只清光环则实物道具仍在背包可无限次使用。
-    // AzerothCore 的 Player 并未提供 GetMiniPet / RemoveMiniPet，
-    // 伴侣句柄由 Unit::GetCritterGUID()（UNIT_FIELD_CRITTER）持有，
-    // 遣散须自行取实体后 DespawnOrUnsummon。
     if (ObjectGuid const critterGuid = player->GetCritterGUID())
     {
         if (Creature* critter = ObjectAccessor::GetCreature(*player, critterGuid))
@@ -600,10 +569,6 @@ bool BotGuildEscrowMgr::LeavePlayerGuild(Player* player)
         player->DestroyItemCount(cfg->itemId, 1, true);
         player->removeSpell(cfg->spellId, SPEC_MASK_ALL, false);
     }
-
-    // 退会即失去会籍：本人贡献的战术光环必须立刻从全队剥离。
-    // 队友若仍需该加成，只能依赖队伍中该公会的正统随从继续提供。
-    ClearTeamGuildAuras(player);
 
     if (player->GetSession())
         ChatHandler(player->GetSession()).PSendSysMessage(
@@ -643,7 +608,6 @@ namespace
     ///        真正的 SPELL_EFFECT_SUMMON（MiscValue = 实体 Entry）挂在内核法术上，
     ///        只改外壳的 MiscValue 完全无效，故必须沿链下沉；
     ///        depth 上限用于阻断环形/自触发的畸形法术链。
-    ///        同时严格限定只改「召唤类」效果：伴侣法术上常并存光环、加属性等其它效果，
     ///        盲改首个 MiscValue > 0 的效果会连带破坏这些逻辑。
     /// @return 是否至少成功改写了一处召唤目标。
     bool RedirectSummonChain(SpellInfo const* spellInfo, uint32 creatureEntry, uint8 depth = 0)
@@ -828,9 +792,9 @@ void BotGuildEscrowMgr::AccumulateKillFee(Player* player, Creature* killed)
     bool const isRaidMap = (killed->GetMap() && killed->GetMap()->IsRaid());
 
     if (killed->isWorldBoss() || (isRaidMap && killed->IsDungeonBoss()))
-        typeMultiplier = 60.0f; // 团本首领: 60x (~9G)
+        typeMultiplier = (playerGuildId == GUILD_WARSONG_OFFENSIVE) ? 30.0f : 60.0f; // 战歌突击队团本 Boss 减半,团本首领: 60x (~9G)
     else if (killed->IsDungeonBoss())
-        typeMultiplier = 20.0f; // 5 人本首领: 20x (~3G)
+        typeMultiplier = (playerGuildId == GUILD_WARSONG_OFFENSIVE) ? 10.0f : 20.0f; // 战歌突击队 5 人本 Boss 减半,5 人本首领: 20x (~3G)
     else if (killed->isElite() || isRaidMap)
         typeMultiplier = 3.0f;  // 精英怪及团本普通杂兵: 3x (~45S)
 
@@ -883,9 +847,12 @@ bool BotGuildEscrowMgr::SettleCurrentBill(Player* player, BillingReason reason)
         return false;
 
     ObjectGuid const guid = player->GetGUID();
-
+	
+	uint8 const playerGuildId = GetPlayerGuildId(guid);
+	
     uint32 dueCopper = 0;
     uint32 kills = 0;
+	
     bool wasInGracePeriod = false;
 
     {
@@ -898,17 +865,27 @@ bool BotGuildEscrowMgr::SettleCurrentBill(Player* player, BillingReason reason)
         kills = it->second.totalKilledCount;
         wasInGracePeriod = it->second.inGracePeriod;
     }
-
+	
+	// 【修复】：在此处准确计算银色盟约 10% 补贴
+    uint32 actualDueCopper = dueCopper;
+    uint32 rebateCopper = 0;
+	
+	if (playerGuildId == GUILD_SILVER_COVENANT && dueCopper >= 50000)
+    {
+        rebateCopper = (dueCopper * 10 + 50) / 100; // 纯整数四舍五入 10%
+        actualDueCopper = dueCopper - rebateCopper;
+    }
+	
     // 财务透明度：告警与回执统一以「金/银/铜」三段式直读呈现，
     // 不再让玩家面对一串原始铜数自行换算。
-    uint32 const gold = dueCopper / 10000;
-    uint32 const silver = (dueCopper % 10000) / 100;
-    uint32 const copper = dueCopper % 100;
+    uint32 const gold = actualDueCopper / 10000;
+    uint32 const silver = (actualDueCopper % 10000) / 100;
+    uint32 const copper = actualDueCopper % 100;
 
     // -------------------------------------------------------------------------
-    // 扣费失败通道：进入 1 小时宽限期，并告知确切欠款（消息下发必须脱离锁作用域）
+    // 扣费失败通道：进入 1 小时宽限期，并告知确切欠款（消息下发必须脱离锁作用域）,使用补贴后的 actualDueCopper 校验
     // -------------------------------------------------------------------------
-    if (player->GetMoney() < dueCopper)
+    if (player->GetMoney() < actualDueCopper)
     {
         bool newlyEntered = false;
         {
@@ -936,7 +913,7 @@ bool BotGuildEscrowMgr::SettleCurrentBill(Player* player, BillingReason reason)
     // -------------------------------------------------------------------------
     // 扣费成功通道
     // -------------------------------------------------------------------------
-    player->ModifyMoney(-static_cast<int64>(dueCopper));
+    player->ModifyMoney(-static_cast<int64>(actualDueCopper));
 
     {
         std::lock_guard<std::mutex> lock(_lock);
@@ -967,115 +944,26 @@ bool BotGuildEscrowMgr::SettleCurrentBill(Player* player, BillingReason reason)
 
         // AzerothCore 的 PSendSysMessage 为 fmt 语义，占位符必须是 {}，
         // 沿用 printf 的 %s/%u 会在运行期抛 fmt::format_error。
-        ChatHandler(player->GetSession()).PSendSysMessage(
-            "【公会账单】[{}] 随从协助击杀 {} 个目标，支付佣金: {}金 {}银 {}铜。{}",
-            reasonStr, kills, gold, silver, copper,
-            wasInGracePeriod ? " 您的公会信用已恢复正常！" : "");
+        if (rebateCopper > 0)
+        {
+            uint32 const rGold = rebateCopper / 10000;
+            uint32 const rSilver = (rebateCopper % 10000) / 100;
+            uint32 const rCopper = rebateCopper % 100;
+            ChatHandler(player->GetSession()).PSendSysMessage(
+                "【公会账单】[{}] 随从协助击杀 {} 个目标，享受奥术差旅补贴立减 {}金 {}银 {}铜，实际支付: {}金 {}银 {}铜。{}",
+                reasonStr, kills, rGold, rSilver, rCopper, gold, silver, copper,
+                wasInGracePeriod ? " 您的公会信用已恢复正常！" : "");
+        }
+        else
+        {
+            ChatHandler(player->GetSession()).PSendSysMessage(
+                "【公会账单】[{}] 随从协助击杀 {} 个目标，支付佣金: {}金 {}银 {}铜。{}",
+                reasonStr, kills, gold, silver, copper,
+                wasInGracePeriod ? " 您的公会信用已恢复正常！" : "");
+        }
     }
 
     return true;
-}
-
-void BotGuildEscrowMgr::UpdateTeamGuildAuras(Player* player)
-{
-    if (!player)
-        return;
-
-    // -------------------------------------------------------------------------
-    // 1. 归集「本帧队伍应激活的公会战术光环」合集
-    //    以 SpellID 集合承载，天然完成同公会去重：多名同会随从、或契合玩家
-    //    搭配同会随从，最终都只会在集合里留下 1 个条目，绝不会线性叠加。
-    // -------------------------------------------------------------------------
-    std::unordered_set<uint32> activeAuras;
-
-    // A. 指挥官贡献判定：取消职业门禁，所有职业加入公会后均可直接为全队激活战术光环
-    uint8 const playerGuildId = GetPlayerGuildId(player->GetGUID());
-    if (playerGuildId != GUILD_NONE)
-    {
-        if (uint32 const aura = GetGuildAuraSpellId(playerGuildId))
-            activeAuras.insert(aura);
-    }
-
-    // B. 随从贡献判定：随从由模版 Entry 逆向反解原生公会，属正统精锐编制，
-    //    只要在队且存活，必然为全队贡献其原生公会的战术光环（不受指挥官会籍影响）。
-    std::vector<AdaptiveBotAI*> const botGroup = BotCommandScript::CollectBotGroup(player);
-    for (AdaptiveBotAI* bot : botGroup)
-    {
-        if (!bot || !bot->GetBotCreature() || !bot->GetBotCreature()->IsAlive())
-            continue;
-
-        uint8 const botGuildId = GetBotGuildIdFromEntry(bot->GetBotCreature()->GetEntry());
-        if (uint32 const aura = GetGuildAuraSpellId(botGuildId))
-            activeAuras.insert(aura);
-    }
-
-    // -------------------------------------------------------------------------
-    // 2. 收集队伍受惠目标：指挥官本人 + 全部存活随从
-    //    注意：个人专属福利（补给药水箱、晶水点心、修理折扣、人形怪金币加成）
-    //    绝不进入此列表，它们仅属于指挥官个人账户或特定实体。
-    // -------------------------------------------------------------------------
-    std::vector<Unit*> teamUnits;
-    teamUnits.push_back(player);
-    for (AdaptiveBotAI* bot : botGroup)
-    {
-        if (bot && bot->GetBotCreature() && bot->GetBotCreature()->IsAlive())
-            teamUnits.push_back(bot->GetBotCreature());
-    }
-
-    // -------------------------------------------------------------------------
-    // 3. 差量应用与清理：应有的挂上，不该有的摘掉。
-    //    遍历全表而非仅遍历 activeAuras，才能覆盖「随从阵亡 / 退队 / 转公会」
-    //    导致某光环本帧不应再存在时的反向清理，避免残留加成。
-    // -------------------------------------------------------------------------
-    for (Unit* target : teamUnits)
-    {
-        if (!target)
-            continue;
-
-        for (auto const& cfg : GUILD_CONFIGS)
-        {
-            if (cfg.auraSpellId == 0)
-                continue;
-
-            bool const shouldHave = (activeAuras.find(cfg.auraSpellId) != activeAuras.end());
-            bool const hasAura = target->HasAura(cfg.auraSpellId);
-
-            if (shouldHave && !hasAura)
-                target->AddAura(cfg.auraSpellId, target);
-            else if (!shouldHave && hasAura)
-                target->RemoveAurasDueToSpell(cfg.auraSpellId);
-        }
-    }
-}
-
-void BotGuildEscrowMgr::ClearTeamGuildAuras(Player* player)
-{
-    if (!player)
-        return;
-
-    // 解散/登出/退会等路径下队伍可能已不复存在，故此处不校验存活状态，
-    // 只要实体句柄仍可解析就必须摘净光环，杜绝残留加成穿透会籍失效边界。
-    std::vector<AdaptiveBotAI*> const botGroup = BotCommandScript::CollectBotGroup(player);
-
-    std::vector<Unit*> teamUnits;
-    teamUnits.push_back(player);
-    for (AdaptiveBotAI* bot : botGroup)
-    {
-        if (bot && bot->GetBotCreature())
-            teamUnits.push_back(bot->GetBotCreature());
-    }
-
-    for (Unit* unit : teamUnits)
-    {
-        if (!unit)
-            continue;
-
-        for (auto const& cfg : GUILD_CONFIGS)
-        {
-            if (cfg.auraSpellId != 0 && unit->HasAura(cfg.auraSpellId))
-                unit->RemoveAurasDueToSpell(cfg.auraSpellId);
-        }
-    }
 }
 
 void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
@@ -1084,28 +972,6 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
         return;
 
     ObjectGuid const guid = player->GetGUID();
-
-    // -------------------------------------------------------------------------
-    // 契约注销后的一次性光环收尾（登记点见 RemoveContract）。
-    // 契约注销分散在手动解散 / 退会 / 登出 / 制裁等多条路径，这些路径的注销点
-    // 不在本函数内，回收分支根本不会执行；若不设此兜底出口，契约一注销便再无
-    // 任何帧能进入契约驱动逻辑，随从贡献的外会战术光环将永久残留。
-    //
-    // 加锁范围必须完整覆盖 .empty() 判空：容器判空同样是一次读取，与写入方
-    // RemoveContract 的 insert 并发时构成数据竞争。虽然多数部署下两者都落在
-    // 世界主线程，但多线程地图更新（Multi-Threaded Map Updates）模式下不同
-    // 地图线程可能并发进入，故不再保留任何形式的锁外判空快路径。
-    // 判空与摘除合并为单次临界区内的原子读改，避免"判完即变"的 TOCTOU 窗口。
-    // -------------------------------------------------------------------------
-    bool needAuraCleanup = false;
-    {
-        std::lock_guard<std::mutex> lock(_lock);
-        if (!_pendingAuraCleanup.empty())
-            needAuraCleanup = (_pendingAuraCleanup.erase(guid) != 0);
-    }
-
-    if (needAuraCleanup)
-        UpdateTeamGuildAuras(player);
 
     // -------------------------------------------------------------------------
     // 契约自愈探针：招募入口不在本模块职责内，故由世界经济体自适应补建账户。
@@ -1164,7 +1030,7 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
     bool shouldSettle = false;
     BillingReason settleReason = BILLING_REASON_PERIODIC;
     bool shouldForceDisband = false;
-    bool syncAuras = false;
+
     bool send30MinWarning = false;
     bool send10MinWarning = false;
     bool shouldRecycleContract = false; // 空契约本帧注销标记（收尾动作一律推迟至锁外）
@@ -1219,19 +1085,8 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
         {
             // 同图复活（副本内跑尸复活 / 灵魂医者原地复活）同样需要重塑：
             // 此时地图 ID 未变，若不在此补一条触发通道，随从将永远停在尸体原地，
-            // 既不再入队也不再提供战术光环。
             triggerMapAvatarTransfer = true;
             botsToRespawn = contract.hiredBots;
-        }
-
-        // 公会战术光环同步节流：此处仅推进计时器与置位标记，
-        // 真正的 AddAura / RemoveAurasDueToSpell 一律挪到锁外执行，
-        // 与 _lock 彻底解耦以规避锁序倒置死锁。
-        contract.auraSyncTimer += diff;
-        if (contract.auraSyncTimer >= AURA_SYNC_INTERVAL_MS)
-        {
-            contract.auraSyncTimer = 0;
-            syncAuras = true;
         }
 
         // 双轨驱动之二：20 分钟周期轮询静默划扣。
@@ -1313,7 +1168,6 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
         //
         // 刻意置于临界区末尾而非开头：本判定会析构契约元素，令 contract 引用当场
         // 失效。放在末尾可保证 erase 是本作用域对契约的最后一次访问，杜绝悬垂引用；
-        // 同时只置位标记、绝不提前 return，把「剥离残留战术光环」这类必须脱离
         // _lock 执行的收尾动作交给锁外统一出口，避免被早退整段跳过。
         if (!contract.inGracePeriod && contract.pendingCopper == 0 && !hasBots)
         {
@@ -1323,15 +1177,8 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
         }
     }
 
-    // 核心修复点：空契约自愈回收帧必须在锁外补一次全队战术光环差量同步。
-    // 随从解散瞬间，其原生公会光环（战歌 3% 攻强 / 北伐军 4% 受疗 / 军情七处
-    // 3% 破甲等）仍挂在指挥官身上；而契约一旦注销，本函数后续再也不会进入契约
-    // 驱动逻辑，这些光环将永久残留，形成「解散随从即可白嫖外会战术光环」漏洞。
-    // 此处刻意选用差量同步而非无差别剥离：差量同步会摘净全部由随从贡献的光环，
-    // 同时保留指挥官自身职业契合的公会光环（个人会籍福利不因队伍解散而失效）。
     if (shouldRecycleContract)
     {
-        UpdateTeamGuildAuras(player);
         return;
     }
 
@@ -1366,10 +1213,6 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
         if (player->GetSession())
             ChatHandler(player->GetSession()).PSendSysMessage(
                 "|cffff0000【公会制裁】1 小时宽限期已过，由于恶意欠薪，您的冒险队伍已被强制解散，您已被列入艾泽拉斯公会失信人黑名单！|r");
-
-        // 制裁先行剥离光环：必须在随从遣返之前摘除全队战术光环，
-        // 否则随从离队后光环会因队伍清空而永久残留，形成「赖账仍享加成」漏洞。
-        ClearTeamGuildAuras(player);
 
         // 强制全队归巢：此时契约已被摘除，DoDisband 内部的尾款结清会自动跳过
         BotCommandScript::DoDisband(player);
@@ -1480,11 +1323,6 @@ void BotGuildEscrowMgr::Update(Player* player, uint32 diff)
 
     if (shouldSettle)
         SettleCurrentBill(player, settleReason);
-
-    // 光环动态同步：置于全部记账与制裁分支之后。上方强制遣散通道已 return，
-    // 绝不会在已解散的队伍上补挂光环。
-    if (syncAuras)
-        UpdateTeamGuildAuras(player);
 }
 
 // -----------------------------------------------------------------------------
@@ -1521,10 +1359,6 @@ void BotGuildEscrowPlayerScript::OnPlayerLogout(Player* player)
     // 否则金币不足的玩家只要登出一次即可赖掉全部欠款。
     BotCommandScript::DoDisband(player);
 
-    // 登出即脱离战术协同：补一次全队光环剥离，防止随从在下线瞬间带着
-    // 上一秒同步上来的公会光环置留于世界，直到下一轮 2 秒周期才被清理。
-    sBotGuildEscrowMgr->ClearTeamGuildAuras(player);
-
     // 离线防蒸发兜底：若因金币不足未能当场结清，内存契约此刻仍然存在，
     // 必须立即把欠款固化进数据库。否则服务器在玩家离线期间重启时，
     // 这条仅存于内存的在途账单会随进程一起消失，变相成为「登出逃单」通道。
@@ -1541,13 +1375,77 @@ void BotGuildEscrowPlayerScript::OnPlayerCreatureKill(Player* killer, Creature* 
     if (sBotGuildEscrowMgr->HasActiveContract(killer->GetGUID()))
         sBotGuildEscrowMgr->AccumulateKillFee(killer, killed);
 	
-	// 【军情七处特权】：击杀人形生物掉落金币额外增加 15%
-    if (sBotGuildEscrowMgr->GetPlayerGuildId(killer->GetGUID()) == GUILD_SI7_MERCENARIES)
-    {
-        if (killed->GetCreatureTemplate()->type == CREATURE_TYPE_HUMANOID)
+	uint8 const playerGuild = sBotGuildEscrowMgr->GetPlayerGuildId(killer->GetGUID());
+	if (playerGuild == GUILD_NONE)
+        return;
+	
+	uint32 const cType = killed->GetCreatureTemplate()->type;
+    uint8 const mobLevel = killed->GetLevel();
+	
+	// 2. 基础 15% 尸体金币增幅结算（全等级生效，纯整数四舍五入）
+	if (killed->loot.gold > 0)
+	{
+		bool matchGoldBonus = false;
+
+        // 军情七处：人形生物
+        if (playerGuild == GUILD_SI7_MERCENARIES && cType == CREATURE_TYPE_HUMANOID)
+            matchGoldBonus = true;
+        // 死亡猎手狂怒社：亡灵生物
+        else if (playerGuild == GUILD_DEATHSTALKERS && cType == CREATURE_TYPE_UNDEAD)
+            matchGoldBonus = true;
+        // 塞纳里奥议会：野兽 / 龙类
+        else if (playerGuild == GUILD_CENARION_EXPEDITION && (cType == CREATURE_TYPE_BEAST || cType == CREATURE_TYPE_DRAGONKIN))
+            matchGoldBonus = true;
+        // 探险者协会：机械 / 巨人 / 元素
+        else if (playerGuild == GUILD_EXPLORERS_LEAGUE && 
+                (cType == CREATURE_TYPE_MECHANICAL || cType == CREATURE_TYPE_GIANT || cType == CREATURE_TYPE_ELEMENTAL))
+            matchGoldBonus = true;
+
+        if (matchGoldBonus)
         {
-            uint32 const bonusMoney = static_cast<uint32>(killed->GetLevel() * 12); // 按等级动态奖励金币
-            killer->ModifyMoney(bonusMoney);
+            killed->loot.gold = (killed->loot.gold * 115 + 50) / 100;
+        }
+	}
+	
+	// 3. 伴生采样包判定：严格限制 68 级及以上诺森德怪物，避免低级小怪无成本刷高阶材料
+    if (mobLevel < 68)
+        return;
+	
+	// 25% 基础触发概率
+    if (urand(1, 100) > 25)
+        return;
+	
+	uint32 packageItemId = 0;
+	
+	// 探险者协会：机械 / 巨人 / 元素 -> 探险者出土勘探袋 (72111)
+    if (playerGuild == GUILD_EXPLORERS_LEAGUE)
+    {
+        if (cType == CREATURE_TYPE_MECHANICAL || cType == CREATURE_TYPE_GIANT || cType == CREATURE_TYPE_ELEMENTAL)
+            packageItemId = 72111;
+    }
+	
+	// 塞纳里奥议会：野兽 / 龙类 -> 塞纳里奥生态采样包 (72112)
+    else if (playerGuild == GUILD_CENARION_EXPEDITION)
+    {
+        if (cType == CREATURE_TYPE_BEAST || cType == CREATURE_TYPE_DRAGONKIN)
+            packageItemId = 72112;
+    }
+	
+	// 4. 背包安全存储与溢出提示
+    if (packageItemId != 0)
+    {
+        ItemPosCountVec dest;
+        InventoryResult const msg = killer->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, packageItemId, 1);
+        if (msg == EQUIP_ERR_OK)
+        {
+            Item* item = killer->StoreNewItem(dest, packageItemId, true);
+            killer->SendNewItem(item, 1, true, false);
+        }
+        else
+        {
+            if (killer->GetSession())
+                ChatHandler(killer->GetSession()).PSendSysMessage(
+                    "|cffff0000【公会后勤】您的背包已满，未能成功封装野外勘测采样包裹！|r");
         }
     }
 }
@@ -1556,7 +1454,6 @@ void BotGuildEscrowPlayerScript::OnPlayerUpdate(Player* player, uint32 p_time)
 {
     if (!player)
         return;
-
     sBotGuildEscrowMgr->Update(player, p_time);
 }
 
